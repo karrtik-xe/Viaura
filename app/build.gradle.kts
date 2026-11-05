@@ -41,7 +41,7 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "god.kartik.jwawir"
+    applicationId = "god.kartik.viaura"
     minSdk = 26
     targetSdk = 36
     versionCode = ciBuildNumber
