@@ -1,0 +1,8 @@
+{
+  "name": "Viaura",
+  "description": "Viaura – a fast, modern Android media player \u0026 hub.\n\n• Local video \u0026 audio player (MPV engine, hardware decoding, PiP, background play, gestures)\n• Subtitles: styling, external/embedded tracks, download \u0026 AI translation\n• Online Music \u0026 Video search with recommendations, lyrics and playlists\n• Downloads manager + torrent download support\n• CloudStream (.cs3) plugin \u0026 repository support\n• M3U / network streams, archive (ZIP/RAR) playback\n• Private vault, favourites, folders, sleep timer, Cast\n• Liquid Glass UI with themes and light/dark/AMOLED modes",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

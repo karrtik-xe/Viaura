@@ -1,0 +1,505 @@
+package com.example.ui.screens
+
+import com.example.ui.theme.Neutral
+
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.R
+import com.example.player.AudioPlaybackManager
+import com.example.ui.components.LinkThumbnail
+import com.example.ui.components.PlaylistFilterTabs
+import com.example.ui.components.StyledIcon
+import com.example.ui.theme.AccentGradient
+import com.example.ui.theme.AccentSkyBlue
+import com.example.ui.theme.DarkGlassBorder
+import com.example.ui.theme.DarkGlassSurface
+import com.example.ui.theme.DarkTextPrimary
+import com.example.ui.theme.DarkTextSecondary
+import com.example.ui.theme.LightGlassBorder
+import com.example.ui.theme.LightGlassSurface
+import com.example.ui.theme.LightTextPrimary
+import com.example.ui.theme.LightTextSecondary
+import com.example.torrent.TorrentPickerState
+import com.example.util.NetworkStreamResolver
+import com.example.util.RecentStreamEntry
+import com.example.util.RecentStreamStore
+import com.example.util.RecentThumbnails
+import com.example.util.media.MediaPluginStore
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/**
+ * "Network" bottom tab. Sections: Local Network (paste a direct media URL and play it), Media (plugin repositories) and one
+ * extra section per downloaded media plugin (category rows with thumbnails).
+ * Playback itself is NOT done here: the link is resolved and handed to [onPlayVideo], so it opens in the
+ * app's normal video player with its normal controls.
+ */
+@Composable
+fun NetworkTabContent(
+    isDark: Boolean,
+    onPlayVideo: (VideoItem, List<VideoItem>) -> Unit,
+    modifier: Modifier = Modifier,
+    onOpenDownloads: () -> Unit = {},
+    glassBlurTransparency: Float = 85f,
+    searchQuery: String = ""
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val clipboard = LocalClipboardManager.current
+
+    // initial tab = the one that was open before the player / detail page was opened
+    var section by rememberSaveable { mutableStateOf(MediaDetailState.lastSection) }
+    val mediaTick by MediaPluginStore.changes.collectAsState()
+    val mediaPlugins = remember(mediaTick) { MediaPluginStore.getInstalled(context) }
+    // only two sections now (Local Network, Media); a downloaded provider opens as a page from the Media list
+    val safeSection = section.coerceIn(0, 1)
+    var url by rememberSaveable { mutableStateOf("") }
+    var isResolving by remember { mutableStateOf(false) }
+    var downloadLink by remember { mutableStateOf<String?>(null) }
+    var pasteFlash by remember { mutableStateOf(false) }
+    var resolvingLabel by remember { mutableStateOf("Loading link…") }
+    val recentTick by RecentStreamStore.changes.collectAsState()
+    val recents = remember(recentTick) { RecentStreamStore.getAll(context) }
+
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
+    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
+    val outerBg = Color.Transparent
+
+    LaunchedEffect(pasteFlash) {
+        if (pasteFlash) {
+            delay(1400L)
+            pasteFlash = false
+        }
+    }
+
+    val canPlay = url.isNotBlank() && !isResolving
+
+    downloadLink?.let { link ->
+        com.example.ui.components.DownloadOptionsSheet(
+            isDark = isDark,
+            glassBlurTransparency = glassBlurTransparency,
+            url = link,
+            initialTitle = link,
+            sourceType = com.example.util.DownloadSourceType.NETWORK_LINK,
+            onDismiss = { downloadLink = null }
+        )
+    }
+
+    fun playLink(raw: String) {
+        if (isResolving) return
+        val normalized = NetworkStreamResolver.normalizeUrl(raw)
+        if (normalized == null) {
+            Toast.makeText(context, "Enter a valid link", Toast.LENGTH_SHORT).show()
+            return
+        }
+        focusManager.clearFocus()
+        // magnet / info hash / .torrent link: the picker lists the files; the chosen one is played while it downloads (or downloaded)
+        if (com.example.torrent.isTorrentSource(normalized)) {
+            TorrentPickerState.open(normalized)
+            return
+        }
+        resolvingLabel = "Checking the link…"
+        isResolving = true
+        scope.launch {
+            val stream = try {
+                NetworkStreamResolver.resolve(context, normalized)
+            } catch (_: Throwable) {
+                null
+            }
+            isResolving = false
+            if (stream == null) {
+                val reason = NetworkStreamResolver.lastError
+                Toast.makeText(
+                    context,
+                    if (reason.isNullOrBlank()) "This video can't play" else reason,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            if (stream.isAudio) {
+                // Music / audio-only link: play it in the app's audio player (same player as the Music tab).
+                val track = AudioTrackItem(
+                    id = -(kotlin.math.abs(("netaudio:" + normalized).hashCode().toLong())) - 1L,
+                    uri = android.net.Uri.parse(stream.videoUrl),
+                    title = stream.title,
+                    artist = stream.uploader ?: "Network",
+                    album = "Network",
+                    durationMs = stream.durationSec * 1000L,
+                    path = normalized,
+                    sizeBytes = 0L,
+                    format = "STREAM",
+                    thumbnailUrl = stream.thumbnailUrl
+                )
+                RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
+                try {
+                    AudioPlaybackManager.openFullScreen()
+                    AudioPlaybackManager.playTrack(context = context, track = track, newQueue = listOf(track))
+                } catch (_: Throwable) {
+                    Toast.makeText(context, "Could not start the audio player", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+            val item = VideoItem(
+                id = -(kotlin.math.abs(("netlink:" + normalized).hashCode().toLong())) - 1L,
+                uri = android.net.Uri.parse(normalized),
+                displayName = stream.title,
+                path = normalized,
+                sizeBytes = 0L,
+                durationMs = stream.durationSec * 1000L,
+                dateModified = System.currentTimeMillis() / 1000L,
+                isOnline = true,
+                thumbnailUrl = stream.thumbnailUrl,
+                channelName = stream.uploader,
+                isNetworkStream = true
+            )
+            RecentStreamStore.record(context, normalized, stream.title, stream.uploader, stream.thumbnailUrl)
+            // no thumbnail attached to this video: a frame from a random point of it is used instead
+            if (stream.thumbnailUrl.isNullOrBlank() && stream.videoUrl.startsWith("http")) {
+                RecentThumbnails.captureRandomFrame(context, normalized, stream.videoUrl, stream.durationSec)
+            }
+            onPlayVideo(item, listOf(item))
+        }
+    }
+
+    fun play() = playLink(url)
+
+    // A media title is open: its detail page replaces the whole Network tab until Back.
+    val detailPlugin = MediaDetailState.plugin
+    val detailPost = MediaDetailState.post
+    if (detailPlugin != null && detailPost != null) {
+        MediaDetailScreen(
+            plugin = detailPlugin,
+            post = detailPost,
+            isDark = isDark,
+            glassBlurTransparency = glassBlurTransparency,
+            onBack = { MediaDetailState.close() },
+            onPlayVideo = onPlayVideo,
+            modifier = modifier,
+            searchQuery = searchQuery
+        )
+        return
+    }
+
+    // A provider (downloaded media plugin) is open: its own page replaces the Network tab until Back.
+    val openProvider = MediaDetailState.provider?.let { p -> mediaPlugins.firstOrNull { it.value == p.value } }
+    if (MediaDetailState.provider != null && openProvider == null) MediaDetailState.provider = null
+    BackHandler(enabled = openProvider != null) { MediaDetailState.provider = null }
+    if (openProvider != null) {
+        MediaPluginPage(
+            plugin = openProvider,
+            isDark = isDark,
+            onOpenPost = { MediaDetailState.open(openProvider, it) },
+            onPlayVideo = onPlayVideo,
+            modifier = modifier,
+            searchQuery = searchQuery
+        )
+        return
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        // Same gradient "liquid" underline + slide animation as the Saved / Favourite tabs of a playlist.
+        PlaylistFilterTabs(
+            tabs = listOf("Local Network", "Media"),
+            selectedIndex = safeSection,
+            isDark = isDark,
+            onSelect = { section = it; MediaDetailState.lastSection = it },
+            // Snappier underline: switching Local Network <-> Media used to feel slow.
+            animationScale = 0.5f,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp)
+                .padding(top = 4.dp, bottom = 12.dp)
+        )
+
+        Crossfade(
+            targetState = safeSection,
+            animationSpec = tween(140),
+            label = "NetworkSection",
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        ) { current ->
+            if (current == 0) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // outer rounded card
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(28.dp))
+                            .background(outerBg)
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // URL field: link icon + hint + paste button
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(56.dp)
+                                .clip(RoundedCornerShape(22.dp))
+                                .background(surfaceColor)
+                                .border(1.dp, borderColor, RoundedCornerShape(22.dp))
+                                .padding(start = 16.dp, end = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.viaura_link,
+                                contentDescription = null,
+                                tint = secondaryText.copy(alpha = 0.85f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                                if (url.isEmpty()) {
+                                    Text(
+                                        text = "Enter stream URL...",
+                                        fontSize = 15.sp,
+                                        color = secondaryText.copy(alpha = 0.8f),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                BasicTextField(
+                                    value = url,
+                                    onValueChange = { url = it },
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontFamily = com.example.ui.theme.LocalAppFontFamily.current,
+                                        color = primaryText,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Normal
+                                    ),
+                                    cursorBrush = SolidColor(AccentSkyBlue),
+                                    keyboardOptions = KeyboardOptions(
+                                        keyboardType = KeyboardType.Uri,
+                                        imeAction = ImeAction.Go
+                                    ),
+                                    keyboardActions = KeyboardActions(onGo = { play() }),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        val text = clipboard.getText()?.text?.trim().orEmpty()
+                                        if (text.isNotEmpty()) {
+                                            url = text
+                                            pasteFlash = true
+                                        } else {
+                                            Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                StyledIcon(
+                                    drawableRes = if (pasteFlash) R.drawable.viaura_pasted else R.drawable.viaura_paste,
+                                    contentDescription = "Paste link",
+                                    tint = if (pasteFlash) AccentSkyBlue else primaryText.copy(alpha = 0.85f),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        // Download button: the same link, saved with the quality / audio / subtitles chosen in the panel
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (isDark) Neutral.D1E293B else Color(0xFFD5D9DD))
+                                .then(
+                                    if (canPlay) Modifier.clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) {
+                                        val n = NetworkStreamResolver.normalizeUrl(url)
+                                        if (n == null) {
+                                            Toast.makeText(context, "Enter a valid link", Toast.LENGTH_SHORT).show()
+                                        } else if (com.example.torrent.isTorrentSource(n)) {
+                                            TorrentPickerState.open(n)
+                                        } else {
+                                            focusManager.clearFocus()
+                                            downloadLink = n
+                                        }
+                                    } else Modifier
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.viaura_download_minimalistic,
+                                contentDescription = "Download",
+                                tint = if (canPlay) AccentSkyBlue else secondaryText.copy(alpha = 0.75f),
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        // Play button: grey while empty, gradient when a link is typed
+                        val playAlpha by animateFloatAsState(
+                            targetValue = if (canPlay || isResolving) 1f else 0f,
+                            animationSpec = tween(220),
+                            label = "NetworkPlayEnabled"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (isDark) Neutral.D1E293B else Color(0xFFD5D9DD))
+                                .then(
+                                    if (canPlay || isResolving) Modifier.clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { play() } else Modifier
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(AccentGradient, alpha = playAlpha)
+                            )
+                            if (isResolving) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.6.dp
+                                )
+                            } else {
+                                StyledIcon(
+                                    drawableRes = R.drawable.viaura_play_solid,
+                                    contentDescription = "Play",
+                                    tint = if (canPlay) Color.White else secondaryText.copy(alpha = 0.75f),
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
+                        }
+                    }
+                    if (isResolving) {
+                        Text(
+                            text = resolvingLabel,
+                            fontSize = 12.5.sp,
+                            color = secondaryText,
+                            modifier = Modifier.padding(start = 18.dp, top = 10.dp)
+                        )
+                    }
+
+                    // ---- Recent Streams: everything played from here (links) so it can be reopened ----
+                    if (recents.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 18.dp, end = 12.dp, top = 22.dp, bottom = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Recent Streams",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = primaryText,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "Clear all",
+                                fontSize = 13.sp,
+                                color = AccentSkyBlue,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null
+                                    ) { RecentStreamStore.clear(context) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(recents, key = { it.url }) { entry ->
+                                RecentStreamRow(
+                                    entry = entry,
+                                    primaryText = primaryText,
+                                    secondaryText = secondaryText,
+                                    surfaceColor = surfaceColor,
+                                    borderColor = borderColor,
+                                    onClick = { playLink(entry.url) },
+                                    onRemove = { RecentStreamStore.remove(context, entry.url) },
+                                    onDownload = { downloadLink = entry.url }
+                                )
+                            }
+                            item { Spacer(modifier = Modifier.height(24.dp)) }
+                        }
+                    }
+                }
+            } else {
+                MediaPluginManager(
+                    isDark = isDark,
+                    onOpenPlugin = { MediaDetailState.provider = it }
+                )
+            }
+        }
+    }
+
+
+}

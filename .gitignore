@@ -1,0 +1,35 @@
+*.iml
+.gradle
+.kotlin
+/.kotlin/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+.env
+# fetched by .github/workflows/build-apk.yml on every build (kept out of the repo to keep it small)
+/app/src/main/cpp/third_party/quickjs/
+/app/src/ytdlp/assets/ytdl/python313.zip
+/app/src/ytdlp/assets/cacert.pem
+/app/src/main/assets/fonts/GoNotoCurrent-Regular.ttf
+# module build outputs (app/build, app/src/cloudstream-lib/build)
+build/
+# unpacked from app/src/cloudstream-lib.zip by .github/workflows/build-apk.yml (keeps the file list short)
+/app/src/cloudstream-lib/
+# unpacked from app/src/viaura-icons.zip by .github/workflows/build-apk.yml (keeps the file list short)
+/app/src/main/res/drawable/viaura_*.xml
+# unpacked from app/src/*-src.zip by .github/workflows/build-apk.yml (keeps the file list short)
+/app/src/main/java/com/example/lyrics/providers/
+/app/src/main/java/com/example/widgets/
+/app/src/test/java/
+
+# signing keys must never be committed (they live in GitHub Secrets)
+*.jks
+*.keystore
+!debug.keystore
+viaura-release.jks.base64.txt
+my-upload-key.jks

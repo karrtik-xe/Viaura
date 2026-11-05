@@ -1,0 +1,288 @@
+package com.example.util
+
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.schabi.newpipe.extractor.stream.StreamInfoItem
+import org.schabi.newpipe.extractor.stream.StreamType
+import java.util.Locale
+
+/**
+ * Online Video — resolves YouTube watch URLs to direct streams through NewPipeExtractor, exactly like
+ * [OnlineMusicService] does for audio (same Downloader / same single NewPipe.init()). Search, channel search
+ * and paging are shared with OnlineMusicService (it returns OnlineTrackResult for any video).
+ */
+object OnlineVideoService {
+    private const val TAG = "OnlineVideoService"
+
+    /** Path prefix that marks a VideoItem as an online video (the rest is the YouTube watch URL). */
+    const val ONLINE_VIDEO_PATH_PREFIX = "online-video://"
+
+    fun toWatchUrl(path: String): String = path.removePrefix(ONLINE_VIDEO_PATH_PREFIX)
+
+    private val playbackCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, OnlineVideoPlayback>>()
+    // YouTube stream URLs expire after a few hours; keep a short-lived cache only for fast re-opening.
+    private const val CACHE_TTL_MS = 20 * 60 * 1000L
+
+    suspend fun resolvePlayback(watchUrl: String, forceRefresh: Boolean = false): OnlineVideoPlayback? =
+        OnlineMusicService.cancellableIo {
+            if (!forceRefresh) {
+                playbackCache[watchUrl]?.let { (t, v) ->
+                    if (System.currentTimeMillis() - t < CACHE_TTL_MS) return@cancellableIo v
+                }
+            }
+            try {
+                OnlineMusicService.ensureInit()
+                val target = watchUrl.replace("music.youtube.com", "www.youtube.com")
+                val info = StreamInfo.getInfo(ServiceList.YouTube, target)
+
+                // ---- video qualities: best stream per (height, fps) ----
+                val qualities = LinkedHashMap<String, OnlineVideoQuality>()
+                fun add(v: org.schabi.newpipe.extractor.stream.VideoStream, videoOnly: Boolean) {
+                    if (!v.isUrl) return
+                    val h = try { v.height } catch (_: Throwable) { 0 }
+                    if (h <= 0) return
+                    val fps = try { v.fps } catch (_: Throwable) { 30 }
+                    val label = if (fps > 30) "${h}p$fps" else "${h}p"
+                    val prev = qualities[label]
+                    // prefer mp4/avc (best hw-decoder support) over webm when both exist for the same label
+                    val isMp4 = try { v.format?.suffix.equals("mp4", true) } catch (_: Throwable) { false }
+                    val prevIsMp4 = prev?.url?.contains("mime=video%2Fmp4") == true || prev?.url?.contains("mime=video/mp4") == true
+                    if (prev == null || (isMp4 && !prevIsMp4) || (prev.isVideoOnly && !videoOnly)) {
+                        qualities[label] = OnlineVideoQuality(label, h, fps, v.content, videoOnly)
+                    }
+                }
+                (info.videoOnlyStreams ?: emptyList()).forEach { add(it, true) }
+                // muxed streams are usually capped at 360p/720p; only used when no better adaptive label exists
+                (info.videoStreams ?: emptyList()).forEach { s ->
+                    val h = try { s.height } catch (_: Throwable) { 0 }
+                    val fps = try { s.fps } catch (_: Throwable) { 30 }
+                    val label = if (fps > 30) "${h}p$fps" else "${h}p"
+                    if (!qualities.containsKey(label)) add(s, false)
+                }
+                val sortedQualities = qualities.values.sortedWith(
+                    compareByDescending<OnlineVideoQuality> { it.height }.thenByDescending { it.fps }
+                )
+
+                // ---- audio tracks: every available language (original, dubbed, YouTube auto-dubbed) ----
+                val byTrack = LinkedHashMap<String, org.schabi.newpipe.extractor.stream.AudioStream>()
+                (info.audioStreams ?: emptyList()).filter { it.isUrl }.forEach { a ->
+                    val trackId = try { a.audioTrackId } catch (_: Throwable) { null }
+                    val loc = try { a.audioLocale?.toLanguageTag() } catch (_: Throwable) { null }
+                    val key = trackId ?: loc ?: "default"
+                    val prev = byTrack[key]
+                    if (prev == null || a.averageBitrate > prev.averageBitrate) byTrack[key] = a
+                }
+                val audios = byTrack.values.map { a ->
+                    val name = try { a.audioTrackName } catch (_: Throwable) { null }
+                    val loc = try { a.audioLocale } catch (_: Throwable) { null }
+                    val typeName = try { a.audioTrackType?.name } catch (_: Throwable) { null }
+                    val lang = loc?.language ?: ""
+                    val langName = loc?.getDisplayLanguage(Locale.getDefault())?.takeIf { it.isNotBlank() }
+                    val title = when {
+                        !name.isNullOrBlank() -> name
+                        !langName.isNullOrBlank() -> langName
+                        else -> "Original"
+                    }
+                    val suffix = when (typeName) {
+                        "ORIGINAL" -> " (original)"
+                        "DUBBED" -> " (dubbed)"
+                        "DESCRIPTIVE" -> " (descriptive)"
+                        else -> ""
+                    }
+                    OnlineAudioStreamInfo(
+                        url = a.content,
+                        title = if (name != null && (name.contains("original", true) || name.contains("dub", true) || name.contains("auto", true))) title else title + suffix,
+                        language = lang,
+                        bitrate = a.averageBitrate,
+                        isOriginal = typeName == "ORIGINAL" || typeName == null && byTrack.size == 1
+                    )
+                }.sortedWith(compareByDescending<OnlineAudioStreamInfo> { it.isOriginal }.thenByDescending { it.bitrate })
+
+                // ---- chapters ----
+                val chapters = try {
+                    (info.streamSegments ?: emptyList()).map {
+                        OnlineChapterInfo(it.title ?: "", it.startTimeSeconds.toLong() * 1000L)
+                    }
+                } catch (_: Throwable) { emptyList() }
+
+                // ---- subtitle tracks: every language the video has (manual and automatic), one file per track ----
+                val subtitles = try {
+                    val seen = HashSet<String>()
+                    (info.subtitles ?: emptyList())
+                        .filter { it.isUrl }
+                        .sortedBy { if (it.format?.suffix.equals("vtt", true)) 0 else 1 } // WebVTT first: the player reads it directly
+                        .mapNotNull { s ->
+                            val tag = try { s.languageTag } catch (_: Throwable) { "" }.orEmpty()
+                            val auto = try { s.isAutoGenerated } catch (_: Throwable) { false }
+                            if (!seen.add(tag + "|" + auto)) return@mapNotNull null
+                            val name = (try { s.displayLanguageName } catch (_: Throwable) { null }).orEmpty().ifBlank { tag.ifBlank { "Subtitle" } }
+                            com.example.util.media.MediaSubtitle(if (auto) "$name (auto)" else name, tag, s.content)
+                        }
+                } catch (_: Throwable) { emptyList() }
+
+                if (sortedQualities.isEmpty()) return@cancellableIo null
+                val result = OnlineVideoPlayback(
+                    pageUrl = watchUrl,
+                    title = info.name ?: "",
+                    uploader = info.uploaderName ?: "",
+                    durationSec = info.duration.coerceAtLeast(0L),
+                    qualities = sortedQualities,
+                    audios = audios,
+                    chapters = chapters,
+                    subtitles = subtitles
+                )
+                playbackCache[watchUrl] = System.currentTimeMillis() to result
+                result
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e(TAG, "resolvePlayback('$watchUrl') failed: ${e.message}", e)
+                null
+            }
+        }
+
+    fun cachedResolutionLabel(watchUrl: String): String? = playbackCache[watchUrl]?.second?.qualities?.firstOrNull()?.label
+
+    /** Picks the default quality: the user's last choice if available, else the best one up to 1080p. */
+    fun pickDefaultQuality(qualities: List<OnlineVideoQuality>, preferredLabel: String?): OnlineVideoQuality? {
+        if (qualities.isEmpty()) return null
+        preferredLabel?.let { l -> qualities.firstOrNull { it.label == l }?.let { return it } }
+        return qualities.firstOrNull { it.height <= 1080 } ?: qualities.last()
+    }
+
+    /** Label of the "Auto" entry in the quality list: quality follows the internet speed by itself. */
+    const val AUTO_QUALITY = "Auto"
+
+    /** Rough stream bitrate (kbit/s) of a YouTube video-only stream at [height]. */
+    private fun estimatedKbps(height: Int, fps: Int): Int {
+        val base = when {
+            height >= 2160 -> 16000
+            height >= 1440 -> 9000
+            height >= 1080 -> 4500
+            height >= 720 -> 2500
+            height >= 480 -> 1100
+            height >= 360 -> 650
+            height >= 240 -> 350
+            else -> 180
+        }
+        return if (fps > 30) (base * 1.5).toInt() else base
+    }
+
+    /** 30 fps (or lowest-fps) ladder, best first — the steps Auto moves along. */
+    private fun ladder(qualities: List<OnlineVideoQuality>): List<OnlineVideoQuality> {
+        val l = qualities.filter { it.fps <= 30 }
+        return (if (l.isEmpty()) qualities else l).sortedByDescending { it.height }
+    }
+
+    /** First pick for Auto: the best quality (max 1080p) the current network can sustain. */
+    fun pickAutoQuality(context: android.content.Context, qualities: List<OnlineVideoQuality>): OnlineVideoQuality? {
+        val lad = ladder(qualities)
+        if (lad.isEmpty()) return null
+        val kbps = try {
+            val cm = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            cm.getNetworkCapabilities(cm.activeNetwork)?.linkDownstreamBandwidthKbps ?: 0
+        } catch (_: Throwable) { 0 }
+        if (kbps <= 0) return lad.firstOrNull { it.height <= 480 } ?: lad.last()
+        val usable = kbps * 0.6
+        return lad.firstOrNull { it.height <= 1080 && estimatedKbps(it.height, it.fps) * 1.3 <= usable } ?: lad.last()
+    }
+
+    /** Highest quality not above [maxHeight] for a "like 720p" request — used when preferred label is missing. */
+    /** Everything the portrait "channel style" player shows under the video (title card + recommendations). */
+    suspend fun fetchWatchDetails(watchUrl: String): OnlineWatchDetails? =
+        OnlineMusicService.cancellableIo {
+            watchDetailsCache[watchUrl]?.let { (t, v) -> if (System.currentTimeMillis() - t < CACHE_TTL_MS) return@cancellableIo v }
+            try {
+                OnlineMusicService.ensureInit()
+                val target = watchUrl.replace("music.youtube.com", "www.youtube.com")
+                val info = StreamInfo.getInfo(ServiceList.YouTube, target)
+                val related = (info.relatedItems ?: emptyList())
+                    .filterIsInstance<StreamInfoItem>()
+                    .filter { it.url.isNotBlank() && it.url != target && it.url != watchUrl && !isLiveOrShort(it) }
+                    .distinctBy { it.url }
+                    .map { item ->
+                        OnlineTrackResult(
+                            videoUrl = item.url,
+                            title = item.name?.takeIf { it.isNotBlank() } ?: "Video",
+                            artist = (item.uploaderName ?: "").trim(),
+                            durationSec = item.duration.coerceAtLeast(0L),
+                            thumbnailUrl = OnlineMusicService.extractBestThumbnailUrl(item.thumbnails, item.url),
+                            uploadDateText = try { item.textualUploadDate } catch (_: Throwable) { null },
+                            viewCount = try { item.viewCount.coerceAtLeast(0L) } catch (_: Throwable) { 0L }
+                        )
+                    }
+                val details = OnlineWatchDetails(
+                    title = info.name ?: "",
+                    uploader = info.uploaderName ?: "",
+                    uploaderUrl = try { info.uploaderUrl?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null },
+                    avatarUrl = try { OnlineMusicService.extractBestThumbnailUrl(info.uploaderAvatars, null) } catch (_: Throwable) { null },
+                    subscriberCount = try { info.uploaderSubscriberCount } catch (_: Throwable) { -1L },
+                    isVerified = try { info.isUploaderVerified } catch (_: Throwable) { false },
+                    likeCount = try { info.likeCount } catch (_: Throwable) { -1L },
+                    dislikeCount = try { info.dislikeCount } catch (_: Throwable) { -1L },
+                    viewCount = try { info.viewCount } catch (_: Throwable) { -1L },
+                    uploadDateText = try { info.textualUploadDate } catch (_: Throwable) { null },
+                    description = try { info.description?.content.orEmpty() } catch (_: Throwable) { "" },
+                    related = related
+                )
+                watchDetailsCache[watchUrl] = System.currentTimeMillis() to details
+                details
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e(TAG, "fetchWatchDetails('$watchUrl') failed: ${e.message}", e)
+                null
+            }
+        }
+
+    private val watchDetailsCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, OnlineWatchDetails>>()
+
+    /** First page of comments (read only). Returns null when the video has comments turned off or they cannot be loaded. */
+    suspend fun fetchComments(watchUrl: String): OnlineCommentPage? =
+        OnlineMusicService.cancellableIo {
+            try {
+                OnlineMusicService.ensureInit()
+                val target = watchUrl.replace("music.youtube.com", "www.youtube.com")
+                val info = org.schabi.newpipe.extractor.comments.CommentsInfo.getInfo(ServiceList.YouTube, target)
+                val total = try {
+                    (info.javaClass.getMethod("getCommentCount").invoke(info) as? Int)?.toLong() ?: -1L
+                } catch (_: Throwable) { -1L }
+                val items = info.relatedItems.map { it.toOnlineComment() }
+                OnlineCommentPage(items, total, if (info.hasNextPage()) info.nextPage else null, info)
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e(TAG, "fetchComments('$watchUrl') failed: ${e.message}", e)
+                null
+            }
+        }
+
+    suspend fun fetchMoreComments(prev: OnlineCommentPage): OnlineCommentPage? =
+        OnlineMusicService.cancellableIo {
+            try {
+                val page = prev.nextPage ?: return@cancellableIo null
+                val info = prev.info ?: return@cancellableIo null
+                val more = org.schabi.newpipe.extractor.comments.CommentsInfo.getMoreItems(ServiceList.YouTube, info, page)
+                OnlineCommentPage(more.items.map { it.toOnlineComment() }, prev.total, if (more.hasNextPage()) more.nextPage else null, info)
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                null
+            }
+        }
+
+    private fun org.schabi.newpipe.extractor.comments.CommentsInfoItem.toOnlineComment(): OnlineComment = OnlineComment(
+        author = try { uploaderName ?: "" } catch (_: Throwable) { "" },
+        avatarUrl = try { OnlineMusicService.extractBestThumbnailUrl(uploaderAvatars, null) } catch (_: Throwable) { null },
+        text = try { commentText?.content ?: "" } catch (_: Throwable) { "" },
+        likesText = try { textualLikeCount ?: "" } catch (_: Throwable) { "" },
+        dateText = try { textualUploadDate ?: "" } catch (_: Throwable) { "" },
+        isPinned = try { isPinned } catch (_: Throwable) { false }
+    )
+
+    fun isLiveOrShort(item: StreamInfoItem): Boolean =
+        item.streamType == StreamType.LIVE_STREAM || item.streamType == StreamType.AUDIO_LIVE_STREAM ||
+            (item.duration in 1..60)
+}
+
+/** Best quality label (e.g. "1080p") if this video was already resolved in this session — shown as the Resolution field. */
+fun OnlineVideoService.cachedBestLabel(watchUrl: String): String? = cachedResolutionLabel(watchUrl)

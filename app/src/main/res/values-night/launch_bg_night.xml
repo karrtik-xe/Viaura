@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app's own theme (Light by default) decides its colours, not the phone's dark mode: keep the same colour as the light one so
+         there is no dark flash before the launch animation. MainActivity re-paints the window for a Dark app theme right away. -->
+    <color name="launch_window_bg">#FFF8FAFC</color>
+</resources>

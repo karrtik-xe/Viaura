@@ -1,0 +1,250 @@
+package com.example.ui.components
+
+import com.example.ui.theme.Neutral
+
+import com.example.ui.theme.AccentMid
+import android.content.Context
+import android.content.Intent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.R
+import com.example.ui.theme.AccentGradient
+import com.example.ui.theme.AccentPink
+import com.example.ui.theme.AccentSkyBlue
+import com.example.ui.theme.DarkTextPrimary
+import com.example.ui.theme.LightTextPrimary
+import kotlinx.coroutines.launch
+
+/**
+ * Right-to-left swipe on an online card. The card only follows the finger a little (it is NOT selected / highlighted),
+ * and [onTriggered] fires once when the swipe is long enough so the screen can show [OnlineQuickActionBar].
+ * Vertical scrolling and taps keep working because only horizontal drags are claimed.
+ */
+fun Modifier.swipeLeftForActions(enabled: Boolean = true, onTriggered: () -> Unit): Modifier = composed {
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { 56.dp.toPx() }
+    val maxPx = with(density) { 48.dp.toPx() }
+    val offset = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val trigger by rememberUpdatedState(onTriggered)
+
+    this
+        .pointerInput(enabled) {
+            if (!enabled) return@pointerInput
+            var total = 0f
+            detectHorizontalDragGestures(
+                onDragStart = { total = 0f },
+                onDragEnd = {
+                    val fire = total <= -thresholdPx
+                    total = 0f
+                    scope.launch { offset.animateTo(0f) }
+                    if (fire) trigger()
+                },
+                onDragCancel = {
+                    total = 0f
+                    scope.launch { offset.animateTo(0f) }
+                },
+                onHorizontalDrag = { change, dx ->
+                    change.consume()
+                    total += dx
+                    // only right -> left is used; the card never moves to the right
+                    scope.launch { offset.snapTo(total.coerceIn(-maxPx, 0f)) }
+                }
+            )
+        }
+        .graphicsLayer { translationX = offset.value }
+}
+
+/**
+ * Bottom floating glass toolbar (same look as the selection toolbar of the offline lists):
+ * Play next · Play last · Playlist · Watch later · Not interested · Share.
+ */
+@Composable
+fun OnlineQuickActionBar(
+    isDark: Boolean,
+    alphaRatio: Float,
+    isSavedForLater: Boolean,
+    onPlayNext: (() -> Unit)? = null,
+    onPlayLast: (() -> Unit)? = null,
+    onSaveToPlaylist: () -> Unit,
+    onWatchLater: () -> Unit,
+    onNotInterested: (() -> Unit)? = null,
+    onShare: () -> Unit,
+    onDownload: (() -> Unit)? = null,
+    /** Online folders (playlists): heart that adds / removes the item from Favourites. */
+    isFavourite: Boolean = false,
+    onFavourite: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val barBg = if (isDark) {
+        if (alphaRatio >= 0.99f) Neutral.D0F172A
+        else Neutral.D0F172A.copy(alpha = (0.70f + 0.30f * alphaRatio).coerceIn(0.40f, 1.0f))
+    } else {
+        if (alphaRatio >= 0.99f) Neutral.FFFFFF
+        else Neutral.FFFFFF.copy(alpha = (0.75f + 0.25f * alphaRatio).coerceIn(0.45f, 1.0f))
+    }
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val barShape = RoundedCornerShape(20.dp)
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            // same thin size + corner radius as the selection toolbar of the offline lists (glass ON and OFF)
+            .height(54.dp)
+            .liquidGlassToolbarOr(barShape, isDark) {
+                shadow(
+                    elevation = 18.dp,
+                    shape = barShape,
+                    ambientColor = AccentSkyBlue.copy(alpha = 0.35f),
+                    spotColor = AccentPink.copy(alpha = 0.40f)
+                )
+                    .clip(barShape)
+                    .background(barBg)
+                    .border(width = 1.5.dp, brush = AccentGradient, shape = barShape)
+            }
+            .padding(horizontal = 0.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        // Items keep a comfortable fixed width and the row scrolls sideways, so more actions can be added later.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onPlayNext != null) {
+                QuickActionItem(R.drawable.viaura_next_in_queue, "Play next", AccentSkyBlue, Modifier.width(78.dp), onPlayNext)
+            }
+            if (onPlayLast != null) {
+                QuickActionItem(R.drawable.viaura_last_in_queue, "Play last", AccentMid, Modifier.width(78.dp), onPlayLast)
+            }
+            QuickActionItem(R.drawable.viaura_playlist_video, "Playlist", AccentPink, Modifier.width(78.dp), onSaveToPlaylist)
+            if (onFavourite != null) {
+                QuickActionItem(
+                    R.drawable.viaura_favourite_heart,
+                    if (isFavourite) "Favourited" else "Favourite",
+                    if (isFavourite) Color(0xFFFF3366) else primaryText,
+                    Modifier.width(78.dp),
+                    onFavourite
+                )
+            }
+            QuickActionItem(
+                R.drawable.viaura_watch_later,
+                if (isSavedForLater) "Remove" else "Watch later",
+                Color(0xFFA78BFA),
+                Modifier.width(78.dp),
+                onWatchLater
+            )
+            if (onDownload != null) {
+                QuickActionItem(R.drawable.viaura_download_minimalistic, "Download", AccentSkyBlue, Modifier.width(78.dp), onDownload)
+            }
+            if (onNotInterested != null) {
+                QuickActionItem(R.drawable.viaura_block, "Not interested", Color(0xFFEF4444), Modifier.width(78.dp), onNotInterested)
+            }
+            QuickActionItem(R.drawable.viaura_share, "Share", primaryText, Modifier.width(78.dp), onShare)
+        }
+    }
+}
+
+@Composable
+private fun QuickActionItem(
+    drawableRes: Int,
+    label: String,
+    tint: Color,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 2.dp, vertical = 2.dp)
+    ) {
+        StyledIcon(
+            drawableRes = drawableRes,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.height(1.dp))
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = tint,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
+fun shareOnlineLink(context: Context, title: String, url: String) {
+    try {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, "$title\n$url")
+        }
+        context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: Throwable) {}
+}
+
+/** What the swipe toolbar's Download button asks for. */
+data class DownloadRequest(val url: String, val title: String, val author: String?, val thumbnail: String?, val audio: Boolean)
+
+/** Shows the download panel (real qualities, sizes, audio tracks, subtitles) for [request]. */
+@Composable
+fun DownloadRequestHost(request: DownloadRequest?, isDark: Boolean, glassBlurTransparency: Float, onDismiss: () -> Unit) {
+    val r = request ?: return
+    DownloadOptionsSheet(
+        isDark = isDark,
+        glassBlurTransparency = glassBlurTransparency,
+        url = r.url,
+        initialTitle = r.title,
+        initialAuthor = r.author,
+        initialThumbnail = r.thumbnail,
+        startWithAudio = r.audio,
+        audioOnly = r.audio, // opened from Online Audio: no Video tab / video section at all
+        onDismiss = onDismiss
+    )
+}

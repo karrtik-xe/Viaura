@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="shared_cache" path="shared/" />
+    <!-- In-app updater: the APK downloaded from GitHub (GithubReleaseUpdater.kt) is installed from here -->
+    <cache-path name="app_updates" path="updates/" />
+    <files-path name="shared_files" path="shared/" />
+    <!-- Covers Movies/Download/DCIM/SD-card etc. — where the user's actual video/audio files
+         live — since VideoFileOperations.kt/AudioFileOperations.kt share files directly from their
+         real location on shared storage, not from an app-private copy. -->
+    <external-path name="external_media" path="." />
+</paths>

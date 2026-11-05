@@ -1,0 +1,235 @@
+package com.example.download
+
+import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+
+/** HLS (.m3u8) and DASH-fragment streams: every segment is fetched in parallel, finished segments are kept, then joined into one file. */
+object SegmentFetch {
+    private class Segment(
+        val url: String,
+        val rangeStart: Long = -1L,
+        val rangeLen: Long = -1L,
+        val keyUri: String? = null,
+        val iv: ByteArray? = null,
+        val sequence: Long = 0L
+    )
+
+    private class Playlist(val segments: List<Segment>, val initSegment: Segment?, val fMp4: Boolean)
+
+    private fun resolve(base: String, ref: String): String =
+        try { URI(base.substringBefore('#')).resolve(ref.trim()).toString() } catch (_: Throwable) { ref }
+
+    private fun attr(line: String, name: String): String? {
+        val m = Regex("(?:^|[,:])" + Regex.escape(name) + "=(\"[^\"]*\"|[^,]*)", RegexOption.IGNORE_CASE).find(line) ?: return null
+        return m.groupValues[1].trim('"')
+    }
+
+    private fun hexIv(text: String): ByteArray {
+        val hex = text.removePrefix("0x").removePrefix("0X").padStart(32, '0')
+        return ByteArray(16) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }
+
+    private fun fetchText(context: Context, url: String, headers: Map<String, String>, token: CancelToken): String =
+        HttpFetch.call(context, HttpFetch.request(url, headers), token) { r ->
+            if (r.code !in 200..299) throw if (r.code == 403 || r.code == 404 || r.code == 410) LinkExpiredException("HTTP ${r.code}") else HttpStatusException(r.code, "HTTP ${r.code}")
+            r.body?.string().orEmpty()
+        }
+
+    private fun parseHls(context: Context, startUrl: String, headers: Map<String, String>, token: CancelToken): Playlist {
+        var url = startUrl
+        var text = fetchText(context, url, headers, token)
+        if (!text.trimStart('\uFEFF', ' ', '\n', '\r').startsWith("#EXTM3U")) throw IOException("this is not an HLS playlist")
+        if (text.contains("#EXT-X-STREAM-INF")) {
+            // a master playlist: its highest rendition
+            val lines = text.lines().map { it.trim() }
+            var bestBw = -1L
+            var bestUrl: String? = null
+            for (i in lines.indices) {
+                if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+                val bw = attr(lines[i], "BANDWIDTH")?.toLongOrNull() ?: 0L
+                val next = lines.drop(i + 1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") } ?: continue
+                if (bw > bestBw) { bestBw = bw; bestUrl = next }
+            }
+            url = resolve(url, bestUrl ?: throw IOException("the playlist lists no video"))
+            text = fetchText(context, url, headers, token)
+        }
+        if (!text.contains("#EXT-X-ENDLIST")) throw IllegalStateException("Live streams can't be downloaded")
+        var keyUri: String? = null
+        var keyIv: ByteArray? = null
+        var seq = 0L
+        var init: Segment? = null
+        var pendingRange: Pair<Long, Long>? = null
+        var lastRangeEnd = 0L
+        val out = ArrayList<Segment>()
+        for (raw in text.lines()) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            when {
+                line.startsWith("#EXT-X-MEDIA-SEQUENCE:") -> seq = line.substringAfter(':').trim().toLongOrNull() ?: 0L
+                line.startsWith("#EXT-X-KEY:") -> {
+                    val method = attr(line, "METHOD") ?: "NONE"
+                    when {
+                        method.equals("NONE", true) -> { keyUri = null; keyIv = null }
+                        method.equals("AES-128", true) -> {
+                            keyUri = attr(line, "URI")?.let { resolve(url, it) }
+                            keyIv = attr(line, "IV")?.let { hexIv(it) }
+                        }
+                        else -> throw IllegalStateException("This stream uses $method encryption, which can't be downloaded")
+                    }
+                }
+                line.startsWith("#EXT-X-MAP:") -> {
+                    val uri = attr(line, "URI") ?: continue
+                    val br = attr(line, "BYTERANGE")
+                    var rs = -1L
+                    var rl = -1L
+                    if (br != null) {
+                        rl = br.substringBefore('@').toLongOrNull() ?: -1L
+                        rs = br.substringAfter('@', "0").toLongOrNull() ?: 0L
+                    }
+                    init = Segment(resolve(url, uri), rs, rl)
+                }
+                line.startsWith("#EXT-X-BYTERANGE:") -> {
+                    val v = line.substringAfter(':').trim()
+                    val len = v.substringBefore('@').toLongOrNull() ?: 0L
+                    val start = if (v.contains('@')) v.substringAfter('@').toLongOrNull() ?: 0L else lastRangeEnd
+                    pendingRange = start to len
+                    lastRangeEnd = start + len
+                }
+                !line.startsWith("#") -> {
+                    val pr = pendingRange
+                    out.add(Segment(resolve(url, line), pr?.first ?: -1L, pr?.second ?: -1L, keyUri, keyIv, seq))
+                    pendingRange = null
+                    seq++
+                }
+            }
+        }
+        if (out.isEmpty()) throw IOException("the playlist has no segments")
+        return Playlist(out, init, init != null)
+    }
+
+    private fun fetchSegment(context: Context, s: Segment, headers: Map<String, String>, token: CancelToken, keys: ConcurrentHashMap<String, ByteArray>): ByteArray {
+        val range = if (s.rangeStart >= 0 && s.rangeLen > 0) "bytes=${s.rangeStart}-${s.rangeStart + s.rangeLen - 1}" else null
+        val data = HttpFetch.call(context, HttpFetch.request(s.url, headers, range), token) { r ->
+            if (r.code !in 200..299) throw if (r.code == 403 || r.code == 404 || r.code == 410) LinkExpiredException("HTTP ${r.code}") else HttpStatusException(r.code, "HTTP ${r.code}")
+            r.body?.bytes() ?: throw IOException("empty response")
+        }
+        val keyUri = s.keyUri ?: return data
+        val key = keys[keyUri] ?: HttpFetch.call(context, HttpFetch.request(keyUri, headers), token) { r ->
+            if (r.code !in 200..299) throw HttpStatusException(r.code, "the key server answered HTTP ${r.code}")
+            r.body?.bytes() ?: throw IOException("empty key")
+        }.also { keys[keyUri] = it }
+        if (key.size != 16) throw IOException("the decryption key is not valid")
+        val iv = s.iv ?: ByteArray(16).also { b ->
+            var v = s.sequence
+            for (i in 15 downTo 8) { b[i] = (v and 0xFF).toByte(); v = v shr 8 }
+        }
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        return try { cipher.doFinal(data) } catch (_: Throwable) {
+            // some servers send a last block without padding
+            val c2 = Cipher.getInstance("AES/CBC/NoPadding")
+            c2.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            val raw = c2.doFinal(data.copyOf(data.size - data.size % 16))
+            raw
+        }
+    }
+
+    /** Output file extension of the joined stream. */
+    fun outputExt(part: PlanPart): String = if (part.protocol == "hls") "ts" else part.ext.ifBlank { "mp4" }
+
+    suspend fun download(context: Context, part: PlanPart, dest: File, token: CancelToken, counter: AtomicLong, connections: Int = 8) {
+        if (HttpFetch.isDone(dest)) {
+            counter.set(dest.length())
+            return
+        }
+        withContext(Dispatchers.IO) {
+            dest.parentFile?.mkdirs()
+            val headers = part.headers
+            val segDir = File(dest.path + ".segs").apply { mkdirs() }
+            val segments: List<Segment>
+            val init: Segment?
+            if (part.protocol == "hls") {
+                val pl = parseHls(context, part.url, headers, token)
+                segments = pl.segments
+                init = pl.initSegment
+            } else {
+                // DASH: the first fragment is normally the initialisation segment
+                segments = part.fragments.map { Segment(it) }
+                init = null
+            }
+            val all = (listOfNotNull(init) + segments)
+            val keys = ConcurrentHashMap<String, ByteArray>()
+            var already = 0L
+            for (i in all.indices) {
+                val f = File(segDir, "s%06d".format(i))
+                if (f.exists()) already += f.length()
+            }
+            counter.set(already)
+            val next = AtomicInteger(0)
+            val lastProgress = AtomicLong(System.currentTimeMillis())
+            coroutineScope {
+                (0 until minOf(connections, all.size)).map {
+                    async(Dispatchers.IO) {
+                        while (true) {
+                            token.check()
+                            val i = next.getAndIncrement()
+                            if (i >= all.size) break
+                            val f = File(segDir, "s%06d".format(i))
+                            if (f.exists()) continue
+                            var attempt = 0
+                            while (true) {
+                                token.check()
+                                try {
+                                    val bytes = fetchSegment(context, all[i], headers, token, keys)
+                                    val tmp = File(segDir, "s%06d.tmp".format(i))
+                                    tmp.writeBytes(bytes)
+                                    tmp.renameTo(f)
+                                    counter.addAndGet(bytes.size.toLong())
+                                    lastProgress.set(System.currentTimeMillis())
+                                    break
+                                } catch (e: FetchCancelled) {
+                                    throw e
+                                } catch (e: LinkExpiredException) {
+                                    throw e
+                                } catch (e: IOException) {
+                                    token.check()
+                                    attempt++
+                                    if (System.currentTimeMillis() - lastProgress.get() > 10 * 60_000L) throw e
+                                    delay(minOf(10_000L, 400L * (1L shl minOf(attempt, 5))))
+                                }
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            // join: the segments are copied into one file in their order
+            val joined = File(dest.path + ".join")
+            BufferedOutputStream(FileOutputStream(joined), 1 shl 20).use { out ->
+                for (i in all.indices) {
+                    File(segDir, "s%06d".format(i)).inputStream().use { it.copyTo(out, 1 shl 20) }
+                }
+            }
+            dest.delete()
+            if (!joined.renameTo(dest)) throw IOException("could not finish the stream file")
+            segDir.deleteRecursively()
+            File(dest.path + ".done").writeText("1")
+            counter.set(dest.length())
+        }
+    }
+}
