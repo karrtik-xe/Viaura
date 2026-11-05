@@ -108,10 +108,15 @@ jobs:
           else
             # push / manual run: <newest published release>beta<run number> -> Viaura-v1.1beta6_<abi>
             # (the beta number is the Actions run number = the app's build number, so the app can compare builds)
-            LATEST_TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)
+            # No release yet -> GitHub answers 404 with a JSON error text; it must never end up in the version name.
+            LATEST_TAG=""
+            if RESP=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>/dev/null); then
+              LATEST_TAG=$(printf '%s' "$RESP" | jq -r '.tag_name // empty' 2>/dev/null || true)
+            fi
             LATEST="${LATEST_TAG#v}"
             LATEST="${LATEST#V}"
-            [ -n "$LATEST" ] || LATEST="${BASE_VERSION}"
+            # accept only a plain version such as 1.1 / 2.0.3 (digits first, then letters, digits, dots, dashes)
+            if ! printf '%s' "$LATEST" | grep -Eq '^[0-9][A-Za-z0-9._-]*$'; then LATEST="${BASE_VERSION}"; fi
             VERSION="${LATEST}beta${BUILD}"
             ARTIFACT_VERSION="v${VERSION}"
           fi
