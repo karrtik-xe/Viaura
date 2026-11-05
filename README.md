@@ -471,20 +471,7 @@ Open **Settings → About → Updates**. Viaura checks GitHub Releases automatic
 
 - **Stable** — tested releases, for example `Viaura-v1.1_arm64-v8a.apk`.
 - **Preview (Nightly)** — the newest build from every push, for example `Viaura-v1.1beta6_arm64-v8a.apk`. The number after `beta` is the GitHub Actions run number and the same number the app shows as its build.
-
-## Building from Source
-
-Viaura is built by **GitHub Actions** (`.github/workflows/build-apk.yml`):
-
-- A push to `main` builds `Viaura-v<latest release>beta<run>` for every ABI (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`, `universal`) and publishes it as a **Nightly** pre-release.
-- Publishing a normal GitHub Release (for example tag `v1.1`) builds and attaches the Stable APKs.
-- APKs are signed with your own release key kept in **Settings → Secrets and variables → Actions** (`RELEASE_KEYSTORE_B64`, `STORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`). The key is never committed (`*.jks` is git-ignored), and the same key signs every build so updates install over each other.
-
-To build locally you need **Android Studio**, **JDK 17** and the Android SDK (compile SDK 36, NDK 27.3). Large third-party files (a fallback font, the yt-dlp runtime and QuickJS sources) are downloaded by the CI workflow, so a local build outside CI may skip those optional parts.
-
-```bash
-./gradlew assembleRelease
-```
+  
 
 ## Tech Stack & Credits
 
