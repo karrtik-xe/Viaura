@@ -149,7 +149,7 @@ internal fun OverviewCard(
     val videoCodecs = videos.map { it.displayCodec }.distinct().joinToString(", ")
     val audioCodecs = audios.map { it.displayCodec }.distinct().joinToString(", ")
     val subFormats = subs.map { subtitleFormatLabel(it) }.distinct().joinToString(", ")
-    val languages = all.map { languageLabel(it.language) }.filter { it.isNotBlank() }.distinct().joinToString(", ")
+    val languages = all.map { trackLanguageLabel(it.language) }.filter { it.isNotBlank() }.distinct().joinToString(", ")
     val resolution = videos.firstOrNull()?.displayResolution.orEmpty()
     val fps = videos.firstOrNull()?.frameRate ?: 0f
     val hdr = videos.firstOrNull()?.hdrFormat.orEmpty()
@@ -315,7 +315,7 @@ internal fun TrackCard(
         InfoGrid(
             listOf(
                 "Title" to realTrackTitle(track),
-                "Language" to languageLabel(track.language),
+                "Language" to trackLanguageLabel(track.language),
                 "Codec" to track.displayCodec,
                 "Codec ID" to track.codecId,
                 "Format/Info" to track.formatInfo,
@@ -376,7 +376,7 @@ internal fun SubtitleTrackCard(
         InfoGrid(
             listOf(
                 "Title" to realTrackTitle(track),
-                "Language" to languageLabel(track.language),
+                "Language" to trackLanguageLabel(track.language),
                 "Format / Codec" to subtitleFormatLabel(track),
                 "Codec ID" to track.codecId,
                 // Matroska text subtitles (SRT / ASS / SSA / WebVTT) are always stored as UTF-8.
@@ -698,7 +698,7 @@ internal fun EmptyInfo(message: String, primary: Color, secondary: Color, surfac
 }
 
 /** Language as "Hindi (hin)"; empty when the file does not declare one (so the row is hidden). */
-internal fun languageLabel(raw: String): String {
+internal fun trackLanguageLabel(raw: String): String {
     val code = raw.trim()
     val name = mapLanguageToSimpleName(code) ?: return ""
     val pretty = name.replaceFirstChar { it.uppercase(Locale.ROOT) }
