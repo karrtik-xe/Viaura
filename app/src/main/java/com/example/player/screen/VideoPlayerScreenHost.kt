@@ -1140,15 +1140,6 @@ private fun VideoPlayerScreenImpl(
         }
     }
 
-    // Subtitle choices are written one after another on a background thread (never on the UI thread).
-    val subtitlePersistMutex = remember { kotlinx.coroutines.sync.Mutex() }
-    fun persistSubtitleAsync(block: () -> Unit) {
-        coroutineScope.launch(Dispatchers.IO) {
-            subtitlePersistMutex.lock()
-            try { block() } catch (_: Throwable) {} finally { subtitlePersistMutex.unlock() }
-        }
-    }
-
     fun selectSubtitleTracks(
         primaryId: Int,
         secondaryId: Int,
@@ -1181,26 +1172,8 @@ private fun VideoPlayerScreenImpl(
         if (finalPrimaryId > 0) {
             val selectedTrack = controller.subtitleTracks.value.firstOrNull { it.id == finalPrimaryId }
             if (selectedTrack != null) {
-                if (selectedTrack.isExternal) {
-                    if (persist) {
-                        val vPath = currentVideo?.path
-                        val vId = currentVideo?.id ?: 0L
-                        val vUri = currentVideo?.uri?.toString()
-                        val vTitle = currentVideo?.displayName
-                        val trackName = selectedTrack.originalFilename.ifBlank { selectedTrack.title }
-                        persistSubtitleAsync {
-                            CustomSubtitlePersistenceManager.setSubtitleSelected(
-                                context = context,
-                                path = vPath,
-                                videoId = vId,
-                                uriString = vUri,
-                                title = vTitle,
-                                originalName = trackName,
-                                isSelected = true
-                            )
-                        }
-                    }
-                } else {
+                // An uploaded (external) track is stored together with the others in the background step below.
+                if (!selectedTrack.isExternal) {
                     val embedded = controller.subtitleTracks.value.filter { !it.isExternal }
                     val idx = embedded.indexOfFirst { it.id == finalPrimaryId }
                     val trackNum = if (idx >= 0) idx + 1 else finalPrimaryId
@@ -1223,23 +1196,8 @@ private fun VideoPlayerScreenImpl(
         // Restoring a remembered choice must never rewrite that memory (persist = false).
         if (!persist) return
 
-        // Update persistence for all external subtitles so unselected ones are marked false.
-        // File / preference work runs in the background so tapping a track never stalls the screen.
-        val allSubs = controller.subtitleTracks.value
-        val tVideo = currentVideo
-        persistSubtitleAsync {
-            allSubs.filter { it.isExternal }.forEach { extTrack ->
-                val isNowSelected = (extTrack.id == finalPrimaryId) || (extTrack.id == finalSecondaryId)
-                CustomSubtitlePersistenceManager.setSubtitleSelected(
-                    context = context,
-                    path = tVideo?.path,
-                    videoId = tVideo?.id ?: 0L,
-                    uriString = tVideo?.uri?.toString(),
-                    title = tVideo?.displayName,
-                    originalName = extTrack.originalFilename.ifBlank { extTrack.title },
-                    isSelected = isNowSelected
-                )
-            }
+        // Stored in the background (never on the UI thread), one choice after the other.
+        persistSubtitleChoiceInBackground(coroutineScope, context, currentVideo, controller.subtitleTracks.value, finalPrimaryId, finalSecondaryId) {
             saveSubtitleSelection(primaryId = finalPrimaryId, secondaryId = finalSecondaryId)
         }
     }
@@ -5411,3 +5369,40 @@ private fun ChannelPlayerSection(
 @Composable
 private fun SolidColorBrushFor(isDark: Boolean): androidx.compose.ui.graphics.Brush =
     androidx.compose.ui.graphics.SolidColor(if (isDark) Neutral.D334155 else Neutral.E2E8F0)
+
+private val subtitlePersistMutex = kotlinx.coroutines.sync.Mutex()
+
+/**
+ * Marks the chosen uploaded subtitle(s) as selected (and the rest as not selected) for [video], then runs [saveSelection].
+ * Kept out of the big player composable (its compiled method size is at the JVM limit) and run off the UI thread.
+ */
+private fun persistSubtitleChoiceInBackground(
+    scope: kotlinx.coroutines.CoroutineScope,
+    context: Context,
+    video: VideoItem?,
+    tracks: List<PlayerMediaTrack>,
+    primaryId: Int,
+    secondaryId: Int,
+    saveSelection: () -> Unit
+) {
+    scope.launch(Dispatchers.IO) {
+        subtitlePersistMutex.lock()
+        try {
+            tracks.filter { it.isExternal }.forEach { extTrack ->
+                CustomSubtitlePersistenceManager.setSubtitleSelected(
+                    context = context,
+                    path = video?.path,
+                    videoId = video?.id ?: 0L,
+                    uriString = video?.uri?.toString(),
+                    title = video?.displayName,
+                    originalName = extTrack.originalFilename.ifBlank { extTrack.title },
+                    isSelected = (extTrack.id == primaryId) || (extTrack.id == secondaryId)
+                )
+            }
+            saveSelection()
+        } catch (_: Throwable) {
+        } finally {
+            subtitlePersistMutex.unlock()
+        }
+    }
+}
