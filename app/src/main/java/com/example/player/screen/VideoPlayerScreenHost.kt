@@ -3226,7 +3226,7 @@ private fun VideoPlayerScreenImpl(
         fun RenderVideoPlayerOverlay() {
             if (!entryFakeLandscape) VideoPlayerOverlay(
                 glassSource = videoGlassSource,
-                glassCapture = { bmp, done ->
+                glassCapture = @androidx.compose.runtime.DontMemoize { bmp, done ->
                     // no PixelCopy while the Back animation runs: it only costs frames there
                     if (isExitingPlayer) done(false) else controller.captureGlassSample(bmp, done)
                 },
@@ -3235,7 +3235,7 @@ private fun VideoPlayerScreenImpl(
                 totalEpisodes = totalEpisodes,
                 chapterTitle = currentChapterTitle,
                 isPlaying = isPlaying,
-                onPlayPauseToggle = {
+                onPlayPauseToggle = @androidx.compose.runtime.DontMemoize {
                     // while an online video is buffering it keeps loading: a tap must not pause it (that stopped the loading)
                     if (queuedResolving) return@VideoPlayerOverlay
                     if (isPlaying && isBuffering && controller.onlineStreamMode) return@VideoPlayerOverlay
@@ -3249,19 +3249,19 @@ private fun VideoPlayerScreenImpl(
                 },
                 currentPositionMs = currentPositionMs,
                 durationMs = durationMs,
-                onSeekTo = { targetMs ->
+                onSeekTo = @androidx.compose.runtime.DontMemoize { targetMs ->
                     currentPositionMs = targetMs
                     controller.seekTo(targetMs)
                     persistPlaybackPosition(targetMs)
                 },
-                onPreviousVideo = {
+                onPreviousVideo = @androidx.compose.runtime.DontMemoize {
                     if (currentVideoIndex > 0) {
                         playEpisodeAtIndex(currentVideoIndex - 1)
                     } else if (currentPlaylist.size > 1 && repeatMode == PlayerRepeatMode.ALL) {
                         playEpisodeAtIndex(currentPlaylist.size - 1)
                     }
                 },
-                onNextVideo = {
+                onNextVideo = @androidx.compose.runtime.DontMemoize {
                     if (isShuffle && currentPlaylist.size > 1) {
                         val availableIndices = currentPlaylist.indices.filter { it != currentVideoIndex }
                         val randomIdx = availableIndices.randomOrNull() ?: ((currentVideoIndex + 1) % currentPlaylist.size)
@@ -3279,23 +3279,23 @@ private fun VideoPlayerScreenImpl(
                     (!controllerIsLive && controllerPos <= 100L && durationMs <= 0L)),
                 hasPrevious = uiState.playerSettings.enableNextPrevious && (currentVideoIndex > 0 || (currentPlaylist.size > 1 && repeatMode == PlayerRepeatMode.ALL)),
                 hasNext = uiState.playerSettings.enableNextPrevious && ((currentVideoIndex + 1 < currentPlaylist.size) || (isShuffle && currentPlaylist.size > 1) || (currentPlaylist.size > 1 && repeatMode == PlayerRepeatMode.ALL)),
-                onBack = {
+                onBack = @androidx.compose.runtime.DontMemoize {
                     exitPlayerNow(toMini = true)
                 },
                 playbackSpeed = playbackSpeed,
-                onSpeedChange = { spd ->
+                onSpeedChange = @androidx.compose.runtime.DontMemoize { spd ->
                     playbackSpeed = spd
                     controller.setPlaybackSpeed(spd)
                     showNotification("Speed: ${spd}x")
                 },
                 decoderMode = decoderMode,
-                onDecoderModeChange = { dec ->
+                onDecoderModeChange = @androidx.compose.runtime.DontMemoize { dec ->
                     decoderMode = dec
                     smartPrefs.edit().putString("decoder_mode", dec.name).apply()
                     showNotification(if (dec == DecoderMode.AUTO) "Decoder: Smart Auto" else "Decoder: ${dec.label}")
                 },
                 repeatMode = repeatMode,
-                onRepeatModeChange = { rpt ->
+                onRepeatModeChange = @androidx.compose.runtime.DontMemoize { rpt ->
                     repeatMode = rpt
                     val msg = when (rpt) {
                         PlayerRepeatMode.OFF -> "Repeat: Off"
@@ -3305,84 +3305,84 @@ private fun VideoPlayerScreenImpl(
                     showNotification(msg)
                 },
                 isShuffle = isShuffle,
-                onShuffleChange = { shf ->
+                onShuffleChange = @androidx.compose.runtime.DontMemoize { shf ->
                     isShuffle = shf
                     showNotification(if (shf) "Shuffle: ON" else "Shuffle: OFF")
                 },
                 isAudioOnly = isAudioOnly,
-                onAudioOnlyChange = { ao ->
+                onAudioOnlyChange = @androidx.compose.runtime.DontMemoize { ao ->
                     isAudioOnly = ao
                     showNotification(if (ao) "Audio-only playback active" else "Video playback active")
                 },
                 aspectRatioMode = aspectRatioMode,
-                onAspectRatioChange = { asp ->
+                onAspectRatioChange = @androidx.compose.runtime.DontMemoize { asp ->
                     aspectRatioMode = asp
                     showNotification("Display: ${asp.label}")
                 },
                 videoZoomScale = videoZoomScale,
-                onVideoZoomChange = { z -> videoZoomScale = z },
+                onVideoZoomChange = @androidx.compose.runtime.DontMemoize { z -> videoZoomScale = z },
                 isVideoFlippedVertically = isVideoFlippedVertically,
                 isVideoMirrored = isVideoMirrored,
-                onToggleVideoFlipVertical = {
+                onToggleVideoFlipVertical = @androidx.compose.runtime.DontMemoize {
                     isVideoFlippedVertically = !isVideoFlippedVertically
                     showNotification(if (isVideoFlippedVertically) "Flip Vertical: ON" else "Flip Vertical: OFF")
                 },
-                onMirrorVideoRight = {
+                onMirrorVideoRight = @androidx.compose.runtime.DontMemoize {
                     isVideoMirrored = true
                     showNotification("Mirror: RIGHT")
                 },
-                onMirrorVideoLeft = {
+                onMirrorVideoLeft = @androidx.compose.runtime.DontMemoize {
                     isVideoMirrored = false
                     showNotification("Mirror: LEFT")
                 },
                 isPanAndZoomEnabled = isPanAndZoomEnabled,
-                onTogglePanAndZoom = {
+                onTogglePanAndZoom = @androidx.compose.runtime.DontMemoize {
                     isPanAndZoomEnabled = it
                     showNotification(if (it) "Pan & Zoom: Enabled" else "Pan & Zoom: Disabled")
                 },
-                onResetZoomAndPan = {
+                onResetZoomAndPan = @androidx.compose.runtime.DontMemoize {
                     videoZoomScale = 1.0f
                     videoPanOffset = Offset.Zero
                     isPanAndZoomEnabled = false
                     showNotification("Zoom Reset: 100%")
                 },
                 isPitchCorrectionEnabled = isPitchCorrectionEnabled,
-                onTogglePitchCorrection = { enabled ->
+                onTogglePitchCorrection = @androidx.compose.runtime.DontMemoize { enabled ->
                     isPitchCorrectionEnabled = enabled
                     controller.setAudioPitchCorrection(enabled)
                     showNotification(if (enabled) "Pitch Correction: ON (Natural Voice Pitch)" else "Pitch Correction: OFF (Dynamic Pitch)")
                 },
                 isAmbienceEnabled = isAmbienceEnabled,
-                onToggleAmbience = { enabled ->
+                onToggleAmbience = @androidx.compose.runtime.DontMemoize { enabled ->
                     isAmbienceEnabled = enabled
                     ambiencePrefs.edit().putBoolean("ambience_mode", enabled).apply()
                     showNotification(if (enabled) "Ambience Mode: ON" else "Ambience Mode: OFF")
                 },
                 loopPointA = loopPointA,
                 loopPointB = loopPointB,
-                onSetLoopPointA = { pt ->
+                onSetLoopPointA = @androidx.compose.runtime.DontMemoize { pt ->
                     loopPointA = pt
                     showNotification("Loop Point A set: ${formatPlaybackTime(pt)}")
                 },
-                onSetLoopPointB = { pt ->
+                onSetLoopPointB = @androidx.compose.runtime.DontMemoize { pt ->
                     loopPointB = pt
                     showNotification("Loop Point B set: ${formatPlaybackTime(pt)}")
                 },
-                onClearLoop = {
+                onClearLoop = @androidx.compose.runtime.DontMemoize {
                     loopPointA = null
                     loopPointB = null
                     showNotification("A-B Loop Cleared")
                 },
                 brightness = brightness,
-                onBrightnessChange = { brightness = it },
+                onBrightnessChange = @androidx.compose.runtime.DontMemoize { brightness = it },
                 volumeBoostCap = uiState.volumeBoostCap,
-                onVolumeBoostChange = { boost -> controller.setVolume(boost) },
+                onVolumeBoostChange = @androidx.compose.runtime.DontMemoize { boost -> controller.setVolume(boost) },
                 contrast = contrast,
-                onContrastChange = { contrast = it },
+                onContrastChange = @androidx.compose.runtime.DontMemoize { contrast = it },
                 saturation = saturation,
-                onSaturationChange = { saturation = it },
+                onSaturationChange = @androidx.compose.runtime.DontMemoize { saturation = it },
                 videoFilterPreset = videoFilterPreset,
-                onSelectVideoFilterPreset = { preset ->
+                onSelectVideoFilterPreset = @androidx.compose.runtime.DontMemoize { preset ->
                     videoFilterPreset = preset
                     coroutineScope.launch {
                         val current = PlayerSettings.load(context)
@@ -3391,7 +3391,7 @@ private fun VideoPlayerScreenImpl(
                     showNotification("Filter: ${preset.displayName}")
                 },
                 manualVideoAdjustments = manualVideoAdjustments,
-                onManualVideoAdjustmentsChange = { manual ->
+                onManualVideoAdjustmentsChange = @androidx.compose.runtime.DontMemoize { manual ->
                     manualVideoAdjustments = manual
                     coroutineScope.launch {
                         val current = PlayerSettings.load(context)
@@ -3412,7 +3412,7 @@ private fun VideoPlayerScreenImpl(
                     }
                 },
                 selectedAudioTrackId = selectedAudioTrackId,
-                onSelectAudioTrack = { id ->
+                onSelectAudioTrack = @androidx.compose.runtime.DontMemoize { id ->
                     hasManualAudioTrackSelection = true
                     selectedAudioTrackId = id
                     controller.setAudioTrack(id)
@@ -3421,7 +3421,7 @@ private fun VideoPlayerScreenImpl(
                     showNotification("Audio Track: $trackName")
                 },
                 trackAudioConfigs = trackAudioConfigs,
-                onTrackChannelModeChange = { trackId, mode ->
+                onTrackChannelModeChange = @androidx.compose.runtime.DontMemoize { trackId, mode ->
                     val old = trackAudioConfigs[trackId] ?: TrackAudioConfig()
                     val updated = old.copy(channelMode = mode)
                     val newMap = trackAudioConfigs + (trackId to updated)
@@ -3438,7 +3438,7 @@ private fun VideoPlayerScreenImpl(
                     }
                     showNotification("Audio Channel: ${mode.getDisplayName()}")
                 },
-                onTrackVolumeNormalizationChange = { trackId, enabled ->
+                onTrackVolumeNormalizationChange = @androidx.compose.runtime.DontMemoize { trackId, enabled ->
                     val old = trackAudioConfigs[trackId] ?: TrackAudioConfig()
                     val updated = old.copy(volumeNormalization = enabled)
                     val newMap = trackAudioConfigs + (trackId to updated)
@@ -3455,7 +3455,7 @@ private fun VideoPlayerScreenImpl(
                     }
                     showNotification("Volume Normalization: ${if (enabled) "On" else "Off"}")
                 },
-                onTrackDynamicRangeCompressionChange = { trackId, enabled ->
+                onTrackDynamicRangeCompressionChange = @androidx.compose.runtime.DontMemoize { trackId, enabled ->
                     val old = trackAudioConfigs[trackId] ?: TrackAudioConfig()
                     val updated = old.copy(dynamicRangeCompression = enabled)
                     val newMap = trackAudioConfigs + (trackId to updated)
@@ -3472,7 +3472,7 @@ private fun VideoPlayerScreenImpl(
                     }
                     showNotification("Dynamic Range Compression: ${if (enabled) "On" else "Off"}")
                 },
-                onRemoveSubtitleTrack = { trackId ->
+                onRemoveSubtitleTrack = @androidx.compose.runtime.DontMemoize { trackId ->
                     val trackToRemove = realSubtitleTracks.firstOrNull { it.id == trackId }
                     controller.removeSubtitleTrack(trackId)
                     if (trackToRemove != null) {
@@ -3495,25 +3495,25 @@ private fun VideoPlayerScreenImpl(
                     )
                     showNotification("Removed Subtitle Track")
                 },
-                onRemoveAudioTrack = { trackId ->
+                onRemoveAudioTrack = @androidx.compose.runtime.DontMemoize { trackId ->
                     controller.removeAudioTrack(trackId)
                     showNotification("Removed Audio Track")
                 },
                 selectedSubtitleTrackId = selectedSubtitleTrackId,
                 secondarySubtitleTrackId = realSecondarySubtitleTrackId,
                 lastTouchedSubtitleTrackId = lastTouchedSubtitleTrackId,
-                onLastTouchedSubtitleTrackIdChange = { lastTouchedSubtitleTrackId = it },
-                onSelectSubtitleTrack = { id ->
+                onLastTouchedSubtitleTrackIdChange = @androidx.compose.runtime.DontMemoize { lastTouchedSubtitleTrackId = it },
+                onSelectSubtitleTrack = @androidx.compose.runtime.DontMemoize { id ->
                     selectSubtitleTracks(id, controller.secondarySubtitleTrackId.value)
                 },
-                onSelectSecondarySubtitleTrack = { id ->
+                onSelectSecondarySubtitleTrack = @androidx.compose.runtime.DontMemoize { id ->
                     selectSubtitleTracks(selectedSubtitleTrackId, id)
                 },
-                onSelectSubtitleTracksCascade = { primId, secId ->
+                onSelectSubtitleTracksCascade = @androidx.compose.runtime.DontMemoize { primId, secId ->
                     selectSubtitleTracks(primId, secId)
                 },
                 isSubtitleVisible = isSubtitleVisible,
-                onToggleSubtitleVisibility = {
+                onToggleSubtitleVisibility = @androidx.compose.runtime.DontMemoize {
                     val nextVis = !isSubtitleVisible
                     isSubtitleVisible = nextVis
                     controller.setSubtitleVisibility(nextVis)
@@ -3537,18 +3537,18 @@ private fun VideoPlayerScreenImpl(
                     }
                 },
                 subtitleOffsetMs = subtitleOffsetMs,
-                onSubtitleOffsetChange = { offset ->
+                onSubtitleOffsetChange = @androidx.compose.runtime.DontMemoize { offset ->
                     subtitleOffsetMs = offset
                     controller.setSubtitleDelay(offset)
                     showNotification("Subtitle Sync: ${if (offset >= 0) "+$offset" else "$offset"} ms")
                 },
                 audioDelayMs = audioDelayMs,
-                onAudioDelayChange = { delay ->
+                onAudioDelayChange = @androidx.compose.runtime.DontMemoize { delay ->
                     audioDelayMs = delay
                     controller.setAudioDelay(delay)
                 },
                 equalizerEnabled = equalizerEnabled,
-                onToggleEqualizer = { enabled ->
+                onToggleEqualizer = @androidx.compose.runtime.DontMemoize { enabled ->
                     equalizerEnabled = enabled
                     controller.setEqualizer(
                         enabled = enabled,
@@ -3563,7 +3563,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizerEnabled = enabled) }
                 },
                 eq60Hz = eq60Hz,
-                onEq60HzChange = { v ->
+                onEq60HzChange = @androidx.compose.runtime.DontMemoize { v ->
                     eq60Hz = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3578,7 +3578,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizer60Hz = v) }
                 },
                 eq230Hz = eq230Hz,
-                onEq230HzChange = { v ->
+                onEq230HzChange = @androidx.compose.runtime.DontMemoize { v ->
                     eq230Hz = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3593,7 +3593,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizer230Hz = v) }
                 },
                 eq910Hz = eq910Hz,
-                onEq910HzChange = { v ->
+                onEq910HzChange = @androidx.compose.runtime.DontMemoize { v ->
                     eq910Hz = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3608,7 +3608,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizer910Hz = v) }
                 },
                 eq3600Hz = eq3600Hz,
-                onEq3600HzChange = { v ->
+                onEq3600HzChange = @androidx.compose.runtime.DontMemoize { v ->
                     eq3600Hz = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3623,7 +3623,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizer3600Hz = v) }
                 },
                 eq14000Hz = eq14000Hz,
-                onEq14000HzChange = { v ->
+                onEq14000HzChange = @androidx.compose.runtime.DontMemoize { v ->
                     eq14000Hz = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3638,7 +3638,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizer14000Hz = v) }
                 },
                 volumeBoostDb = volumeBoostDb,
-                onVolumeBoostDbChange = { v ->
+                onVolumeBoostDbChange = @androidx.compose.runtime.DontMemoize { v ->
                     volumeBoostDb = v
                     controller.setEqualizer(
                         enabled = equalizerEnabled,
@@ -3653,7 +3653,7 @@ private fun VideoPlayerScreenImpl(
                     saveEqualizerSettingsDebounced { it.copy(equalizerVolumeBoostDb = v) }
                 },
                 equalizerPreset = equalizerPreset,
-                onSelectEqualizerPreset = { preset ->
+                onSelectEqualizerPreset = @androidx.compose.runtime.DontMemoize { preset ->
                     val pEq60 = preset.gains[0]
                     val pEq230 = preset.gains[1]
                     val pEq910 = preset.gains[2]
@@ -3686,7 +3686,7 @@ private fun VideoPlayerScreenImpl(
                         )
                     }
                 },
-                onResetEqualizer = {
+                onResetEqualizer = @androidx.compose.runtime.DontMemoize {
                     val flat = EqualizerPreset.FLAT
                     val fEq60 = flat.gains[0]
                     val fEq230 = flat.gains[1]
@@ -3756,7 +3756,7 @@ private fun VideoPlayerScreenImpl(
                         else if (sameServerQualities().isNotEmpty()) "srv:$pluginServerIndex"
                         else pluginQuality
                 ),
-                onSelectStreamServer = { key -> key.toIntOrNull()?.let { switchPluginServer(it) } },
+                onSelectStreamServer = @androidx.compose.runtime.DontMemoize { key -> key.toIntOrNull()?.let { switchPluginServer(it) } },
                 availableVideoQualities = if (pluginSession != null) {
                     if (hlsVariants.isEmpty() && sameServerQualities().isNotEmpty()) sameServerQualities().map { it.second.quality.orEmpty() }
                     else if (pluginSession.plugin.isCloudStream) emptyList()
@@ -3772,7 +3772,7 @@ private fun VideoPlayerScreenImpl(
                         else pluginQuality
                     }
                     else if (onlineAutoMode) "${OnlineVideoService.AUTO_QUALITY} (${selectedOnlineQuality ?: "…"})" else selectedOnlineQuality,
-                onSelectVideoQuality = { label ->
+                onSelectVideoQuality = @androidx.compose.runtime.DontMemoize { label ->
                     if (pluginSession != null && label.startsWith("srv:")) label.removePrefix("srv:").toIntOrNull()?.let { switchPluginServer(it) }
                     else if (pluginSession != null && hlsVariants.isEmpty() &&
                         sameServerQualities().any { it.second.quality == label }) {
@@ -3786,14 +3786,14 @@ private fun VideoPlayerScreenImpl(
                 thumbFastPreview = uiState.playerSettings.thumbFastPreview,
                 previewVideoUri = currentVideo?.uri,
                 previewVideoPath = currentVideo?.path,
-                onSeekToChapter = { chap ->
+                onSeekToChapter = @androidx.compose.runtime.DontMemoize { chap ->
                     currentPositionMs = chap.timeMs
                     controller.seekToChapter(chap)
                     persistPlaybackPosition(chap.timeMs)
                     showNotification("Chapter: ${chap.title}")
                 },
                 skipMarkers = skipMarkers,
-                onSkipToPosition = { targetMs ->
+                onSkipToPosition = @androidx.compose.runtime.DontMemoize { targetMs ->
                     val isVideoFullyFinished = durationMs > 0 && targetMs >= (durationMs - 600L)
 
                     if (isVideoFullyFinished) {
@@ -3817,10 +3817,10 @@ private fun VideoPlayerScreenImpl(
                 subtitleTracks = realSubtitleTracks,
                 playlistVideos = playlistNames,
                 playlistItems = currentPlaylist,
-                onSelectPlaylistItem = { idx ->
+                onSelectPlaylistItem = @androidx.compose.runtime.DontMemoize { idx ->
                     playEpisodeAtIndex(idx - 1)
                 },
-                onReorderPlaylist = { from, to ->
+                onReorderPlaylist = @androidx.compose.runtime.DontMemoize { from, to ->
                     val list = currentPlaylist.toMutableList()
                     if (from in list.indices && to in list.indices) {
                         // the episode that plays now, found by the object itself (ids are not guaranteed unique)
@@ -3838,10 +3838,10 @@ private fun VideoPlayerScreenImpl(
                         }
                     }
                 },
-                onImportSubtitle = {
+                onImportSubtitle = @androidx.compose.runtime.DontMemoize {
                     showSubtitleFileTree = true
                 },
-                onPasteSubtitle = {
+                onPasteSubtitle = @androidx.compose.runtime.DontMemoize {
                     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
                     val clipData = clipboard?.primaryClip
                     val pastedText = if (clipData != null && clipData.itemCount > 0) {
@@ -3900,12 +3900,12 @@ private fun VideoPlayerScreenImpl(
                         }
                     }
                 },
-                onImportAudio = {
+                onImportAudio = @androidx.compose.runtime.DontMemoize {
                     showAudioFileTree = true
                 },
                 translationStatusByTrackId = translationStatusByTrackId,
                 onStartTranslate = onStartTranslate,
-                onTranslateSubtitleTrack = { trackId, progress ->
+                onTranslateSubtitleTrack = @androidx.compose.runtime.DontMemoize { trackId, progress ->
                     val settings = AiFeaturesSettingsStore.load(context)
                     if (!settings.hasUsableModel) {
                         Result.failure(IllegalStateException("Configure a usable API model or installed offline model first"))
@@ -3919,7 +3919,7 @@ private fun VideoPlayerScreenImpl(
                         )
                     }
                 },
-                onSelectSubtitleFile = { selectedFile ->
+                onSelectSubtitleFile = @androidx.compose.runtime.DontMemoize { selectedFile ->
                     coroutineScope.launch {
                         try {
                             if (importSubtitleFileSafely(selectedFile)) {
@@ -3935,7 +3935,7 @@ private fun VideoPlayerScreenImpl(
                         }
                     }
                 },
-                onTakeScreenshot = {
+                onTakeScreenshot = @androidx.compose.runtime.DontMemoize {
                     coroutineScope.launch {
                         val vid = currentVideo
                         val pos = currentPositionMs
@@ -3969,7 +3969,7 @@ private fun VideoPlayerScreenImpl(
                         }
                     }
                 },
-                onTogglePiP = {
+                onTogglePiP = @androidx.compose.runtime.DontMemoize {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
                         try {
                             val params = if (activity is MainActivity) {
@@ -3989,7 +3989,7 @@ private fun VideoPlayerScreenImpl(
                         showNotification("Picture-in-Picture requires Android 8.0+")
                     }
                 },
-                onToggleOrientation = {
+                onToggleOrientation = @androidx.compose.runtime.DontMemoize {
                     val current = activity?.requestedOrientation
                     if (current == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE || isLandscape) {
                         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -4034,11 +4034,11 @@ private fun VideoPlayerScreenImpl(
                 dynamicSpeedOverlayEnabled = uiState.playerSettings.dynamicSpeedOverlay,
                 holdDragMovesSubtitlesEnabled = uiState.playerSettings.holdDragMovesSubtitles,
                 swipeOnSubtitleSeeksCuesEnabled = uiState.playerSettings.swipeOnSubtitleSeeksCues,
-                onSubtitleSeek = { forward -> controller.seekToAdjacentSubtitle(forward) },
+                onSubtitleSeek = @androidx.compose.runtime.DontMemoize { forward -> controller.seekToAdjacentSubtitle(forward) },
                 mediaPreviousControlEnabled = uiState.playerSettings.mediaPreviousControl,
                 mediaPlayPauseControlEnabled = uiState.playerSettings.mediaPlayPauseControl,
                 mediaNextControlEnabled = uiState.playerSettings.mediaNextControl,
-                onSubtitleScaleChange = { scale ->
+                onSubtitleScaleChange = @androidx.compose.runtime.DontMemoize { scale ->
                     subtitleScale = scale.coerceIn(0.5f, 3.0f)
                     val updated = liveSubtitleSettings.copy(subtitleScale = subtitleScale)
                     liveSubtitleSettings = updated
@@ -4049,11 +4049,11 @@ private fun VideoPlayerScreenImpl(
                 },
                 // While dragging only the cheap mpv property is updated (smooth, instant); the full style re-apply,
                 // settings state and disk save happen once in onSubtitlePositionCommit when the finger lifts.
-                onSubtitlePositionChange = { position ->
+                onSubtitlePositionChange = @androidx.compose.runtime.DontMemoize { position ->
                     subtitlePosition = position.coerceIn(0f, 150f)
                     controller.setSubtitlePosition(subtitlePosition.toDouble())
                 },
-                onSubtitlePositionCommit = { position ->
+                onSubtitlePositionCommit = @androidx.compose.runtime.DontMemoize { position ->
                     subtitlePosition = position.coerceIn(0f, 150f)
                     val updated = liveSubtitleSettings.copy(subtitlePosition = subtitlePosition)
                     liveSubtitleSettings = updated
@@ -4065,7 +4065,7 @@ private fun VideoPlayerScreenImpl(
                 subtitleScale = subtitleScale,
                 subtitlePosition = subtitlePosition,
                 subtitleSettings = liveSubtitleSettings,
-                onSubtitleSettingsChange = { updated ->
+                onSubtitleSettingsChange = @androidx.compose.runtime.DontMemoize { updated ->
                     liveSubtitleSettings = updated
                     subtitleScale = updated.subtitleScale
                     subtitlePosition = updated.subtitlePosition
@@ -4073,9 +4073,9 @@ private fun VideoPlayerScreenImpl(
                     saveSubtitleSettingsDebounced(updated)
                     onPlayerSettingsChange(updated)
                 },
-                onLoadAdvancedAssSource = { trackId -> controller.readAdvancedAssSource(context, trackId) },
-                onLoadRawSubtitleSource = { trackId -> controller.readRawSubtitleSource(context, trackId) },
-                onRawSubtitlePreview = { key, text -> controller.setRawSubtitlePreview(key, text) },
+                onLoadAdvancedAssSource = @androidx.compose.runtime.DontMemoize { trackId -> controller.readAdvancedAssSource(context, trackId) },
+                onLoadRawSubtitleSource = @androidx.compose.runtime.DontMemoize { trackId -> controller.readRawSubtitleSource(context, trackId) },
+                onRawSubtitlePreview = @androidx.compose.runtime.DontMemoize { key, text -> controller.setRawSubtitlePreview(key, text) },
                 showDoubleTapSeekFeedback = uiState.playerSettings.rippleOnDoubleTap && uiState.playerSettings.showSeekTime,
                 showVolumeSliderOverlay = uiState.playerSettings.volumeSliderOverlay,
                 showBrightnessSliderOverlay = uiState.playerSettings.brightnessSliderOverlay,
