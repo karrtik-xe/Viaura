@@ -146,26 +146,40 @@ internal fun OverviewCard(
     val subs = all.filter { it.trackType == MkvTrackType.SUBTITLE }
     val duration = meta.durationMs
     val overallBitrate = if (duration > 0) (meta.fileSizeBytes * 8_000L / duration) else 0L
-    val videoCodecs = videos.map { it.displayCodec }.distinct().joinToString(", ").ifBlank { "—" }
-    val audioCodecs = audios.map { it.displayCodec }.distinct().joinToString(", ").ifBlank { "—" }
-    val subFormats = subs.map { subtitleFormatLabel(it) }.distinct().joinToString(", ").ifBlank { "—" }
-    val languages = all.map { it.language }.filter { it.isNotBlank() && it != "und" }.distinct().joinToString(", ").ifBlank { "—" }
-    val resolution = videos.firstOrNull()?.displayResolution ?: "—"
+    val videoCodecs = videos.map { it.displayCodec }.distinct().joinToString(", ")
+    val audioCodecs = audios.map { it.displayCodec }.distinct().joinToString(", ")
+    val subFormats = subs.map { subtitleFormatLabel(it) }.distinct().joinToString(", ")
+    val languages = all.map { languageLabel(it.language) }.filter { it.isNotBlank() }.distinct().joinToString(", ")
+    val resolution = videos.firstOrNull()?.displayResolution.orEmpty()
     val fps = videos.firstOrNull()?.frameRate ?: 0f
-    val hdr = videos.firstOrNull()?.hdrFormat?.ifBlank { "SDR" } ?: "SDR"
+    val hdr = videos.firstOrNull()?.hdrFormat.orEmpty()
+    val ext = meta.fileName.substringAfterLast('.', "").uppercase(Locale.ROOT)
 
-    val generalRows = listOfNotNull(
+    // Only facts that really exist are listed: empty / unknown values are never shown.
+    val generalRows = listOf(
         "File Name" to meta.fileName,
-        "Format" to (meta.fileName.substringAfterLast('.', "unknown").uppercase(Locale.ROOT).let {
-            if (it == "MKV" || it == "WEBM") "Matroska" else it
-        }),
-        meta.formattedFormatVersion.takeIf { it.isNotBlank() }?.let { "Format Version" to it },
-        "File Size" to formatBytes(meta.fileSizeBytes),
-        "Duration" to formatMs(meta.durationMs),
+        "Title" to meta.title,
+        "Format" to meta.containerFormat.ifBlank {
+            when (ext) {
+                "MKV", "WEBM", "MKA" -> "Matroska"
+                "MP4", "M4V" -> "MPEG-4"
+                "MOV" -> "QuickTime"
+                "3GP", "3G2" -> "3GPP"
+                "TS", "M2TS", "MTS" -> "MPEG-TS"
+                "AVI" -> "AVI"
+                "FLV" -> "Flash Video"
+                "WMV", "ASF" -> "Windows Media"
+                "OGV", "OGG" -> "Ogg"
+                else -> ext
+            }
+        },
+        "Format Version" to meta.formattedFormatVersion,
+        "File Size" to if (meta.fileSizeBytes > 0) formatBytes(meta.fileSizeBytes) else "",
+        "Duration" to if (meta.durationMs > 0) formatMs(meta.durationMs) else "",
         "Overall Bitrate" to formatBitrate(overallBitrate),
-        meta.dateUtc.takeIf { it.isNotBlank() }?.let { "Encoded Date" to it },
-        meta.muxingApp.takeIf { it.isNotBlank() }?.let { "Muxing App" to it },
-        meta.writingApp.takeIf { it.isNotBlank() }?.let { "Writing App" to it }
+        "Encoded Date" to meta.dateUtc,
+        "Muxing App" to meta.muxingApp,
+        "Writing App" to meta.writingApp
     )
 
     val summaryRows = listOf(
@@ -173,18 +187,17 @@ internal fun OverviewCard(
         "Audio Tracks" to audios.size.toString(),
         "Subtitle Tracks" to subs.size.toString(),
         "Chapters" to data.chapters.size.toString(),
-        "Attachments" to data.attachments.size.toString(),
-        "Languages" to languages
-    )
+        "Attachments" to data.attachments.size.toString()
+    ).filter { it.second != "0" } + listOf("Languages" to languages)
 
     val streamRows = listOf(
         "Resolution" to resolution,
-        "Frame Rate" to if (fps > 0) "${"%.3f".format(Locale.US, fps)} FPS" else "—",
+        "Frame Rate" to if (fps > 0) "${"%.3f".format(Locale.US, fps)} FPS" else "",
         "HDR / SDR" to hdr,
         "Video Codec(s)" to videoCodecs,
         "Audio Codec(s)" to audioCodecs,
         "Subtitle Format(s)" to subFormats
-    )
+    ).filter { it.second.isNotBlank() }
 
     val q = searchQuery.trim().lowercase(Locale.ROOT)
     val filterRows = { list: List<Pair<String, String>> ->
@@ -193,8 +206,8 @@ internal fun OverviewCard(
         }
     }
 
-    val filteredGeneral = filterRows(generalRows)
-    val filteredSummary = filterRows(summaryRows)
+    val filteredGeneral = filterRows(generalRows.filter { it.second.isNotBlank() })
+    val filteredSummary = filterRows(summaryRows.filter { it.second.isNotBlank() })
     val filteredStream = filterRows(streamRows)
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -245,7 +258,7 @@ internal fun OverviewCard(
             InfoCard(
                 title = "Display & Codec Details",
                 icon = Icons.Outlined.VideoFile,
-                badgeText = resolution.takeIf { it != "—" },
+                badgeText = resolution.takeIf { it.isNotBlank() },
                 badgeColor = AccentPink,
                 isDark = isDark, border = border, surface = surface
             ) {
@@ -297,38 +310,36 @@ internal fun TrackCard(
             Spacer(Modifier.height(10.dp))
         }
 
+        val showDisplayRes = isVideo && track.displayWidth > 0 && track.displayHeight > 0 &&
+            (track.displayWidth != track.pixelWidth || track.displayHeight != track.pixelHeight)
         InfoGrid(
-            listOfNotNull(
-                "Track Name" to track.name.ifBlank { "Track #${track.trackNumber}" },
-                "Language" to track.language.ifBlank { "und" },
+            listOf(
+                "Title" to realTrackTitle(track),
+                "Language" to languageLabel(track.language),
                 "Codec" to track.displayCodec,
-                "Format / ID" to track.codecId.ifBlank { "—" },
-                track.formatInfo.takeIf { it.isNotBlank() }?.let { "Format/Info" to it },
-                if (isVideo) "Resolution" to track.displayResolution else null,
-                if (isVideo) "Frame Rate" to if (track.frameRate > 0) "%.3f FPS".format(Locale.US, track.frameRate) else "—" else null,
-                if (isVideo) track.frameRateMode.takeIf { it.isNotBlank() }?.let { "Frame Rate Mode" to it } else null,
-                if (isVideo) "Bitrate" to formatBitrate(track.bitrateBps) else null,
-                if (isVideo) track.formatProfile.takeIf { it.isNotBlank() }?.let { "Format Profile" to it } else null,
-                if (isVideo) track.formatTier.takeIf { it.isNotBlank() }?.let { "Format Tier" to it } else null,
-                if (isVideo) track.formatLevel.takeIf { it.isNotBlank() }?.let { "Format Level" to it } else null,
-                if (isVideo) "Bit Depth" to if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—" else null,
-                if (isVideo) track.chromaSubsampling.takeIf { it.isNotBlank() }?.let { "Chroma Subsampling" to it } else null,
-                if (isVideo) "Color Space" to track.colorSpace.ifBlank { "—" } else null,
-                if (isVideo) "HDR Format" to track.hdrFormat.ifBlank { "SDR" } else null,
-                if (isVideo) "Aspect Ratio" to track.aspectRatio.ifBlank { "—" } else null,
-                if (isVideo) track.bitsPerPixelFrame.takeIf { it.isNotBlank() }?.let { "Bits/(Pixel*Frame)" to it } else null,
-                if (isVideo) "Duration" to formatMs(if (track.durationMs > 0) track.durationMs else 0) else null,
-                if (!isVideo) "Channels" to channelLabel(track.channels) else null,
-                if (!isVideo) "Sample Rate" to if (track.sampleRate > 0) "${track.sampleRate} Hz" else "—" else null,
-                if (!isVideo) "Bit Depth" to if (track.bitDepth > 0) "${track.bitDepth}-bit" else "—" else null,
-                if (!isVideo) "Bitrate" to formatBitrate(track.bitrateBps) else null,
-                if (!isVideo) "Delay vs Video" to if (track.delayRelativeToVideoMs != 0L) "${track.delayRelativeToVideoMs} ms" else "—" else null,
-                if (!isVideo) "Duration" to formatMs(if (track.durationMs > 0) track.durationMs else 0) else null,
-                track.compressionMode.takeIf { it.isNotBlank() }?.let { "Compression Mode" to it },
+                "Codec ID" to track.codecId,
+                "Format/Info" to track.formatInfo,
+                "Format Profile" to track.formatProfile,
+                "Format Tier" to track.formatTier,
+                "Format Level" to track.formatLevel,
+                "Resolution" to if (isVideo) track.displayResolution else "",
+                "Display Resolution" to if (showDisplayRes) "${track.displayWidth}x${track.displayHeight}" else "",
+                "Aspect Ratio" to if (isVideo) track.aspectRatio else "",
+                "Frame Rate" to if (isVideo && track.frameRate > 0) "%.3f FPS".format(Locale.US, track.frameRate) else "",
+                "Frame Rate Mode" to if (isVideo) track.frameRateMode else "",
+                "Chroma Subsampling" to if (isVideo) track.chromaSubsampling else "",
+                "Color Space" to if (isVideo) track.colorSpace else "",
+                "HDR Format" to if (isVideo) track.hdrFormat else "",
+                "Bits/(Pixel*Frame)" to if (isVideo) track.bitsPerPixelFrame else "",
+                "Channels" to if (!isVideo) channelLabel(track.channels) else "",
+                "Sample Rate" to if (!isVideo && track.sampleRate > 0) "${track.sampleRate} Hz" else "",
+                "Bit Depth" to if (track.bitDepth > 0) "${track.bitDepth}-bit" else "",
+                "Bitrate" to formatBitrate(track.bitrateBps),
+                "Delay vs Video" to if (!isVideo && track.delayRelativeToVideoMs != 0L) "${track.delayRelativeToVideoMs} ms" else "",
+                "Duration" to if (track.durationMs > 0) formatMs(track.durationMs) else "",
+                "Compression Mode" to track.compressionMode,
                 "Stream Size" to track.formattedStreamSize(fileSizeBytes),
-                "Default / Forced" to "${if (track.isDefault) "Default" else "No"} / ${if (track.isForced) "Forced" else "No"}",
-                "Hearing Impaired" to if (track.isHearingImpaired) "Yes" else "No",
-                "Commentary" to if (track.isCommentary) "Yes" else "No"
+                "Flags" to trackFlags(track)
             ),
             primary, secondary
         )
@@ -355,7 +366,7 @@ internal fun SubtitleTrackCard(
     InfoCard(
         title = "Subtitle Track #${track.trackNumber}",
         icon = Icons.Outlined.Subtitles,
-        badgeText = track.language.ifBlank { "SUB" },
+        badgeText = track.language.takeIf { it.isNotBlank() && !it.equals("und", true) } ?: "SUB",
         badgeColor = AccentSkyBlue,
         trailingContent = {
             SmallAction("Copy", Icons.Outlined.ContentCopy, AccentSkyBlue, onCopy)
@@ -363,20 +374,19 @@ internal fun SubtitleTrackCard(
         isDark = isDark, border = border, surface = surface
     ) {
         InfoGrid(
-            listOfNotNull(
-                "Track Name" to track.name.ifBlank { "Track #${track.trackNumber}" },
-                "Language" to track.language.ifBlank { "und" },
+            listOf(
+                "Title" to realTrackTitle(track),
+                "Language" to languageLabel(track.language),
                 "Format / Codec" to subtitleFormatLabel(track),
-                "Format / ID" to track.codecId.ifBlank { "—" },
-                "Character Encoding" to if (track.codecId.contains("UTF8", true) || track.codecId.contains("ASS", true) || track.codecId.contains("SSA", true)) "UTF-8" else "Container native",
-                "Duration" to formatMs(track.durationMs),
+                "Codec ID" to track.codecId,
+                // Matroska text subtitles (SRT / ASS / SSA / WebVTT) are always stored as UTF-8.
+                "Character Encoding" to if (track.codecId.startsWith("S_TEXT", true)) "UTF-8" else "",
+                "Duration" to if (track.durationMs > 0) formatMs(track.durationMs) else "",
                 "Bit Rate" to formatBitrate(track.bitrateBps),
-                track.compressionMode.takeIf { it.isNotBlank() }?.let { "Compression Mode" to it },
-                if (track.countOfElements > 0) "Count of Elements" to track.countOfElements.toString() else null,
+                "Compression Mode" to track.compressionMode,
+                "Count of Elements" to if (track.countOfElements > 0) track.countOfElements.toString() else "",
                 "Stream Size" to track.formattedStreamSize(fileSizeBytes),
-                "Default" to if (track.isDefault) "Yes" else "No",
-                "Forced" to if (track.isForced) "Yes" else "No",
-                "Hearing Impaired" to if (track.isHearingImpaired) "Yes" else "No"
+                "Flags" to trackFlags(track)
             ),
             primary, secondary
         )
@@ -503,7 +513,7 @@ internal fun AttachmentCard(
                 "File Name" to attachment.fileName,
                 "MIME Type" to attachment.mimeType,
                 "Size" to attachment.formattedSize,
-                "Description" to attachment.description.ifBlank { "—" },
+                "Description" to attachment.description,
                 "Type" to if (attachment.isFont) "Embedded Font" else "Attachment"
             ), primary, secondary
         )
@@ -667,11 +677,14 @@ internal fun InfoCard(
 
 @Composable
 private fun InfoGrid(items: List<Pair<String, String>>, primary: Color, secondary: Color) {
+    // Rows without a real value are not shown at all.
+    val shown = items.filter { it.second.isNotBlank() && it.second.trim() != "—" }
+    if (shown.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        items.forEach { (k, v) ->
+        shown.forEach { (k, v) ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Text(k, color = secondary, fontSize = 12.sp, modifier = Modifier.width(140.dp))
-                Text(v.ifBlank { "—" }, color = primary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(v, color = primary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -683,6 +696,33 @@ internal fun EmptyInfo(message: String, primary: Color, secondary: Color, surfac
         Text(message, color = secondary, fontSize = 13.sp)
     }
 }
+
+/** Language as "Hindi (hin)"; empty when the file does not declare one (so the row is hidden). */
+internal fun languageLabel(raw: String): String {
+    val code = raw.trim()
+    val name = mapLanguageToSimpleName(code) ?: return ""
+    val pretty = name.replaceFirstChar { it.uppercase(Locale.ROOT) }
+    return if (pretty.equals(code, ignoreCase = true)) pretty else "$pretty ($code)"
+}
+
+/** The title written in the file; the parser's auto-made "Audio Track 2" style names are not real titles. */
+internal fun realTrackTitle(track: MkvTrackInfo): String {
+    val n = track.name.trim()
+    if (n.isBlank()) return ""
+    val auto = Regex("^${Regex.escape(track.trackType.displayName)} Track #?\\d+$", RegexOption.IGNORE_CASE)
+    return if (auto.matches(n)) "" else n
+}
+
+internal fun trackFlags(track: MkvTrackInfo): String = listOfNotNull(
+    "Default".takeIf { track.isDefault },
+    "Forced".takeIf { track.isForced },
+    "Original".takeIf { track.isOriginal },
+    "Commentary".takeIf { track.isCommentary },
+    "Descriptions".takeIf { track.isDescriptions },
+    "Hearing Impaired".takeIf { track.isHearingImpaired },
+    "Visual Impaired".takeIf { track.isVisualImpaired },
+    "Disabled".takeIf { !track.isEnabled }
+).joinToString(" • ")
 
 internal fun subtitleFormatLabel(track: MkvTrackInfo): String {
     val c = track.codecId.uppercase(Locale.ROOT)

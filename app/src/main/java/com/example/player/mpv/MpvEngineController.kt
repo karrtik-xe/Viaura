@@ -3544,27 +3544,30 @@ class MpvPlayerController {
         subtitleFontFamily = fontFamily?.takeIf { it.isNotBlank() }
 
         val view = mpvView ?: return
+        // Track switch replays this whole block; libass rebuilds its fonts/layout for every property write
+        // even when the value is the same, which made the screen hitch. Only changed values are written.
+        val mpvGuard = SubtitlePropGuard(view)
         try {
             // Guarantee subtitle rendering pipeline is active without toggling sid
             if (!isSubtitleExplicitlyDisabled) {
-                view.mpv.setPropertyBoolean("sub-visibility", true)
+                mpvGuard.setPropertyBoolean("sub-visibility", true)
             }
-            view.mpv.setPropertyString("sub-ass", "yes")
+            mpvGuard.setPropertyString("sub-ass", "yes")
             // This is a rendering override, never a destructive mutation of embedded ASS/SSA.
-            view.mpv.setPropertyString("sub-ass-override", if (effectiveOverrideAss) "force" else "no")
-            view.mpv.setPropertyBoolean("embeddedfonts", true)
+            mpvGuard.setPropertyString("sub-ass-override", if (effectiveOverrideAss) "force" else "no")
+            mpvGuard.setPropertyBoolean("embeddedfonts", true)
 
             // Direct native MPV properties for instantaneous styling
-            view.mpv.setPropertyString("sub-bold", if (effectiveOverrideAss && bold) "yes" else "no")
-            view.mpv.setPropertyString("sub-italic", if (effectiveOverrideAss && italic) "yes" else "no")
-            view.mpv.setPropertyDouble("sub-font-size", if (effectiveOverrideAss) subtitleFontSize else 52.0)
-            view.mpv.setPropertyString("sub-align-x", if (effectiveOverrideAss) alignment.lowercase() else "center")
-            view.mpv.setPropertyString("sub-scale-with-window", if (effectiveOverrideAss) if (scaleWithWindow) "yes" else "no" else "yes")
-            view.mpv.setPropertyDouble("sub-scale", if (effectiveOverrideAss) subtitleScale else 1.0)
-            view.mpv.setPropertyDouble("sub-pos", if (effectiveOverrideAss) subtitlePosition else 100.0)
-            view.mpv.setPropertyString("sub-color", if (effectiveOverrideAss) subtitleTextColor else "1.0/1.0/1.0/1.0")
-            view.mpv.setPropertyString("sub-border-color", if (effectiveOverrideAss) subtitleBorderColor else "0.0/0.0/0.0/1.0")
-            view.mpv.setPropertyDouble(
+            mpvGuard.setPropertyString("sub-bold", if (effectiveOverrideAss && bold) "yes" else "no")
+            mpvGuard.setPropertyString("sub-italic", if (effectiveOverrideAss && italic) "yes" else "no")
+            mpvGuard.setPropertyDouble("sub-font-size", if (effectiveOverrideAss) subtitleFontSize else 52.0)
+            mpvGuard.setPropertyString("sub-align-x", if (effectiveOverrideAss) alignment.lowercase() else "center")
+            mpvGuard.setPropertyString("sub-scale-with-window", if (effectiveOverrideAss) if (scaleWithWindow) "yes" else "no" else "yes")
+            mpvGuard.setPropertyDouble("sub-scale", if (effectiveOverrideAss) subtitleScale else 1.0)
+            mpvGuard.setPropertyDouble("sub-pos", if (effectiveOverrideAss) subtitlePosition else 100.0)
+            mpvGuard.setPropertyString("sub-color", if (effectiveOverrideAss) subtitleTextColor else "1.0/1.0/1.0/1.0")
+            mpvGuard.setPropertyString("sub-border-color", if (effectiveOverrideAss) subtitleBorderColor else "0.0/0.0/0.0/1.0")
+            mpvGuard.setPropertyDouble(
                 "sub-border-size",
                 if (effectiveOverrideAss && borderStyle != "none" && borderStyle != "shadow") {
                     if (borderStyle == "opaque_box" || borderStyle == "background_box") {
@@ -3572,38 +3575,38 @@ class MpvPlayerController {
                     } else subtitleBorderSize
                 } else 0.0
             )
-            view.mpv.setPropertyString("sub-shadow-color", if (effectiveOverrideAss) subtitleShadowColor else "0.0/0.0/0.0/0.75")
-            view.mpv.setPropertyDouble(
+            mpvGuard.setPropertyString("sub-shadow-color", if (effectiveOverrideAss) subtitleShadowColor else "0.0/0.0/0.0/0.75")
+            mpvGuard.setPropertyDouble(
                 "sub-shadow-offset",
                 if (effectiveOverrideAss && borderStyle != "none" && borderStyle != "outline") subtitleShadowOffset else 0.0
             )
             try {
-                view.mpv.setPropertyDouble("sub-blur", if (effectiveOverrideAss) shadowBlur.coerceIn(0f, 20f).toDouble() else 0.0)
+                mpvGuard.setPropertyDouble("sub-blur", if (effectiveOverrideAss) shadowBlur.coerceIn(0f, 20f).toDouble() else 0.0)
             } catch (_: Throwable) {}
             val backColor = if (effectiveOverrideAss && (borderStyle == "opaque_box" || borderStyle == "background_box")) {
                 subtitleBackgroundColor
             } else {
                 subtitleShadowColor
             }
-            view.mpv.setPropertyString("sub-back-color", backColor)
+            mpvGuard.setPropertyString("sub-back-color", backColor)
             val mpvBorderStyle = when {
                 !effectiveOverrideAss -> "outline-and-shadow"
                 borderStyle == "opaque_box" -> "opaque-box"
                 borderStyle == "background_box" -> "background-box"
                 else -> "outline-and-shadow"
             }
-            view.mpv.setPropertyString("sub-border-style", mpvBorderStyle)
-            view.mpv.setPropertyString("blend-subtitles", if (effectiveOverrideAss && blendWithVideo) "yes" else "no")
+            mpvGuard.setPropertyString("sub-border-style", mpvBorderStyle)
+            mpvGuard.setPropertyString("blend-subtitles", if (effectiveOverrideAss && blendWithVideo) "yes" else "no")
             try {
-                view.mpv.setPropertyDouble("sub-spacing", if (effectiveOverrideAss) letterSpacing.toDouble() else 0.0)
+                mpvGuard.setPropertyDouble("sub-spacing", if (effectiveOverrideAss) letterSpacing.toDouble() else 0.0)
             } catch (_: Throwable) {}
 
             if (fontDirectory != null && fontDirectory.isNotBlank() && fontDirectory != lastAppliedFontDirectory) {
                 lastAppliedFontDirectory = fontDirectory
-                view.mpv.setPropertyString("sub-fonts-dir", fontDirectory)
+                mpvGuard.setPropertyString("sub-fonts-dir", fontDirectory)
             }
             val effectiveFontFamily = if (!fontFamily.isNullOrBlank()) fontFamily else SubtitleFontManager.BUNDLED_FALLBACK_FONT_FAMILY
-            view.mpv.setPropertyString("sub-font", effectiveFontFamily)
+            mpvGuard.setPropertyString("sub-font", effectiveFontFamily)
             onSelectedSubtitleFontChanged(fontFamily)
 
             // Also configure sub-ass-force-style for fine-grained style override support
@@ -3670,9 +3673,9 @@ class MpvPlayerController {
                 }
             }
             try {
-                view.mpv.setPropertyString("sub-ass-force-style", if (effectiveOverrideAss) forceStyles.joinToString(",") else "")
-                view.mpv.setPropertyBoolean("sub-ass-scale-with-window", false)
-                view.mpv.setPropertyBoolean("sub-ass-force-margins", false)
+                mpvGuard.setPropertyString("sub-ass-force-style", if (effectiveOverrideAss) forceStyles.joinToString(",") else "")
+                mpvGuard.setPropertyBoolean("sub-ass-scale-with-window", false)
+                mpvGuard.setPropertyBoolean("sub-ass-force-margins", false)
 
                 // Changing Override ASS/SSA is a renderer-state transition, not merely a UI
                 // preference change. Clear force-style first, then reload the active native
@@ -4339,6 +4342,50 @@ class MpvPlayerController {
 
     private class AdvancedAssPlan(val info: AdvancedAssTrackInfo, val originalId: Int)
 
+    private val appliedSubProps = ConcurrentHashMap<String, String>()
+    @Volatile private var appliedSubPropsOwner: Any? = null
+
+    /**
+     * Writes an mpv sub-* property only when it really changes. Properties that other code paths also write
+     * are compared with the live mpv value; the rest are compared with the last value written here.
+     */
+    private inner class SubtitlePropGuard(private val view: VideoPlayerMpvView) {
+        private val cacheTrusted = setOf(
+            "sub-bold", "sub-italic", "sub-font-size", "sub-align-x", "sub-color", "sub-border-color",
+            "sub-border-size", "sub-shadow-color", "sub-shadow-offset", "sub-blur", "sub-back-color",
+            "sub-border-style", "blend-subtitles", "sub-spacing", "sub-font"
+        )
+
+        init {
+            if (appliedSubPropsOwner !== view) {
+                appliedSubProps.clear()
+                appliedSubPropsOwner = view
+            }
+        }
+
+        fun setPropertyString(name: String, value: String) {
+            val live = try { view.mpv.getPropertyString(name) } catch (_: Throwable) { null }
+            if (live == value || (value.isEmpty() && live.isNullOrEmpty())) { appliedSubProps[name] = value; return }
+            if (name in cacheTrusted && appliedSubProps[name] == value) return
+            view.mpv.setPropertyString(name, value)
+            appliedSubProps[name] = value
+        }
+
+        fun setPropertyDouble(name: String, value: Double) {
+            val live = try { view.mpv.getPropertyDouble(name) } catch (_: Throwable) { null }
+            if (live != null && kotlin.math.abs(live - value) < 1e-6) return
+            if (name in cacheTrusted && appliedSubProps[name] == value.toString()) return
+            view.mpv.setPropertyDouble(name, value)
+            appliedSubProps[name] = value.toString()
+        }
+
+        fun setPropertyBoolean(name: String, value: Boolean) {
+            val live = try { view.mpv.getPropertyBoolean(name) } catch (_: Throwable) { null }
+            if (live == value) return
+            view.mpv.setPropertyBoolean(name, value)
+        }
+    }
+
     /** Sets a string option only when its current value differs (see syncAdvancedAssNow). */
     private fun setMpvStringIfChanged(view: VideoPlayerMpvView, name: String, value: String) {
         val current = try { view.mpv.getPropertyString(name) } catch (_: Throwable) { null }
@@ -4684,6 +4731,9 @@ class MpvPlayerController {
                     if (!found) return@withMpvLock false
 
                     val currentSid = try { view.mpv.getPropertyInt("sid") ?: 0 } catch (_: Throwable) { 0 }
+                    // The track was already enumerated and selected on the very first look: nothing raced, so
+                    // skip the extra libass reload (it caused a visible hitch on every ASS/SSA switch).
+                    if (attempt == 0 && currentSid == expectedPlaybackId) return@withMpvLock true
                     if (currentSid != expectedPlaybackId) {
                         try { view.mpv.setPropertyInt("sid", expectedPlaybackId) } catch (_: Throwable) {}
                     }

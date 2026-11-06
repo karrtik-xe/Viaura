@@ -114,7 +114,8 @@ data class MkvTrackInfo(
                 codecId.contains("AAC", true) -> "AAC"
                 codecId.contains("OPUS", true) -> "Opus"
                 codecId.contains("FLAC", true) -> "FLAC"
-                codecId.contains("AC3", true) || codecId.contains("EAC3", true) -> "Dolby Digital (AC-3)"
+                codecId.contains("EAC3", true) -> "Dolby Digital Plus (E-AC-3)"
+                codecId.contains("AC3", true) -> "Dolby Digital (AC-3)"
                 codecId.contains("DTS", true) -> "DTS"
                 codecId.contains("ASS", true) -> "SubStation Alpha (.ass)"
                 codecId.contains("SSA", true) -> "SubStation Alpha (.ssa)"
@@ -266,15 +267,17 @@ data class MkvContainerMetadata(
     var fileSizeBytes: Long = 0L,
     var durationMs: Long = 0L,
     var title: String = "",
-    var muxingApp: String = "SuB Editor MKV Muxer (v1.0)",
-    var writingApp: String = "libmatroska-subeditor",
+    var muxingApp: String = "",
+    var writingApp: String = "",
     var dateUtc: String = "",
     var timecodeScale: Long = 1000000L, // 1ms default
     var segmentUid: String = "",
     var isLargeFile: Boolean = false,
     // EBML DocTypeVersion, e.g. 4 for "Matroska Version 4". Matches MediaInfo's
     // "Format version" row.
-    var docTypeVersion: Int = 0
+    var docTypeVersion: Int = 0,
+    // Human readable container name for non-Matroska files (MPEG-4, QuickTime, ...). Empty = derive from extension.
+    var containerFormat: String = ""
 ) {
     val formattedDuration: String
         get() = MkvChapterInfo.formatTimeMs(durationMs)

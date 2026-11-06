@@ -1634,6 +1634,10 @@ class EbmlStreamReader(private val stream: InputStream, private val totalLength:
             }
         }
 
+        // The container only stores the default frame duration; the frame rate is derived from it (it was never filled in).
+        if (trackType == MkvTrackType.VIDEO && frameRate <= 0f && defaultDurationNs > 0L) {
+            frameRate = (1_000_000_000.0 / defaultDurationNs.toDouble()).toFloat()
+        }
         if (name.isBlank()) {
             name = "${trackType.displayName} Track $index"
         }
