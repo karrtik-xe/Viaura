@@ -2288,8 +2288,15 @@ private fun VideoPlayerScreenImpl(
         }
     }
 
+    // Set by the Now Playing reorder: the playing video only moved inside the list, it must not be loaded again.
+    var reorderKeepKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(currentVideoIndex, currentPlaylist) {
         val targetVideo = currentPlaylist.getOrNull(currentVideoIndex) ?: video ?: return@LaunchedEffect
+        if (reorderKeepKey == "${targetVideo.id}|${targetVideo.path}") {
+            reorderKeepKey = null
+            lastLoadedVideoKey = "${targetVideo.id}_${getPlayableFilePath(context, targetVideo.uri, targetVideo.path)}_$currentVideoIndex"
+            return@LaunchedEffect
+        }
         // A provider video opens the player first: its servers are fetched and raced in here (first working one plays).
         if (com.example.util.media.PluginQueuedEpisodes.isQueued(targetVideo.path)) {
             if (queuedResolveError == null) playEpisodeAtIndex(currentVideoIndex)
@@ -2298,16 +2305,6 @@ private fun VideoPlayerScreenImpl(
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
         if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || (targetVideo.isOnline && path.startsWith("http")) || com.example.util.archive.ArchiveStreamServer.isLoopbackUrl(path))) {
             val key = "${targetVideo.id}_${path}_$currentVideoIndex"
-            // Only the POSITION of the playing episode in the list changed (the user dragged an episode up / down in the
-            // playlist): it is the very same video, so it keeps playing untouched - no reload, no restart, no cut.
-            val loadedKeyNow = lastLoadedVideoKey
-            val samePrefix = "${targetVideo.id}_${path}_"
-            if (loadedKeyNow != null && loadedKeyNow != key && loadedKeyNow.startsWith(samePrefix) &&
-                loadedKeyNow.substring(samePrefix.length).all { it.isDigit() } &&
-                loadedKeyNow.length > samePrefix.length && controller.isAlive
-            ) {
-                lastLoadedVideoKey = key
-            }
             if (lastLoadedVideoKey != key) {
                 val adopted = miniAdopted
                 if (miniAdoptPending && adopted != null && adopted.controller.isAlive &&
@@ -3836,6 +3833,7 @@ private fun VideoPlayerScreenImpl(
                                 ?: list.indexOfFirst { it.path == playingItem.path && it.id == playingItem.id }
                         } else -1
                         if (newIdx >= 0) {
+                            if (playingItem != null) reorderKeepKey = "${playingItem.id}|${playingItem.path}"
                             currentVideoIndex = newIdx
                         }
                     }
@@ -4636,8 +4634,7 @@ private fun BoxScope.ChannelModeLayer(
         CompositionLocalProvider(LocalDensity provides chScaledDensity) {
             HeaderBar(
                 title = when {
-                    // a provider (plugin) video is online too, but its header shows the provider's own name
-                    isProviderVideo(currentVideo) -> providerNameOf(currentVideo)
+                    isProviderPlayback(currentVideo) -> providerNameOf(currentVideo)
                     currentVideo?.isOnline == true -> "Online"
                     currentVideo?.isNetworkStream == true -> "Network"
                     currentVideo?.isDirectStream == true -> "Stream"
@@ -4660,15 +4657,26 @@ private fun BoxScope.ChannelModeLayer(
             .padding(top = chHeaderBottom + PinnedHeaderUi.searchExtra + chCardH + 8.dp, start = chHPad, end = chHPad)
     ) {
         CompositionLocalProvider(LocalDensity provides chScaledDensity) {
-            ChannelPlayerSection(
-                video = currentVideo,
-                playlist = currentPlaylist,
-                uiState = uiState,
-                isDark = chIsDark,
-                cardsHidden = channelCardsHidden,
-                onOpenChannel = { openedChannel = it },
-                onPlayItem = onPlayItem
-            )
+            if (isProviderPlayback(currentVideo)) {
+                ProviderPlayerSection(
+                    video = currentVideo,
+                    playlist = currentPlaylist,
+                    uiState = uiState,
+                    isDark = chIsDark,
+                    cardsHidden = channelCardsHidden,
+                    onPlayItem = onPlayItem
+                )
+            } else {
+                ChannelPlayerSection(
+                    video = currentVideo,
+                    playlist = currentPlaylist,
+                    uiState = uiState,
+                    isDark = chIsDark,
+                    cardsHidden = channelCardsHidden,
+                    onOpenChannel = { openedChannel = it },
+                    onPlayItem = onPlayItem
+                )
+            }
         }
     }
 
@@ -4873,7 +4881,7 @@ private fun chFormatCount(n: Long): String = when {
 }
 
 @Composable
-internal fun ChannelActionChip(
+private fun ChannelActionChip(
     iconRes: Int,
     label: String,
     isDark: Boolean,
@@ -4921,10 +4929,7 @@ private fun ChannelPlayerSection(
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
     val glass = uiState.glassBlurTransparency
     val cardShape = RoundedCornerShape(16.dp)
-    // Only a real YouTube video has a watch page (likes, subscribe, comments). A provider video is online as well,
-    // but it is a plain stream: it must never be treated like a YouTube video.
-    val isProviderMedia = isProviderVideo(video)
-    val watchUrl: String? = video?.takeIf { it.isOnline && !it.isDirectStream }?.let { OnlineVideoService.toWatchUrl(it.path) }
+    val watchUrl: String? = video?.takeIf { it.isOnline }?.let { OnlineVideoService.toWatchUrl(it.path) }
     val prefs = remember { context.getSharedPreferences("viaura_channel_player", Context.MODE_PRIVATE) }
     // viaura_like / viaura_dislike come from viaura-icons.zip (unpacked into res/drawable before the build). Direct references,
     // so the resources are always packed into the APK and the Like / Dislike chips can never end up without their icon.
@@ -5033,13 +5038,7 @@ private fun ChannelPlayerSection(
                 val sameFolder = if (curFolder != null) playlist.filter { File(it.path).parent == curFolder } else emptyList()
                 if (sameFolder.size > 1) sameFolder else emptyList()
             }
-            // A provider episode that was resolved has the stream link as its path: the list still holds its placeholder, so the
-            // position is also looked up through the playback session (episode index of the series).
-            val at = series.indexOfFirst { it.path == video?.path }.let { found ->
-                if (found >= 0 || !isProviderMedia) found
-                else (com.example.util.media.PluginPlaybackSessions.get(video?.path.orEmpty())?.episodeIndex
-                    ?.takeIf { it in series.indices } ?: -1)
-            }
+            val at = series.indexOfFirst { it.path == video?.path }
             when {
                 series.size <= 1 -> emptyList()
                 at >= 0 -> series.drop(at + 1) + series.take(at)
@@ -5236,9 +5235,6 @@ private fun ChannelPlayerSection(
                                 Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
                             } catch (_: Throwable) {}
                         }
-                    } else if (video != null && isProviderMedia) {
-                        // provider media: Save, Download, Playlist, Share, Link copy - no Like / Dislike / Subscribe
-                        ProviderActionChips(video, isDark, glass)
                     } else if (video != null && !video.isNetworkStream && !video.isDirectStream &&
                         !com.example.util.media.PluginQueuedEpisodes.isQueued(video.path)) {
                         ChannelActionChip(com.example.R.drawable.viaura_playlist_video, "Playlist", isDark) { localPlaylistTarget = video }
@@ -5281,20 +5277,12 @@ private fun ChannelPlayerSection(
         if (recommended.isNotEmpty()) {
             item(key = "channel_rec_title") {
                 Text(
-                    text = if (watchUrl != null) "Recommended" else if (isProviderMedia) "Episodes" else "Up next",
+                    text = if (watchUrl != null) "Recommended" else "Up next",
                     color = primary, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                 )
             }
             items(recommended, key = { "channel_rec_${it.path}" }) { item ->
-              if (isProviderMedia) {
-                ProviderEpisodeRow(
-                    item = item,
-                    number = playlist.indexOfFirst { it.path == item.path }.let { if (it >= 0) it + 1 else 0 },
-                    isDark = isDark,
-                    onClick = { onPlayItem(item) }
-                )
-              } else {
                 VideoItemCard(
                     video = item,
                     isDark = isDark,
@@ -5308,7 +5296,6 @@ private fun ChannelPlayerSection(
                         onPlayItem(item)
                     }
                 )
-              }
             }
         } else if (watchUrl != null && details == null) {
             item(key = "channel_rec_loading") {
@@ -5395,6 +5382,182 @@ private fun ChannelPlayerSection(
             glassBlurTransparency = glass,
             onDismiss = { localPlaylistTarget = null },
             onPlaylistUpdated = { localPlaylistTarget = null }
+        )
+    }
+}
+
+// ---- Media provider (plugin) videos in the pinned layout: no YouTube-style cards, just title, actions and the episodes ----
+
+private fun providerSessionOf(v: VideoItem?): com.example.util.media.PluginPlaybackSession? =
+    v?.path?.let { com.example.util.media.PluginPlaybackSessions.get(it) }
+
+/** True for a video that comes from a media provider (a resolved stream with a provider session, or a queued episode). */
+private fun isProviderPlayback(v: VideoItem?): Boolean =
+    v != null && (providerSessionOf(v) != null || com.example.util.media.PluginQueuedEpisodes.isQueued(v.path))
+
+private fun providerNameOf(v: VideoItem?): String =
+    providerSessionOf(v)?.plugin?.name?.takeIf { it.isNotBlank() }
+        ?: v?.channelName?.takeIf { it.isNotBlank() }
+        ?: "Provider"
+
+/** Under the video: the episode's title with Save / Download / Playlist / Share / Link, then (for a series) its episodes. */
+@Composable
+private fun ProviderPlayerSection(
+    video: VideoItem?,
+    playlist: List<VideoItem>,
+    uiState: UiState,
+    isDark: Boolean,
+    cardsHidden: Boolean = false,
+    onPlayItem: (VideoItem) -> Unit
+) {
+    val context = LocalContext.current
+    val primary = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
+    val glass = uiState.glassBlurTransparency
+    val cardShape = RoundedCornerShape(16.dp)
+    val session = providerSessionOf(video)
+    val plugin = session?.plugin
+    val episodeLink = session?.episodeLink.orEmpty()
+    val episodeType = session?.episodeType.orEmpty()
+    val episodeTitle = session?.episodeTitle?.takeIf { it.isNotBlank() } ?: video?.displayName.orEmpty()
+    val shareLink = episodeLink.takeIf { it.startsWith("http", true) } ?: video?.path?.takeIf { it.startsWith("http", true) }.orEmpty()
+
+    var saved by remember(episodeLink) {
+        mutableStateOf(plugin != null && episodeLink.isNotBlank() && com.example.util.media.MediaLibraryStore.isSaved(context, plugin.value, episodeLink))
+    }
+    var showDownload by remember(episodeLink) { mutableStateOf(false) }
+
+    // A single movie / single episode shows nothing below; a series shows all its episodes with the playing one marked.
+    val episodes = remember(playlist) {
+        playlist.filter { com.example.util.media.PluginQueuedEpisodes.isQueued(it.path) }.distinctBy { it.path }
+    }
+    val showEpisodes = (session == null || session.isSeries) && episodes.size > 1
+    val currentIdx = remember(video, episodes, session) {
+        val wanted = session?.episodeIndex
+        episodes.indexOfFirst { it.path == video?.path || (wanted != null && it.path.substringAfterLast('/').toIntOrNull() == wanted) }
+    }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(currentIdx, showEpisodes) {
+        if (showEpisodes && currentIdx > 0) listState.scrollToItem(2 + currentIdx - 1)
+    }
+
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 4.dp, bottom = navBottom + 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item(key = "provider_info") {
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !cardsHidden,
+                enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.tween(240)) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200)),
+                exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.tween(240)) + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .glassPanelSurface(cardShape, isDark, glass)
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = video?.displayName.orEmpty(),
+                        color = primary, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                    val meta = listOf(video?.formattedSize.orEmpty(), video?.durationFormatted.orEmpty(), video?.resolution.orEmpty())
+                        .filter { it.isNotBlank() && it != "0 B" && it != "00:00" }.joinToString(" \u2022 ")
+                    if (meta.isNotBlank()) {
+                        Text(text = meta, color = secondary, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (plugin != null && episodeLink.isNotBlank()) {
+                            ChannelActionChip(
+                                iconRes = if (saved) com.example.R.drawable.viaura_saved_bookmark else com.example.R.drawable.viaura_bookmark,
+                                label = "Save", isDark = isDark, active = saved
+                            ) {
+                                saved = com.example.util.media.MediaLibraryStore.toggleWatchLater(
+                                    context,
+                                    com.example.util.media.MediaSavedVideo(
+                                        pluginId = plugin.value,
+                                        title = episodeTitle,
+                                        pageTitle = video?.displayName.orEmpty(),
+                                        poster = video?.thumbnailUrl.orEmpty(),
+                                        link = episodeLink,
+                                        type = episodeType
+                                    )
+                                )
+                                Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                            }
+                            ChannelActionChip(com.example.R.drawable.viaura_download_minimalistic, "Download", isDark) {
+                                showDownload = true
+                            }
+                        }
+                        if (plugin != null && video != null) {
+                            ChannelActionChip(com.example.R.drawable.viaura_playlist_video, "Playlist", isDark) {
+                                com.example.util.media.MediaPlayback.addToPluginPlaylist(context, plugin, video)
+                                Toast.makeText(context, "Added to the \"${plugin.name}\" playlist", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        if (shareLink.isNotBlank()) {
+                            ChannelActionChip(com.example.R.drawable.viaura_share, "Share", isDark) {
+                                com.example.ui.components.shareOnlineLink(context, video?.displayName.orEmpty(), shareLink)
+                            }
+                            ChannelActionChip(com.example.R.drawable.viaura_copy, "Link copy", isDark) {
+                                try {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    cm.setPrimaryClip(android.content.ClipData.newPlainText("link", shareLink))
+                                    Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showEpisodes) {
+            item(key = "provider_ep_title") {
+                Text(
+                    text = "Episodes \u2022 ${episodes.size}",
+                    color = primary, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp)
+                )
+            }
+            items(episodes, key = { "provider_ep_${it.path}" }) { ep ->
+                val isCurrent = ep.path == episodes.getOrNull(currentIdx)?.path
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(if (isCurrent) Modifier.border(1.5.dp, AccentGradient, RoundedCornerShape(16.dp)) else Modifier)
+                ) {
+                    VideoItemCard(
+                        video = ep,
+                        isDark = isDark,
+                        visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                        onClick = { if (!isCurrent) onPlayItem(ep) }
+                    )
+                }
+            }
+        }
+    }
+
+    if (showDownload && plugin != null) {
+        com.example.ui.components.MediaDownloadSheet(
+            isDark = isDark,
+            glassBlurTransparency = glass,
+            plugin = plugin,
+            title = episodeTitle,
+            poster = video?.thumbnailUrl.orEmpty(),
+            link = episodeLink,
+            type = episodeType,
+            onDismiss = { showDownload = false },
+            group = if (session?.isSeries == true) video?.displayName.orEmpty().substringBefore(" \u00B7 ").trim() else ""
         )
     }
 }
