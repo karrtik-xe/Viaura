@@ -4651,7 +4651,7 @@ class MpvPlayerController {
             preciseSeekRestoreJob = playerScope.launch(Dispatchers.Default) {
                 delay(holdMs)
                 kotlinx.coroutines.withContext(NonCancellable) {
-                    val prev = synchronized(this@MpvEngineController) {
+                    val prev = synchronized(this@MpvPlayerController) {
                         val p = preciseSeekPrevious
                         preciseSeekPrevious = null
                         p
