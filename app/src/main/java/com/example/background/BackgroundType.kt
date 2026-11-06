@@ -49,6 +49,11 @@ enum class BackgroundType(
   STARBURST("Starburst"),
   BUBBLE_POP("Bubble pop"),
   STORM("Storm"),
+  SHOCKWAVE("Shockwave"),
+  PETAL_BURST("Petal burst"),
+  PIXEL_POP("Pixel pop"),
+  CRYSTAL_SHATTER("Crystal shatter"),
+  VORTEX("Vortex"),
   NONE("None"),
   RANDOM("Random"),
 
@@ -63,7 +68,7 @@ enum class BackgroundType(
   val isSeasonal: Boolean get() = this in SEASONAL
 
   /** Reacts to a touch anywhere on the screen (a ripple, burst, pop or lightning bolt where the finger lands). */
-  val hasClickEffect: Boolean get() = this == DIWALI || this in CLICK_FX
+  val hasClickEffect: Boolean get() = this == DIWALI || this in CLICK_FX || this in FRESH
 
   companion object {
     val SEASONAL: Set<BackgroundType> = setOf(HALLOWEEN, FIREWORKS, WINTER, DIWALI, HOLI)
@@ -74,13 +79,14 @@ enum class BackgroundType(
       WARP, FLOW, PRISM, LANTERNS, CONFETTI,
       SILK, NEBULA, RIPPLES, SYNTHWAVE, MANDALA,
       INK_BLOOM, NEON_PULSE, STARBURST, BUBBLE_POP, STORM,
+      SHOCKWAVE, PETAL_BURST, PIXEL_POP, CRYSTAL_SHATTER, VORTEX,
     )
 
     /** Backdrops that answer every touch: shown together in their own "CLICK EFFECTS" section of the picker. */
     val CLICK_FX: List<BackgroundType> = listOf(INK_BLOOM, NEON_PULSE, STARBURST, BUBBLE_POP, STORM)
 
-    /** The newest five: shown together in their own "NEW" section of the picker. */
-    val FRESH: List<BackgroundType> = listOf(SILK, NEBULA, RIPPLES, SYNTHWAVE, MANDALA)
+    /** The newest five click effects: shown together in their own "NEW" section of the picker. */
+    val FRESH: List<BackgroundType> = listOf(SHOCKWAVE, PETAL_BURST, PIXEL_POP, CRYSTAL_SHATTER, VORTEX)
 
     /** Tiles of the picker, in display order. */
     val PICKABLE: List<BackgroundType> = entries.filter { it !in SEASONAL }

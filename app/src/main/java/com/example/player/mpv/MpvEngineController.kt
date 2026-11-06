@@ -4628,6 +4628,67 @@ class MpvPlayerController {
         }
     }
 
+    private var preciseSeekRestoreJob: Job? = null
+    private var preciseSeekPrevious: String? = null
+
+    /**
+     * Switching an audio / subtitle stream makes mpv re-read the current position with a refresh seek. A relative seek is
+     * keyframe-only by default, so the picture jumped back to the previous keyframe and then forward again (and the sound
+     * cut). While a track switch is running every seek is made frame-exact, so the picture stays exactly where it is.
+     * The previous setting is restored a moment later.
+     */
+    private fun holdPreciseSeekForTrackSwitch(holdMs: Long = 1_800L) {
+        try {
+            val view = mpvView ?: return
+            if (isReleased) return
+            synchronized(this) {
+                if (preciseSeekPrevious == null) {
+                    preciseSeekPrevious = try { view.mpv.getPropertyString("hr-seek") } catch (_: Throwable) { null } ?: "default"
+                }
+                try { view.mpv.setPropertyString("hr-seek", "yes") } catch (_: Throwable) {}
+            }
+            preciseSeekRestoreJob?.cancel()
+            preciseSeekRestoreJob = playerScope.launch(Dispatchers.Default) {
+                delay(holdMs)
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    val prev = synchronized(this@MpvEngineController) {
+                        val p = preciseSeekPrevious
+                        preciseSeekPrevious = null
+                        p
+                    }
+                    if (prev != null) withMpvLock(Unit) { v -> try { v.mpv.setPropertyString("hr-seek", prev) } catch (_: Throwable) {} }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    /** Eases the volume down for the instant mpv flushes its audio for a track refresh, then brings it back (no click / cut). */
+    private fun duckAudioForTrackRefresh() {
+        try {
+            if (!_isPlaying.value || System.currentTimeMillis() < seamlessHandOverUntil) return
+            val original = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+            if (original == null || original <= 0.0) return
+            for (i in 1..4) {
+                val vol = original * (1.0 - i / 4.0)
+                withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                Thread.sleep(6L)
+            }
+            playerScope.launch(Dispatchers.Default) {
+                delay(260L)
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    val now = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+                    if (now != null && kotlin.math.abs(now) < 0.6) {
+                        for (i in 1..8) {
+                            val vol = original * (i / 8.0)
+                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                            delay(14L)
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
     private var audioSwitchJob: Job? = null
 
     /**
@@ -4670,12 +4731,13 @@ class MpvPlayerController {
                     delay(8L)
                 }
             }
+            holdPreciseSeekForTrackSwitch()
             withMpvLock(Unit) { v ->
                 if (trackId <= 0) v.mpv.setPropertyString("aid", "no")
                 else v.mpv.setPropertyInt("aid", trackId)
             }
             // the new stream needs a moment before it produces sound
-            if (fading) delay(220L)
+            if (fading) delay(320L)
         } finally {
             if (fading && original != null) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
@@ -4697,6 +4759,7 @@ class MpvPlayerController {
     fun setSubtitleTrack(trackId: Int) {
         markSubtitleOp()
         val selectionGeneration = subtitleSelectionGeneration.incrementAndGet()
+        holdPreciseSeekForTrackSwitch()
         try {
             val view = mpvView ?: return
             if (trackId <= 0) {
@@ -4854,6 +4917,8 @@ class MpvPlayerController {
         try {
             val view = mpvView
             if (view != null && !isReleased) {
+                holdPreciseSeekForTrackSwitch()
+                duckAudioForTrackRefresh()
                 val playbackPrimaryTrackId = resolveAdvancedAssPlaybackId(primaryTrackId)
                 if (primaryTrackId <= 0) {
                     subtitleUsesGeneratedAss = false

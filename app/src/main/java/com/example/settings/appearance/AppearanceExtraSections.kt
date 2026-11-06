@@ -83,12 +83,12 @@ private fun ChoiceChip(label: String, selected: Boolean, isDark: Boolean, primar
 
 private val Geometric = listOf(BackgroundType.CIRCLES, BackgroundType.RINGS, BackgroundType.SHAPES, BackgroundType.GRID, BackgroundType.LAVA, BackgroundType.BOKEH,
     BackgroundType.HEXAGONS, BackgroundType.RADAR, BackgroundType.ORBITS, BackgroundType.EQUALIZER,
-    BackgroundType.PRISM, BackgroundType.CONFETTI)
+    BackgroundType.PRISM, BackgroundType.CONFETTI, BackgroundType.MANDALA, BackgroundType.SYNTHWAVE)
 private val Nature = listOf(BackgroundType.SNOW, BackgroundType.RAIN, BackgroundType.SAKURA, BackgroundType.FIREFLIES, BackgroundType.BUBBLES,
     BackgroundType.WAVES, BackgroundType.CLOUDS, BackgroundType.LEAVES, BackgroundType.EMBERS,
-    BackgroundType.FLOW, BackgroundType.LANTERNS)
+    BackgroundType.FLOW, BackgroundType.LANTERNS, BackgroundType.SILK, BackgroundType.RIPPLES)
 private val Sky = listOf(BackgroundType.SPACE, BackgroundType.AURORA, BackgroundType.PARTICLES, BackgroundType.CONSTELLATION,
-    BackgroundType.METEORS, BackgroundType.GALAXY, BackgroundType.WARP)
+    BackgroundType.METEORS, BackgroundType.GALAXY, BackgroundType.WARP, BackgroundType.NEBULA)
 
 /** Settings > Appearance > Background: live preview, None / Random, interval, animation tiles, behaviour switches. */
 @Composable
