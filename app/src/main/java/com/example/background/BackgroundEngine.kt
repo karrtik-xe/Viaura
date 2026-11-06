@@ -19,7 +19,10 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -211,11 +214,39 @@ object BackdropTouch {
   var y: Float = 0f
     private set
 
+  private var lastAtNanos = 0L
+
   fun report(px: Float, py: Float) {
+    // the activity and a dialog / sheet can both see the same touch: count it once
+    val now = System.nanoTime()
+    if (now - lastAtNanos < 60_000_000L && abs(px - x) < 2f && abs(py - y) < 2f) return
+    lastAtNanos = now
     x = px
     y = py
     seq++
   }
+}
+
+/**
+ * Reports every new finger-down inside this element to [BackdropTouch] (window coordinates), without consuming it. For windows the
+ * activity never sees (dialogs, sheets) so the page animation behind them - and their own preview - still answers a touch.
+ */
+fun Modifier.reportBackdropTouches(): Modifier = composed {
+  var origin by remember { mutableStateOf(Offset.Zero) }
+  this
+    .onGloballyPositioned { origin = it.positionInWindow() }
+    .pointerInput(Unit) {
+      awaitPointerEventScope {
+        while (true) {
+          val event = awaitPointerEvent(PointerEventPass.Initial)
+          for (change in event.changes) {
+            if (change.pressed && !change.previousPressed) {
+              BackdropTouch.report(origin.x + change.position.x, origin.y + change.position.y)
+            }
+          }
+        }
+      }
+    }
 }
 
 @Composable
@@ -231,8 +262,8 @@ internal fun BackdropCanvas(
   val palette = rememberBackdropPalette()
   val drawing = remember { BackdropDrawingState() }
 
-  // A touch anywhere on the screen sets off a firework in the Diwali backdrop.
-  if (type == BackgroundType.DIWALI) {
+  // A touch anywhere on the screen sets off a firework in the Diwali backdrop and the effect of the click-effect backdrops.
+  if (type == BackgroundType.DIWALI || type in BackgroundType.TOUCH) {
     LaunchedEffect(Unit) {
       var seen = BackdropTouch.seq
       snapshotFlow { BackdropTouch.seq }.collect { now ->
@@ -268,6 +299,9 @@ internal class BackdropDrawingState {
   val burstT = FloatArray(BURST_SLOTS) { -1000f }
   val burstSeed = IntArray(BURST_SLOTS)
   private var burstNext = 0
+
+  /** Picker tile: draw a frozen mid-effect touch so the tile shows what a click does. */
+  var demo: Boolean = false
 
   /** Top-left of the canvas in the window, to turn window touch coordinates into canvas ones. */
   var origin: Offset = Offset.Zero
@@ -331,6 +365,11 @@ internal fun DrawScope.drawBackdrop(
     BackgroundType.RIPPLES -> drawRipples(t, tilt, p)
     BackgroundType.SYNTHWAVE -> drawSynthwave(t, tilt, p)
     BackgroundType.MANDALA -> drawMandala(t, tilt, p)
+    BackgroundType.WATER_TOUCH -> drawWaterTouch(t, tilt, p, drawing)
+    BackgroundType.STARDUST -> drawStardust(t, tilt, p, drawing)
+    BackgroundType.NEON_PULSE -> drawNeonPulse(t, tilt, p, drawing)
+    BackgroundType.BLOOM -> drawBloom(t, tilt, p, drawing)
+    BackgroundType.BUBBLE_POP -> drawBubblePop(t, tilt, p, drawing)
     BackgroundType.HALLOWEEN -> drawHalloween(t, tilt, p, drawing.path)
     BackgroundType.FIREWORKS -> drawFireworks(t, tilt, p)
     BackgroundType.WINTER -> drawWinter(t, tilt, p, drawing.path)

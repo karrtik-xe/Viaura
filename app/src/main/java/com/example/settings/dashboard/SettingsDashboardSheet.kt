@@ -136,6 +136,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.example.background.reportBackdropTouches
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -684,6 +685,9 @@ fun SettingsSheet(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    // this sheet is its own window: the activity never sees a touch here, so it is reported to the page
+                    // backdrop (click-effect backgrounds) and to the live preview from here
+                    .reportBackdropTouches()
                     .drawBehind {
                         // read in the DRAW phase: the scrim fade no longer recomposes the whole dashboard every frame
                         drawRect(Color.Black.copy(alpha = (0.35f * alphaFactor * scrimAlpha.value).coerceIn(0.0f, 0.40f)))

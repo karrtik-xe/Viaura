@@ -2298,6 +2298,16 @@ private fun VideoPlayerScreenImpl(
         val path = getPlayableFilePath(context, targetVideo.uri, targetVideo.path)
         if (path.isNotBlank() && (File(path).exists() || path.startsWith("fd://") || (targetVideo.isOnline && path.startsWith("http")) || com.example.util.archive.ArchiveStreamServer.isLoopbackUrl(path))) {
             val key = "${targetVideo.id}_${path}_$currentVideoIndex"
+            // Only the POSITION of the playing episode in the list changed (the user dragged an episode up / down in the
+            // playlist): it is the very same video, so it keeps playing untouched - no reload, no restart, no cut.
+            val loadedKeyNow = lastLoadedVideoKey
+            val samePrefix = "${targetVideo.id}_${path}_"
+            if (loadedKeyNow != null && loadedKeyNow != key && loadedKeyNow.startsWith(samePrefix) &&
+                loadedKeyNow.substring(samePrefix.length).all { it.isDigit() } &&
+                loadedKeyNow.length > samePrefix.length && controller.isAlive
+            ) {
+                lastLoadedVideoKey = key
+            }
             if (lastLoadedVideoKey != key) {
                 val adopted = miniAdopted
                 if (miniAdoptPending && adopted != null && adopted.controller.isAlive &&
@@ -4626,6 +4636,8 @@ private fun BoxScope.ChannelModeLayer(
         CompositionLocalProvider(LocalDensity provides chScaledDensity) {
             HeaderBar(
                 title = when {
+                    // a provider (plugin) video is online too, but its header shows the provider's own name
+                    isProviderVideo(currentVideo) -> providerNameOf(currentVideo)
                     currentVideo?.isOnline == true -> "Online"
                     currentVideo?.isNetworkStream == true -> "Network"
                     currentVideo?.isDirectStream == true -> "Stream"
@@ -4861,7 +4873,7 @@ private fun chFormatCount(n: Long): String = when {
 }
 
 @Composable
-private fun ChannelActionChip(
+internal fun ChannelActionChip(
     iconRes: Int,
     label: String,
     isDark: Boolean,
@@ -4909,7 +4921,10 @@ private fun ChannelPlayerSection(
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
     val glass = uiState.glassBlurTransparency
     val cardShape = RoundedCornerShape(16.dp)
-    val watchUrl: String? = video?.takeIf { it.isOnline }?.let { OnlineVideoService.toWatchUrl(it.path) }
+    // Only a real YouTube video has a watch page (likes, subscribe, comments). A provider video is online as well,
+    // but it is a plain stream: it must never be treated like a YouTube video.
+    val isProviderMedia = isProviderVideo(video)
+    val watchUrl: String? = video?.takeIf { it.isOnline && !it.isDirectStream }?.let { OnlineVideoService.toWatchUrl(it.path) }
     val prefs = remember { context.getSharedPreferences("viaura_channel_player", Context.MODE_PRIVATE) }
     // viaura_like / viaura_dislike come from viaura-icons.zip (unpacked into res/drawable before the build). Direct references,
     // so the resources are always packed into the APK and the Like / Dislike chips can never end up without their icon.
@@ -5018,7 +5033,13 @@ private fun ChannelPlayerSection(
                 val sameFolder = if (curFolder != null) playlist.filter { File(it.path).parent == curFolder } else emptyList()
                 if (sameFolder.size > 1) sameFolder else emptyList()
             }
-            val at = series.indexOfFirst { it.path == video?.path }
+            // A provider episode that was resolved has the stream link as its path: the list still holds its placeholder, so the
+            // position is also looked up through the playback session (episode index of the series).
+            val at = series.indexOfFirst { it.path == video?.path }.let { found ->
+                if (found >= 0 || !isProviderMedia) found
+                else (com.example.util.media.PluginPlaybackSessions.get(video?.path.orEmpty())?.episodeIndex
+                    ?.takeIf { it in series.indices } ?: -1)
+            }
             when {
                 series.size <= 1 -> emptyList()
                 at >= 0 -> series.drop(at + 1) + series.take(at)
@@ -5215,6 +5236,9 @@ private fun ChannelPlayerSection(
                                 Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
                             } catch (_: Throwable) {}
                         }
+                    } else if (video != null && isProviderMedia) {
+                        // provider media: Save, Download, Playlist, Share, Link copy - no Like / Dislike / Subscribe
+                        ProviderActionChips(video, isDark, glass)
                     } else if (video != null && !video.isNetworkStream && !video.isDirectStream &&
                         !com.example.util.media.PluginQueuedEpisodes.isQueued(video.path)) {
                         ChannelActionChip(com.example.R.drawable.viaura_playlist_video, "Playlist", isDark) { localPlaylistTarget = video }
@@ -5257,12 +5281,20 @@ private fun ChannelPlayerSection(
         if (recommended.isNotEmpty()) {
             item(key = "channel_rec_title") {
                 Text(
-                    text = if (watchUrl != null) "Recommended" else "Up next",
+                    text = if (watchUrl != null) "Recommended" else if (isProviderMedia) "Episodes" else "Up next",
                     color = primary, fontSize = 15.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                 )
             }
             items(recommended, key = { "channel_rec_${it.path}" }) { item ->
+              if (isProviderMedia) {
+                ProviderEpisodeRow(
+                    item = item,
+                    number = playlist.indexOfFirst { it.path == item.path }.let { if (it >= 0) it + 1 else 0 },
+                    isDark = isDark,
+                    onClick = { onPlayItem(item) }
+                )
+              } else {
                 VideoItemCard(
                     video = item,
                     isDark = isDark,
@@ -5276,6 +5308,7 @@ private fun ChannelPlayerSection(
                         onPlayItem(item)
                     }
                 )
+              }
             }
         } else if (watchUrl != null && details == null) {
             item(key = "channel_rec_loading") {

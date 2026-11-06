@@ -119,7 +119,11 @@ fun BackgroundAnimationSettingsSection(
         }
         Spacer(Modifier.height(10.dp))
         Text("Preview · ${active.type.label}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = primaryText)
-        Text("The animation that plays behind the app's screens", fontSize = 12.5.sp, color = secondaryText)
+        Text(
+            if (active.type in BackgroundType.TOUCH) "Touch anywhere on the screen to see the click effect"
+            else "The animation that plays behind the app's screens",
+            fontSize = 12.5.sp, color = secondaryText
+        )
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ChoiceChip("None", picked == BackgroundType.NONE, isDark, primaryText, { choose(BackgroundType.NONE) })
@@ -149,6 +153,7 @@ fun BackgroundAnimationSettingsSection(
         }
     }
 
+    BackgroundGroup("CLICK EFFECT · TOUCH ANYWHERE", BackgroundType.TOUCH, picked, choose, isDark, cardBg, borderColor, primaryText, secondaryText)
     BackgroundGroup("NEW", BackgroundType.FRESH, picked, choose, isDark, cardBg, borderColor, primaryText, secondaryText)
     BackgroundGroup("GEOMETRY & GLOW", Geometric, picked, choose, isDark, cardBg, borderColor, primaryText, secondaryText)
     BackgroundGroup("NATURE", Nature, picked, choose, isDark, cardBg, borderColor, primaryText, secondaryText)
@@ -206,7 +211,8 @@ private fun BackgroundTile(
 ) {
     val shape = RoundedCornerShape(20.dp)
     val palette = rememberBackdropPalette()
-    val drawing = remember { BackdropDrawingState() }
+    // click-effect tiles show a frozen mid-effect touch, so the tile tells what a click does
+    val drawing = remember(type) { BackdropDrawingState().also { it.demo = type in BackgroundType.TOUCH } }
     Column(
         modifier = modifier.clip(shape).background(cardBg)
             .border(if (selected) 2.dp else 1.dp, if (selected) AccentSkyBlue else borderColor, shape)

@@ -44,6 +44,13 @@ enum class BackgroundType(
   RIPPLES("Ripples"),
   SYNTHWAVE("Synthwave"),
   MANDALA("Mandala"),
+
+  // Click effect: these also react to a touch anywhere on the screen
+  WATER_TOUCH("Water touch"),
+  STARDUST("Stardust"),
+  NEON_PULSE("Neon pulse"),
+  BLOOM("Bloom"),
+  BUBBLE_POP("Bubble pop"),
   NONE("None"),
   RANDOM("Random"),
 
@@ -65,7 +72,11 @@ enum class BackgroundType(
       WAVES, METEORS, EMBERS, HEXAGONS, CLOUDS, LEAVES, GALAXY, RADAR, EQUALIZER, ORBITS,
       WARP, FLOW, PRISM, LANTERNS, CONFETTI,
       SILK, NEBULA, RIPPLES, SYNTHWAVE, MANDALA,
+      WATER_TOUCH, STARDUST, NEON_PULSE, BLOOM, BUBBLE_POP,
     )
+
+    /** Backdrops that react to a touch anywhere on the screen: shown together in their own "CLICK EFFECT" section. */
+    val TOUCH: List<BackgroundType> = listOf(WATER_TOUCH, STARDUST, NEON_PULSE, BLOOM, BUBBLE_POP)
 
     /** The newest five: shown together in their own "NEW" section of the picker. */
     val FRESH: List<BackgroundType> = listOf(SILK, NEBULA, RIPPLES, SYNTHWAVE, MANDALA)

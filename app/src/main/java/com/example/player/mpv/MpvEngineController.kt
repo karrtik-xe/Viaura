@@ -1441,6 +1441,77 @@ class MpvPlayerController {
     }
 
 
+    // ------------------------------------------------------------------------------------------------
+    // Seamless track switch (audio / embedded subtitle). Selecting another track makes mpv re-seek its demuxer and
+    // flush the audio buffer: a crack, a cut or a small jump back. Same idea as the view hand-over: playback is held
+    // (instant silence) for the few frames the switch takes, the exact position is remembered, then it is put back
+    // (only if it really moved) and playback continues. The UI keeps showing "playing" the whole time.
+    // ------------------------------------------------------------------------------------------------
+    @Volatile private var trackHoldPaused = false
+    @Volatile private var trackHoldPosMs = 0L
+    private var trackHoldJob: Job? = null
+
+    /** Holds playback for a track switch. False = nothing is held (paused, just opened, live stream): switch directly. */
+    private fun beginTrackHold(): Boolean {
+        if (isReleased || handOverPaused) return false
+        if (_isLiveStream.value) return false
+        return try {
+            withMpvLock(false) { v ->
+                // quick successive switches: keep the first remembered position, stay paused
+                if (trackHoldPaused) return@withMpvLock true
+                val playing = !(v.mpv.getPropertyBoolean("pause") ?: true)
+                if (!playing) return@withMpvLock false
+                val sec = try { v.mpv.getPropertyDouble("time-pos") } catch (_: Throwable) { null }
+                // just opened: nothing audible to protect yet
+                if (sec == null || sec < 1.0) return@withMpvLock false
+                trackHoldPosMs = (sec * 1000.0).toLong()
+                trackHoldPaused = true
+                v.mpv.setPropertyBoolean("pause", true)
+                true
+            }
+        } catch (_: Throwable) { false }
+    }
+
+    /** The switch was issued: wait until mpv finished re-seeking (short, bounded), then continue from the same place. */
+    private fun endTrackHold() {
+        trackHoldJob?.cancel()
+        trackHoldJob = playerScope.launch {
+            delay(140L)
+            var tries = 0
+            while (!isReleased && tries < 14) {
+                val busy = try {
+                    withMpvLock(false) { v ->
+                        v.mpv.getPropertyBoolean("seeking") == true || v.mpv.getPropertyBoolean("paused-for-cache") == true
+                    }
+                } catch (_: Throwable) { false }
+                if (!busy) break
+                delay(50L)
+                tries++
+            }
+            finishTrackHold()
+        }
+    }
+
+    private fun finishTrackHold() {
+        if (!trackHoldPaused) return
+        trackHoldPaused = false
+        if (isReleased) return
+        try {
+            withMpvLock(Unit) { v ->
+                if (trackHoldPosMs > 0L) {
+                    val actualSec = try { v.mpv.getPropertyDouble("time-pos") } catch (_: Throwable) { null }
+                    val actualMs = if (actualSec != null && actualSec >= 0.0) (actualSec * 1000.0).toLong() else trackHoldPosMs
+                    // Only correct a real jump; an unnecessary seek would itself be audible.
+                    if (kotlin.math.abs(actualMs - trackHoldPosMs) > 80L) {
+                        try { v.mpv.command("seek", (trackHoldPosMs / 1000.0).toString(), "absolute+exact") } catch (_: Throwable) {}
+                    }
+                }
+                // the user may have paused while the switch was running: then it stays paused
+                if (_isPlaying.value) v.mpv.setPropertyBoolean("pause", false)
+            }
+        } catch (_: Throwable) {}
+    }
+
     /**
      * Called after the screen was locked / the app came back. The file is still open inside mpv, so
      * only the video OUTPUT has to be re-created on the new surface (this is what the stock mpv
@@ -1946,7 +2017,7 @@ class MpvPlayerController {
                                 }
                             }
                         }
-                        if (!handOverPaused) _isPlaying.value = !paused
+                        if (!handOverPaused && !trackHoldPaused) _isPlaying.value = !paused
                         if (directStreamMode) {
                             updateDirectStreamState(view, posSec, durSec)
                         } else if (onlineStreamMode) {
@@ -4632,11 +4703,18 @@ class MpvPlayerController {
                 val cur = try { v.mpv.getPropertyInt("aid") } catch (_: Throwable) { null }
                 (trackId > 0 && cur == trackId)
             }
-            if (!already && _isPlaying.value) duckAudio(260L)
-            withMpvLock(Unit) { v ->
-                if (already) return@withMpvLock
-                if (trackId <= 0) v.mpv.setPropertyString("aid", "no")
-                else v.mpv.setPropertyInt("aid", trackId)
+            // Switching the audio track re-seeks the stream and flushes the audio: hold playback for it (no crack / cut /
+            // jump back). When nothing can be held (paused / just opened) the old short mute is used instead.
+            val held = !already && trackId > 0 && beginTrackHold()
+            if (!already && !held && _isPlaying.value) duckAudio(260L)
+            try {
+                withMpvLock(Unit) { v ->
+                    if (already) return@withMpvLock
+                    if (trackId <= 0) v.mpv.setPropertyString("aid", "no")
+                    else v.mpv.setPropertyInt("aid", trackId)
+                }
+            } finally {
+                if (held) endTrackHold()
             }
             _audioTracks.value = _audioTracks.value.map {
                 it.copy(isSelected = (it.id == trackId))
@@ -4672,7 +4750,16 @@ class MpvPlayerController {
                         break
                     }
                 }
-                view.mpv.setPropertyInt("sid", playbackTrackId)
+                // An embedded subtitle makes mpv re-seek the main stream (audible cut / jump back): hold playback for it.
+                // External files are read by their own demuxer, so they switch without touching the audio.
+                val subIsExternal = _subtitleTracks.value.firstOrNull { it.id == trackId }?.isExternal == true
+                val curSid = try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }
+                val holdForSub = !subIsExternal && !subtitleUsesGeneratedAss && curSid != playbackTrackId && beginTrackHold()
+                try {
+                    view.mpv.setPropertyInt("sid", playbackTrackId)
+                } finally {
+                    if (holdForSub) endTrackHold()
+                }
                 view.mpv.setPropertyBoolean("sub-visibility", true)
                 view.mpv.setPropertyString("sub-ass", "yes")
                 // Keep the delay the user dialled in: re-selecting / auto-reselecting a track must
