@@ -1140,6 +1140,15 @@ private fun VideoPlayerScreenImpl(
         }
     }
 
+    // Subtitle choices are written one after another on a background thread (never on the UI thread).
+    val subtitlePersistMutex = remember { kotlinx.coroutines.sync.Mutex() }
+    fun persistSubtitleAsync(block: () -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            subtitlePersistMutex.lock()
+            try { block() } catch (_: Throwable) {} finally { subtitlePersistMutex.unlock() }
+        }
+    }
+
     fun selectSubtitleTracks(
         primaryId: Int,
         secondaryId: Int,
@@ -1173,15 +1182,24 @@ private fun VideoPlayerScreenImpl(
             val selectedTrack = controller.subtitleTracks.value.firstOrNull { it.id == finalPrimaryId }
             if (selectedTrack != null) {
                 if (selectedTrack.isExternal) {
-                    if (persist) CustomSubtitlePersistenceManager.setSubtitleSelected(
-                        context = context,
-                        path = currentVideo?.path,
-                        videoId = currentVideo?.id ?: 0L,
-                        uriString = currentVideo?.uri?.toString(),
-                        title = currentVideo?.displayName,
-                        originalName = selectedTrack.originalFilename.ifBlank { selectedTrack.title },
-                        isSelected = true
-                    )
+                    if (persist) {
+                        val vPath = currentVideo?.path
+                        val vId = currentVideo?.id ?: 0L
+                        val vUri = currentVideo?.uri?.toString()
+                        val vTitle = currentVideo?.displayName
+                        val trackName = selectedTrack.originalFilename.ifBlank { selectedTrack.title }
+                        persistSubtitleAsync {
+                            CustomSubtitlePersistenceManager.setSubtitleSelected(
+                                context = context,
+                                path = vPath,
+                                videoId = vId,
+                                uriString = vUri,
+                                title = vTitle,
+                                originalName = trackName,
+                                isSelected = true
+                            )
+                        }
+                    }
                 } else {
                     val embedded = controller.subtitleTracks.value.filter { !it.isExternal }
                     val idx = embedded.indexOfFirst { it.id == finalPrimaryId }
@@ -1205,22 +1223,25 @@ private fun VideoPlayerScreenImpl(
         // Restoring a remembered choice must never rewrite that memory (persist = false).
         if (!persist) return
 
-        // Update persistence for all external subtitles so unselected ones are marked false
+        // Update persistence for all external subtitles so unselected ones are marked false.
+        // File / preference work runs in the background so tapping a track never stalls the screen.
         val allSubs = controller.subtitleTracks.value
-        allSubs.filter { it.isExternal }.forEach { extTrack ->
-            val isNowSelected = (extTrack.id == finalPrimaryId) || (extTrack.id == finalSecondaryId)
-            CustomSubtitlePersistenceManager.setSubtitleSelected(
-                context = context,
-                path = currentVideo?.path,
-                videoId = currentVideo?.id ?: 0L,
-                uriString = currentVideo?.uri?.toString(),
-                title = currentVideo?.displayName,
-                originalName = extTrack.originalFilename.ifBlank { extTrack.title },
-                isSelected = isNowSelected
-            )
+        val tVideo = currentVideo
+        persistSubtitleAsync {
+            allSubs.filter { it.isExternal }.forEach { extTrack ->
+                val isNowSelected = (extTrack.id == finalPrimaryId) || (extTrack.id == finalSecondaryId)
+                CustomSubtitlePersistenceManager.setSubtitleSelected(
+                    context = context,
+                    path = tVideo?.path,
+                    videoId = tVideo?.id ?: 0L,
+                    uriString = tVideo?.uri?.toString(),
+                    title = tVideo?.displayName,
+                    originalName = extTrack.originalFilename.ifBlank { extTrack.title },
+                    isSelected = isNowSelected
+                )
+            }
+            saveSubtitleSelection(primaryId = finalPrimaryId, secondaryId = finalSecondaryId)
         }
-
-        saveSubtitleSelection(primaryId = finalPrimaryId, secondaryId = finalSecondaryId)
     }
 
     /** Re-applies the saved main / 2nd subtitle of this video (each one independently). */

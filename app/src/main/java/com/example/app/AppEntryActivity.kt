@@ -180,6 +180,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Every new touch is reported to the page backdrop (Diwali sets off a firework wherever the screen is touched).
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        try {
+            val action = ev.actionMasked
+            if (action == android.view.MotionEvent.ACTION_DOWN || action == android.view.MotionEvent.ACTION_POINTER_DOWN) {
+                val i = ev.actionIndex
+                com.example.background.BackdropTouch.report(ev.getX(i), ev.getY(i))
+            }
+        } catch (_: Throwable) {}
+        return super.dispatchTouchEvent(ev)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Keeps the reason of a crash so it can be shown (and copied) on the next start.

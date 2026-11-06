@@ -1,5 +1,6 @@
 package com.example.background
 
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -221,20 +222,100 @@ internal fun DrawScope.drawWinter(t: Float, tilt: Offset, p: BackdropPalette, pa
 private val Gold = Color(0xFFFFC857)
 private val Flame = Color(0xFFFF8A1F)
 private val ClayBowl = Color(0xFFC2570C)
+private val DiwaliRose = Color(0xFFFF4D8D)
+private val DiwaliViolet = Color(0xFFB57BFF)
+private val DiwaliCream = Color(0xFFFFF2B0)
+private val DiwaliMint = Color(0xFF5CE6C0)
+private val DiwaliPalette = listOf(Gold, Flame, DiwaliRose, DiwaliCream, DiwaliViolet, DiwaliMint)
 
-/** A turning gold mandala, a row of flickering diyas along the bottom and sparks drifting up. */
-internal fun DrawScope.drawDiwali(t: Float, tilt: Offset, p: BackdropPalette, path: Path) {
+private const val SKY_SLOT = 2.9f
+private const val SKY_LIFE = 3.5f
+private const val SKY_RISE = 0.9f
+private const val TOUCH_BURST_LIFE = 1.9f
+
+/**
+ * One firework burst: a soft flash, a thin shock ring and glowing sparks that fly out fast, slow down, drop a little under
+ * gravity and fade. [age] runs from 0 to [life].
+ */
+private fun DrawScope.drawDiwaliBurst(
+  c: Offset,
+  age: Float,
+  life: Float,
+  radius: Float,
+  seed: Int,
+  color: Color,
+  accent: Color,
+  sparks: Int,
+) {
+  val x = (age / life).coerceIn(0f, 1f)
+  val ease = 1f - (1f - x) * (1f - x) * (1f - x)
+  val fade = (1f - x) * (1f - x)
+
+  val flash = 1f - smoothstep(0f, 0.2f, x)
+  if (flash > 0f) {
+    drawCircle(
+      Brush.radialGradient(listOf(DiwaliCream.copy(alpha = 0.55f * flash), color.copy(alpha = 0.18f * flash), Color.Transparent), center = c, radius = radius * 0.6f),
+      radius = radius * 0.6f,
+      center = c,
+    )
+  }
+  if (x < 0.55f) {
+    drawCircle(color.copy(alpha = 0.34f * (1f - x / 0.55f)), radius = radius * 0.95f * ease, center = c, style = Stroke(width = 1.4.dp.toPx()))
+  }
+
+  val tail = (x - 0.06f).coerceAtLeast(0f)
+  val tailEase = 1f - (1f - tail) * (1f - tail) * (1f - tail)
+  val drop = radius * 0.5f
+  for (i in 0 until sparks) {
+    val ang = i * TAU / sparks + (hash01(i, seed) - 0.5f) * 0.4f
+    val reach = radius * (0.55f + 0.45f * hash01(i, seed + 7))
+    val head = Offset(c.x + cos(ang) * reach * ease, c.y + sin(ang) * reach * ease + drop * x * x)
+    val back = Offset(c.x + cos(ang) * reach * tailEase, c.y + sin(ang) * reach * tailEase + drop * tail * tail)
+    val tone = if (i % 3 == 0) accent else color
+    drawLine(tone.copy(alpha = 0.55f * fade), back, head, strokeWidth = 1.5.dp.toPx(), cap = StrokeCap.Round)
+    drawCircle(tone.copy(alpha = 0.95f * fade), radius = (1.0f + 1.3f * hash01(i, seed + 3)).dp.toPx() * (1f - 0.5f * x), center = head)
+  }
+}
+
+/**
+ * Diwali night: a turning gold mandala with a rangoli ring, twinkling fairy lights along the top, sky lanterns and drifting
+ * sparks, rockets that burst into fireworks now and then, a row of flickering diyas at the bottom - and a firework wherever
+ * the screen is touched.
+ */
+internal fun DrawScope.drawDiwali(t: Float, tilt: Offset, p: BackdropPalette, drawing: BackdropDrawingState) {
   val w = size.width
   val h = size.height
   val base = min(w, h)
+  val path = drawing.path
 
+  // Warm glow from the diyas below, a faint violet dusk above
   drawRect(
-    brush = Brush.radialGradient(listOf(Flame.copy(alpha = 0.20f), Color.Transparent), center = Offset(w * 0.5f, h * 1.04f), radius = h * 0.70f),
+    brush = Brush.radialGradient(listOf(Flame.copy(alpha = 0.22f), Color.Transparent), center = Offset(w * 0.5f, h * 1.04f), radius = h * 0.72f),
+    size = size,
+  )
+  drawRect(
+    brush = Brush.radialGradient(listOf(DiwaliViolet.copy(alpha = 0.10f), Color.Transparent), center = Offset(w * 0.5f, 0f), radius = h * 0.6f),
     size = size,
   )
 
-  // Mandala: two rings of petals turning in opposite directions
+  // Stars
+  for (i in 0 until backdropCount(18, minimum = 10, maximum = 24)) {
+    val tw = 0.5f + 0.5f * sin(t * (0.9f + hash01(i, 51)) + i * 1.9f)
+    drawCircle(
+      DiwaliCream.copy(alpha = 0.10f + 0.30f * tw),
+      radius = (0.7f + 0.9f * hash01(i, 52)).dp.toPx(),
+      center = Offset(w * hash01(i, 53) + tilt.x * 4.dp.toPx(), h * 0.62f * hash01(i, 54)),
+    )
+  }
+
+  // Mandala: two rings of petals turning in opposite directions, with a rangoli ring of dots that pulses
   val mc = Offset(w * 0.5f + tilt.x * 10.dp.toPx(), h * 0.36f + tilt.y * 10.dp.toPx())
+  val breathe = 0.85f + 0.15f * sin(t * 0.9f)
+  drawCircle(
+    Brush.radialGradient(listOf(Gold.copy(alpha = 0.10f * breathe), Color.Transparent), center = mc, radius = base * 0.5f),
+    radius = base * 0.5f,
+    center = mc,
+  )
   for (ring in 0 until 2) {
     val n = 12 + 6 * ring
     val radius = base * (0.20f + 0.15f * ring)
@@ -245,12 +326,103 @@ internal fun DrawScope.drawDiwali(t: Float, tilt: Offset, p: BackdropPalette, pa
       val a = turn + i * TAU / n
       val pt = Offset(mc.x + cos(a) * radius, mc.y + sin(a) * radius)
       rotate(a * 57.29578f + 90f, pivot = pt) {
-        drawOval(Gold.copy(alpha = 0.16f - 0.04f * ring), topLeft = Offset(pt.x - pw / 2f, pt.y - ph / 2f), size = Size(pw, ph), style = Stroke(width = 1.2.dp.toPx()))
+        drawOval(Gold.copy(alpha = 0.17f - 0.04f * ring), topLeft = Offset(pt.x - pw / 2f, pt.y - ph / 2f), size = Size(pw, ph), style = Stroke(width = 1.2.dp.toPx()))
       }
     }
     drawCircle(Gold.copy(alpha = 0.10f), radius = radius, center = mc, style = Stroke(width = 1.dp.toPx()))
   }
-  drawCircle(Gold.copy(alpha = 0.14f), radius = base * 0.045f, center = mc, style = Stroke(width = 1.2.dp.toPx()))
+  for (i in 0 until 24) {
+    val a = -t * 0.05f + i * TAU / 24f
+    val dot = Offset(mc.x + cos(a) * base * 0.56f, mc.y + sin(a) * base * 0.56f)
+    drawCircle(DiwaliRose.copy(alpha = 0.10f + 0.08f * wave01(t * 1.4f + i)), radius = 1.6.dp.toPx(), center = dot)
+  }
+  drawCircle(Gold.copy(alpha = 0.15f), radius = base * 0.045f, center = mc, style = Stroke(width = 1.2.dp.toPx()))
+  drawCircle(Gold.copy(alpha = 0.22f * breathe), radius = base * 0.012f, center = mc)
+
+  // Fairy lights along the top edge
+  val wireY = 10.dp.toPx()
+  val sag = h * 0.03f
+  val wire = path.apply {
+    rewind()
+    moveTo(0f, wireY)
+    quadraticTo(w * 0.5f, wireY + sag * 2f, w, wireY)
+  }
+  drawPath(wire, Gold.copy(alpha = 0.20f), style = Stroke(width = 1.dp.toPx()))
+  val bulbs = 13
+  for (j in 0 until bulbs) {
+    val u = (j + 0.5f) / bulbs
+    val bx = w * u
+    val by = wireY + sag * 4f * u * (1f - u) + 3.dp.toPx()
+    val tw = 0.55f + 0.45f * sin(t * 2.3f + j * 1.7f)
+    val tone = DiwaliPalette[j % DiwaliPalette.size]
+    drawCircle(tone.copy(alpha = 0.20f * tw), radius = 9.dp.toPx(), center = Offset(bx, by))
+    drawCircle(tone.copy(alpha = 0.90f * tw), radius = 2.4.dp.toPx(), center = Offset(bx, by))
+  }
+
+  // Rockets that rise and burst by themselves, two lanes so the sky is never empty
+  for (lane in 0 until 2) {
+    val tl = t - lane * 1.45f
+    val current = floor(tl / SKY_SLOT).toInt()
+    for (k in (current - 1)..current) {
+      val age = tl - k * SKY_SLOT
+      if (age < 0f || age > SKY_LIFE) continue
+      val key = k * 2 + lane
+      val bx = w * (0.14f + 0.72f * hash01(key, 61)) + tilt.x * 8.dp.toPx()
+      val by = h * (0.10f + 0.28f * hash01(key, 62))
+      val color = DiwaliPalette[(hash01(key, 63) * DiwaliPalette.size).toInt().coerceIn(0, DiwaliPalette.size - 1)]
+      val accent = DiwaliPalette[(hash01(key, 64) * DiwaliPalette.size).toInt().coerceIn(0, DiwaliPalette.size - 1)]
+      if (age < SKY_RISE) {
+        val u = age / SKY_RISE
+        val e = 1f - (1f - u) * (1f - u)
+        val rx = bx + sin(u * 5f + key) * 6.dp.toPx() * (1f - u)
+        val ry = h * 1.02f - (h * 1.02f - by) * e
+        for (s in 0 until 7) {
+          val back = (u - s * 0.035f).coerceAtLeast(0f)
+          val be = 1f - (1f - back) * (1f - back)
+          drawCircle(
+            Gold.copy(alpha = 0.55f * (1f - s / 7f)),
+            radius = (2.2f - s * 0.25f).coerceAtLeast(0.6f).dp.toPx(),
+            center = Offset(bx + sin(back * 5f + key) * 6.dp.toPx() * (1f - back), h * 1.02f - (h * 1.02f - by) * be),
+          )
+        }
+        drawCircle(DiwaliCream.copy(alpha = 0.95f), radius = 2.4.dp.toPx(), center = Offset(rx, ry))
+      } else {
+        drawDiwaliBurst(Offset(bx, by), age - SKY_RISE, SKY_LIFE - SKY_RISE, base * (0.24f + 0.10f * hash01(key, 65)), key * 13, color, accent, 22)
+      }
+    }
+  }
+
+  // Fireworks set off by touch
+  for (i in 0 until BURST_SLOTS) {
+    val age = t - drawing.burstT[i]
+    if (age < 0f || age > TOUCH_BURST_LIFE) continue
+    val seed = drawing.burstSeed[i]
+    val color = DiwaliPalette[Math.floorMod(seed, DiwaliPalette.size)]
+    val accent = DiwaliPalette[Math.floorMod(seed / 7 + 2, DiwaliPalette.size)]
+    drawDiwaliBurst(Offset(drawing.burstX[i], drawing.burstY[i]), age, TOUCH_BURST_LIFE, base * 0.30f, seed, color, accent, 26)
+  }
+
+  // Sky lanterns drifting up
+  for (i in 0 until 5) {
+    val u = fract(hash01(i, 41) + t * (0.011f + 0.009f * hash01(i, 42)))
+    val lx = w * (0.10f + 0.80f * hash01(i, 43)) + sin(u * TAU * 1.5f + i) * 14.dp.toPx() + tilt.x * 12.dp.toPx()
+    val ly = h * (1.08f - 1.16f * u)
+    val a = smoothstep(0f, 0.12f, u) * smoothstep(1f, 0.8f, u)
+    val ls = (8f + 6f * hash01(i, 44)).dp.toPx()
+    val glow = 0.85f + 0.15f * sin(t * 3f + i)
+    drawCircle(
+      Brush.radialGradient(listOf(Flame.copy(alpha = 0.30f * a * glow), Color.Transparent), center = Offset(lx, ly), radius = ls * 3.2f),
+      radius = ls * 3.2f,
+      center = Offset(lx, ly),
+    )
+    drawRoundRect(
+      Brush.verticalGradient(listOf(DiwaliCream.copy(alpha = 0.80f * a), Flame.copy(alpha = 0.70f * a)), startY = ly - ls, endY = ly + ls),
+      topLeft = Offset(lx - ls * 0.7f, ly - ls),
+      size = Size(ls * 1.4f, ls * 2f),
+      cornerRadius = CornerRadius(ls * 0.35f),
+    )
+    drawRect(ClayBowl.copy(alpha = 0.55f * a), topLeft = Offset(lx - ls * 0.7f, ly - ls), size = Size(ls * 1.4f, ls * 0.18f))
+  }
 
   // Sparks
   for (i in 0 until backdropCount(34, minimum = 20, maximum = 43)) {
@@ -274,8 +446,8 @@ internal fun DrawScope.drawDiwali(t: Float, tilt: Offset, p: BackdropPalette, pa
     val fh = s * 1.05f * flick
     val fw = s * 0.30f
     drawCircle(
-      Brush.radialGradient(listOf(Flame.copy(alpha = 0.32f * flick), Color.Transparent), center = Offset(x, y - s * 0.5f), radius = s * 3.4f),
-      radius = s * 3.4f,
+      Brush.radialGradient(listOf(Flame.copy(alpha = 0.34f * flick), Color.Transparent), center = Offset(x, y - s * 0.5f), radius = s * 3.6f),
+      radius = s * 3.6f,
       center = Offset(x, y - s * 0.5f),
     )
     translate(left = x, top = y) {

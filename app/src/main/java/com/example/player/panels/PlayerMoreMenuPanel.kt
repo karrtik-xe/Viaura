@@ -182,6 +182,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -2057,78 +2058,277 @@ fun PlaylistSelectionPanel(
         Spacer(modifier = Modifier.height(4.dp))
 
         if (isGridView) {
-            // GRID VIEW MODE (4-boxes grid layout)
+            // GRID VIEW MODE: scrolls normally; touch and hold a card to lift it, then drag it up / down / left / right
+            // to reorder (same idea as the list view). The cards ease in when the grid opens.
             val gridColumns = if (isLandscape) 3 else 2
             val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(
                 initialFirstVisibleItemIndex = (currentIndex - 1).coerceIn(0, (effectiveCount - 1).coerceAtLeast(0))
             )
             var gridHeightPx by remember { mutableFloatStateOf(0f) }
             val gridDensity = LocalDensity.current
+            val gridHaptic = LocalHapticFeedback.current
+            val gridScope = rememberCoroutineScope()
             val gridCardEstimatePx = with(gridDensity) { 150.dp.toPx() }
             val gridRows = (effectiveCount + gridColumns - 1) / gridColumns
             val gridNeedsRoom = gridHeightPx > 0f && gridRows * gridCardEstimatePx > gridHeightPx
             val gridBottomPadding = if (gridNeedsRoom) {
                 with(gridDensity) { (gridHeightPx - gridCardEstimatePx).coerceAtLeast(0f).toDp() }
             } else 0.dp
+
+            var gridDragIndex by remember { mutableStateOf<Int?>(null) }
+            var gridDragPointer by remember { mutableStateOf(Offset.Zero) }
+            var gridDragTopLeft by remember { mutableStateOf(Offset.Zero) }
+            var gridGrab by remember { mutableStateOf(Offset.Zero) }
+            var gridDragWidthPx by remember { mutableFloatStateOf(0f) }
+            var gridDropping by remember { mutableStateOf(false) }
+            var gridIntro by remember { mutableStateOf(true) }
+            val gridCount = effectiveCount
+            val currentGridCount by rememberUpdatedState(gridCount)
+            val onReorderLatest by rememberUpdatedState(onReorderPlaylist)
+
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(800L)
+                gridIntro = false
+            }
+
             // Keep the playing item at the top of the grid (see the list view for the reasoning).
             LaunchedEffect(gridNeedsRoom) {
-                if (effectiveCount > 0) {
+                if (effectiveCount > 0 && gridDragIndex == null) {
                     gridState.scrollToItem((currentIndex - 1).coerceIn(0, effectiveCount - 1))
                 }
             }
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(gridColumns),
-                state = gridState,
+
+            // The card under the finger (or the nearest one) is where the lifted card will land.
+            fun gridHoverAt(point: Offset, fallback: Int): Int {
+                val infos = gridState.layoutInfo.visibleItemsInfo.filter { it.index in 0 until currentGridCount }
+                infos.firstOrNull {
+                    point.x >= it.offset.x && point.x < it.offset.x + it.size.width &&
+                        point.y >= it.offset.y && point.y < it.offset.y + it.size.height
+                }?.let { return it.index }
+                return infos.minByOrNull {
+                    val cx = it.offset.x + it.size.width / 2f
+                    val cy = it.offset.y + it.size.height / 2f
+                    (point.x - cx) * (point.x - cx) + (point.y - cy) * (point.y - cy)
+                }?.index ?: fallback
+            }
+            val gridHoverIndex by remember {
+                derivedStateOf {
+                    val from = gridDragIndex
+                    if (from == null) -1 else gridHoverAt(gridDragPointer, from)
+                }
+            }
+
+            // Scroll the grid while a card is held near its top or bottom edge.
+            LaunchedEffect(gridDragIndex) {
+                if (gridDragIndex == null) return@LaunchedEffect
+                val edge = with(gridDensity) { 72.dp.toPx() }
+                val maxStep = with(gridDensity) { 9.dp.toPx() }
+                while (gridDragIndex != null) {
+                    val y = gridDragPointer.y
+                    val step = when {
+                        gridHeightPx <= 0f -> 0f
+                        y < edge -> -maxStep * ((edge - y) / edge).coerceIn(0f, 1f)
+                        y > gridHeightPx - edge -> maxStep * ((y - (gridHeightPx - edge)) / edge).coerceIn(0f, 1f)
+                        else -> 0f
+                    }
+                    if (step != 0f) gridState.scrollBy(step)
+                    kotlinx.coroutines.delay(16L)
+                }
+            }
+
+            @Composable
+            fun GridCardFor(idx: Int, cardModifier: Modifier, clickable: Boolean) {
+                val onCardClick = {
+                    if (clickable && gridDragIndex == null) {
+                        onSelectPlaylistItem(idx + 1)
+                        onDismissRequest()
+                    }
+                }
+                if (playlistItems.isNotEmpty()) {
+                    val item = playlistItems[idx]
+                    PlaylistEpisodeGridCard(
+                        index = idx + 1,
+                        title = item.displayName.substringBeforeLast("."),
+                        durationText = formatDuration(item.durationMs),
+                        qualityText = if (item.resolution.isNotBlank()) item.resolution else "1920x1080",
+                        isCurrent = (idx + 1) == currentIndex,
+                        videoItem = item,
+                        thumbnailStrategy = thumbnailStrategy,
+                        thumbnailQuality = thumbnailQuality,
+                        thumbnailFallbackSecond = thumbnailFallbackSecond,
+                        modifier = cardModifier,
+                        onClick = onCardClick
+                    )
+                } else {
+                    PlaylistEpisodeGridCard(
+                        index = idx + 1,
+                        title = playlistVideos[idx].substringBeforeLast("."),
+                        durationText = "23:59",
+                        qualityText = "1920x1080",
+                        isCurrent = (idx + 1) == currentIndex,
+                        videoItem = null,
+                        thumbnailStrategy = thumbnailStrategy,
+                        thumbnailQuality = thumbnailQuality,
+                        thumbnailFallbackSecond = thumbnailFallbackSecond,
+                        modifier = cardModifier,
+                        onClick = onCardClick
+                    )
+                }
+            }
+
+            Box(
                 modifier = Modifier
                     .weight(1f, fill = false)
                     .fillMaxWidth()
-                    .onGloballyPositioned { gridHeightPx = it.size.height.toFloat() },
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp + gridBottomPadding)
-            ) {
-                if (playlistItems.isNotEmpty()) {
-                    itemsIndexed(playlistItems, key = { idx, item -> "${item.id}_${item.path}_$idx" }) { idx, item ->
-                        val isCurrent = (idx + 1) == currentIndex
-                        val title = item.displayName.substringBeforeLast(".")
-                        val durationText = formatDuration(item.durationMs)
-                        val qualityText = if (item.resolution.isNotBlank()) item.resolution else "1920x1080"
-
-                        PlaylistEpisodeGridCard(
-                            index = idx + 1,
-                            title = title,
-                            durationText = durationText,
-                            qualityText = qualityText,
-                            isCurrent = isCurrent,
-                            videoItem = item,
-                            thumbnailStrategy = thumbnailStrategy,
-                            thumbnailQuality = thumbnailQuality,
-                            thumbnailFallbackSecond = thumbnailFallbackSecond,
-                            onClick = {
-                                onSelectPlaylistItem(idx + 1)
-                                onDismissRequest()
+                    .pointerInput(Unit) {
+                        // Watches the finger without taking it: taps and scrolling keep working. After a long press the
+                        // finger belongs to the drag until it lifts (so a card scrolling out of view cannot cancel it).
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            if (gridDropping || gridDragIndex != null) return@awaitEachGesture
+                            val pointerId = down.id
+                            val slop = viewConfiguration.touchSlop
+                            val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                                while (true) {
+                                    val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                    val c = ev.changes.firstOrNull { it.id == pointerId } ?: return@withTimeoutOrNull true
+                                    if (!c.pressed) return@withTimeoutOrNull true
+                                    if ((c.position - down.position).getDistance() > slop) return@withTimeoutOrNull true
+                                }
+                                @Suppress("UNREACHABLE_CODE")
+                                false
                             }
+                            // null = the timeout ran out while the finger stayed put = long press
+                            if (cancelled != null) return@awaitEachGesture
+                            val grabbed = gridState.layoutInfo.visibleItemsInfo.firstOrNull {
+                                it.index in 0 until currentGridCount &&
+                                    down.position.x >= it.offset.x && down.position.x < it.offset.x + it.size.width &&
+                                    down.position.y >= it.offset.y && down.position.y < it.offset.y + it.size.height
+                            } ?: return@awaitEachGesture
+
+                            try { com.example.util.AppHaptics.perform(gridHaptic) } catch (_: Throwable) {}
+                            gridGrab = Offset(down.position.x - grabbed.offset.x, down.position.y - grabbed.offset.y)
+                            gridDragWidthPx = grabbed.size.width.toFloat()
+                            gridDragPointer = down.position
+                            gridDragTopLeft = down.position - gridGrab
+                            gridDragIndex = grabbed.index
+
+                            while (true) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                val c = ev.changes.firstOrNull { it.id == pointerId } ?: break
+                                c.consume()
+                                gridDragPointer = c.position
+                                gridDragTopLeft = c.position - gridGrab
+                                if (!c.pressed) break
+                            }
+
+                            // Dropped: the card glides into the slot it was hovering, then the new order is stored.
+                            val from = gridDragIndex ?: return@awaitEachGesture
+                            val to = gridHoverAt(gridDragPointer, from)
+                            val startTopLeft = gridDragTopLeft
+                            val slot = gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == to }
+                            gridDropping = true
+                            gridScope.launch {
+                                if (slot != null) {
+                                    val end = Offset(slot.offset.x.toFloat(), slot.offset.y.toFloat())
+                                    val progress = Animatable(0f)
+                                    progress.animateTo(1f, tween(durationMillis = 170, easing = FastOutSlowInEasing)) {
+                                        gridDragTopLeft = androidx.compose.ui.geometry.lerp(startTopLeft, end, value)
+                                    }
+                                }
+                                if (to != from) onReorderLatest(from, to)
+                                gridDragIndex = null
+                                gridDropping = false
+                            }
+                        }
+                    }
+            ) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(gridColumns),
+                    state = gridState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .onGloballyPositioned { gridHeightPx = it.size.height.toFloat() },
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 4.dp + gridBottomPadding)
+                ) {
+                    items(
+                        count = gridCount,
+                        key = { idx ->
+                            if (playlistItems.isNotEmpty()) "${playlistItems[idx].id}_${playlistItems[idx].path}_$idx"
+                            else "${playlistVideos[idx]}_$idx"
+                        }
+                    ) { idx ->
+                        val from = gridDragIndex ?: -1
+                        val hover = gridHoverIndex
+                        val isDragged = from == idx
+                        // Cards between the lifted one and its landing slot step aside into the neighbouring slot.
+                        val shiftTo = when {
+                            from == -1 || hover == -1 || isDragged -> idx
+                            from < hover && idx in (from + 1)..hover -> idx - 1
+                            from > hover && idx in hover until from -> idx + 1
+                            else -> idx
+                        }
+                        var shiftX = 0f
+                        var shiftY = 0f
+                        if (shiftTo != idx) {
+                            val infos = gridState.layoutInfo.visibleItemsInfo
+                            val me = infos.firstOrNull { it.index == idx }
+                            val other = infos.firstOrNull { it.index == shiftTo }
+                            if (me != null && other != null) {
+                                shiftX = (other.offset.x - me.offset.x).toFloat()
+                                shiftY = (other.offset.y - me.offset.y).toFloat()
+                            }
+                        }
+                        val shiftSpec: androidx.compose.animation.core.AnimationSpec<Float> =
+                            if (gridDragIndex == null) androidx.compose.animation.core.snap()
+                            else spring(dampingRatio = 0.78f, stiffness = 520f)
+                        val animX = animateFloatAsState(shiftX, shiftSpec, label = "GridShiftX")
+                        val animY = animateFloatAsState(shiftY, shiftSpec, label = "GridShiftY")
+
+                        // Entrance: only the cards of the first screenful ease in, staggered; later ones appear plainly.
+                        val appear = remember { Animatable(if (gridIntro) 0f else 1f) }
+                        LaunchedEffect(Unit) {
+                            if (appear.value < 1f) {
+                                val rank = (idx - gridState.firstVisibleItemIndex).coerceIn(0, 9)
+                                kotlinx.coroutines.delay(rank * 40L)
+                                appear.animateTo(1f, tween(durationMillis = 340, easing = FastOutSlowInEasing))
+                            }
+                        }
+
+                        GridCardFor(
+                            idx = idx,
+                            cardModifier = Modifier.graphicsLayer {
+                                val a = appear.value
+                                alpha = if (isDragged) 0f else a
+                                scaleX = 0.92f + 0.08f * a
+                                scaleY = 0.92f + 0.08f * a
+                                translationX = animX.value
+                                translationY = animY.value + (1f - a) * 26f
+                            },
+                            clickable = true
                         )
                     }
-                } else {
-                    itemsIndexed(playlistVideos, key = { idx, name -> "${name}_$idx" }) { idx, name ->
-                        val isCurrent = (idx + 1) == currentIndex
-                        val title = name.substringBeforeLast(".")
+                }
 
-                        PlaylistEpisodeGridCard(
-                            index = idx + 1,
-                            title = title,
-                            durationText = "23:59",
-                            qualityText = "1920x1080",
-                            isCurrent = isCurrent,
-                            videoItem = null,
-                            thumbnailStrategy = thumbnailStrategy,
-                            thumbnailQuality = thumbnailQuality,
-                            thumbnailFallbackSecond = thumbnailFallbackSecond,
-                            onClick = {
-                                onSelectPlaylistItem(idx + 1)
-                                onDismissRequest()
-                            }
+                // The lifted card floats above the grid, a little bigger and with a shadow, and follows the finger.
+                gridDragIndex?.let { draggedIdx ->
+                    if (draggedIdx in 0 until gridCount && gridDragWidthPx > 0f) {
+                        GridCardFor(
+                            idx = draggedIdx,
+                            cardModifier = Modifier
+                                .offset { IntOffset(gridDragTopLeft.x.roundToInt(), gridDragTopLeft.y.roundToInt()) }
+                                .width(with(gridDensity) { gridDragWidthPx.toDp() })
+                                .graphicsLayer {
+                                    scaleX = 1.06f
+                                    scaleY = 1.06f
+                                    shadowElevation = 26f
+                                    shape = RoundedCornerShape(16.dp)
+                                    clip = false
+                                    alpha = 0.97f
+                                },
+                            clickable = false
                         )
                     }
                 }
@@ -2479,6 +2679,7 @@ private fun PlaylistEpisodeGridCard(
     thumbnailStrategy: com.example.ui.state.ThumbnailStrategy,
     thumbnailQuality: com.example.ui.state.ThumbnailQuality,
     thumbnailFallbackSecond: Int,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val context = LocalContext.current
@@ -2525,7 +2726,7 @@ private fun PlaylistEpisodeGridCard(
     val shape = RoundedCornerShape(16.dp)
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(if (isCurrent) activeCardBg else normalCardBg)

@@ -84,8 +84,11 @@ object FestivalDates {
     )
 }
 
-/** The backdrop to draw: the running event's own, unless the user turned those off or picked NONE. */
+/**
+ * The backdrop to draw. While a festival runs, "Random" always lands on that festival's backdrop (the same one every
+ * time, for as long as the festival lasts). A backdrop the user picked by hand is never replaced, and NONE stays none.
+ */
 fun SeasonalEvent?.backdropFor(
   picked: BackgroundType,
   seasonalThemes: Boolean,
-): BackgroundType = this?.takeIf { seasonalThemes && picked != BackgroundType.NONE }?.background ?: picked
+): BackgroundType = this?.takeIf { seasonalThemes && picked == BackgroundType.RANDOM }?.background ?: picked

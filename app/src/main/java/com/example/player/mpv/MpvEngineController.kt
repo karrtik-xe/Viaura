@@ -4771,10 +4771,16 @@ class MpvPlayerController {
      * Atomically selects/updates Primary and Secondary subtitle tracks in a single transaction.
      * Prevents intermediate recomposition flashes or race conditions between primary and secondary.
      */
+    /** One background thread applies subtitle selections in order, so tapping a track never blocks the UI thread. */
+    private val subtitleSelectExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "sub-select").apply { isDaemon = true } }
+    }
+
     fun selectSubtitleTracksAtomic(primaryTrackId: Int, secondaryTrackId: Int) {
         val selectionGeneration = subtitleSelectionGeneration.incrementAndGet()
+        // The visible state changes at once (the picker ticks the track in the same frame); the slow libmpv / libass /
+        // font work follows on the background thread below.
         try {
-            val view = mpvView
             isSubtitleExplicitlyDisabled = (primaryTrackId <= 0 && secondaryTrackId <= 0)
             lastActiveSubtitleTrackId = if (primaryTrackId > 0) primaryTrackId else 0
             _secondarySubtitleTrackId.value = if (secondaryTrackId > 0) secondaryTrackId else 0
@@ -4784,8 +4790,20 @@ class MpvPlayerController {
                     isSecondarySelected = (secondaryTrackId > 0 && it.id == secondaryTrackId)
                 )
             }
+        } catch (_: Throwable) {}
+        try {
+            subtitleSelectExecutor.execute {
+                // A newer tap already carries the full wanted state, so an older pending one is simply dropped.
+                if (isReleased || selectionGeneration != subtitleSelectionGeneration.get()) return@execute
+                applySubtitleSelectionToMpv(primaryTrackId, secondaryTrackId, selectionGeneration)
+            }
+        } catch (_: Throwable) {}
+    }
 
-            if (view != null) {
+    private fun applySubtitleSelectionToMpv(primaryTrackId: Int, secondaryTrackId: Int, selectionGeneration: Long) {
+        try {
+            val view = mpvView
+            if (view != null && !isReleased) {
                 val playbackPrimaryTrackId = resolveAdvancedAssPlaybackId(primaryTrackId)
                 if (primaryTrackId <= 0) {
                     subtitleUsesGeneratedAss = false
@@ -4837,13 +4855,15 @@ class MpvPlayerController {
 
             if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
 
-            _subtitleTracks.value = _subtitleTracks.value.map { track ->
-                track.copy(
-                    isSelected = (primaryTrackId > 0 && track.id == primaryTrackId),
-                    isSecondarySelected = (secondaryTrackId > 0 && track.id == secondaryTrackId)
-                )
+            if (selectionGeneration == subtitleSelectionGeneration.get()) {
+                _subtitleTracks.value = _subtitleTracks.value.map { track ->
+                    track.copy(
+                        isSelected = (primaryTrackId > 0 && track.id == primaryTrackId),
+                        isSecondarySelected = (secondaryTrackId > 0 && track.id == secondaryTrackId)
+                    )
+                }
+                nudgeRedrawIfPaused()
             }
-            nudgeRedrawIfPaused()
         } catch (_: Throwable) {}
     }
 

@@ -11,7 +11,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -19,6 +23,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -193,6 +199,25 @@ private const val EASE = 0.12f
  * Canvas that redraws from the clock and tilt without recomposing: both are read inside the draw
  * block, so a tick invalidates drawing only.
  */
+/**
+ * Where the finger last touched the screen (window coordinates). The activity reports every new touch here, so a
+ * backdrop can react (Diwali fires a firework) no matter which control on top of it received the touch.
+ */
+object BackdropTouch {
+  var seq by mutableIntStateOf(0)
+    private set
+  var x: Float = 0f
+    private set
+  var y: Float = 0f
+    private set
+
+  fun report(px: Float, py: Float) {
+    x = px
+    y = py
+    seq++
+  }
+}
+
 @Composable
 internal fun BackdropCanvas(
   type: BackgroundType,
@@ -205,7 +230,25 @@ internal fun BackdropCanvas(
   val targetTilt = rememberTilt(parallax && running && !reduceMotion)
   val palette = rememberBackdropPalette()
   val drawing = remember { BackdropDrawingState() }
-  Canvas(modifier = modifier.fillMaxSize()) {
+
+  // A touch anywhere on the screen sets off a firework in the Diwali backdrop.
+  if (type == BackgroundType.DIWALI) {
+    LaunchedEffect(Unit) {
+      var seen = BackdropTouch.seq
+      snapshotFlow { BackdropTouch.seq }.collect { now ->
+        if (now != seen) {
+          seen = now
+          drawing.addBurst(BackdropTouch.x - drawing.origin.x, BackdropTouch.y - drawing.origin.y, clock.value)
+        }
+      }
+    }
+  }
+
+  Canvas(
+    modifier = modifier
+      .fillMaxSize()
+      .onGloballyPositioned { drawing.origin = it.positionInWindow() },
+  ) {
     if (size.minDimension > 0f) {
       drawBackdrop(type, clock.value, targetTilt.value, palette, drawing)
     }
@@ -218,7 +261,28 @@ internal class BackdropDrawingState {
   val starX = FloatArray(CONSTELLATION_STARS)
   val starY = FloatArray(CONSTELLATION_STARS)
   val starVisibility = FloatArray(CONSTELLATION_STARS)
+
+  // Touch fireworks (Diwali): a small ring of the most recent bursts, in canvas coordinates and canvas clock time.
+  val burstX = FloatArray(BURST_SLOTS)
+  val burstY = FloatArray(BURST_SLOTS)
+  val burstT = FloatArray(BURST_SLOTS) { -1000f }
+  val burstSeed = IntArray(BURST_SLOTS)
+  private var burstNext = 0
+
+  /** Top-left of the canvas in the window, to turn window touch coordinates into canvas ones. */
+  var origin: Offset = Offset.Zero
+
+  fun addBurst(x: Float, y: Float, t: Float) {
+    val i = burstNext
+    burstNext = (i + 1) % BURST_SLOTS
+    burstX[i] = x
+    burstY[i] = y
+    burstT[i] = t
+    burstSeed[i] = (t * 1000f).toInt() xor (x.toInt() * 31) xor y.toInt()
+  }
 }
+
+internal const val BURST_SLOTS = 8
 
 internal const val CONSTELLATION_STARS = 34
 
@@ -270,7 +334,7 @@ internal fun DrawScope.drawBackdrop(
     BackgroundType.HALLOWEEN -> drawHalloween(t, tilt, p, drawing.path)
     BackgroundType.FIREWORKS -> drawFireworks(t, tilt, p)
     BackgroundType.WINTER -> drawWinter(t, tilt, p, drawing.path)
-    BackgroundType.DIWALI -> drawDiwali(t, tilt, p, drawing.path)
+    BackgroundType.DIWALI -> drawDiwali(t, tilt, p, drawing)
     BackgroundType.HOLI -> drawHoli(t, tilt, p)
   }
 }
