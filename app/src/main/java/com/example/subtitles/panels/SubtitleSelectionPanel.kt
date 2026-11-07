@@ -825,8 +825,8 @@ fun SubtitleSelectionPanel(
                                                         fontWeight = FontWeight.SemiBold,
                                                         color = NormalItemColor,
                                                         maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f, fill = false)
+                                                        softWrap = false,
+                                                        modifier = Modifier.weight(1f, fill = false).basicMarquee(iterations = Int.MAX_VALUE)
                                                     )
                                                     Box(
                                                         modifier = Modifier

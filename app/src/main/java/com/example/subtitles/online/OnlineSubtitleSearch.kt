@@ -3,7 +3,9 @@ package com.example.ui.components
 import android.content.Context
 import android.util.Xml
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,12 +17,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -35,8 +40,6 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
@@ -52,17 +55,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import com.example.ui.theme.isAppInDarkTheme
 import com.example.util.NetworkBypass
 import kotlinx.coroutines.CancellationException
@@ -984,6 +998,66 @@ private fun SearchTextField(
     }
 }
 
+/** Puts a pick-list pop-up right under its anchor (above it when there is no room below) and keeps it inside the window. */
+private class BelowAnchorPositionProvider(private val gapPx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize
+    ): IntOffset {
+        val x = anchorBounds.left.coerceIn(0, maxOf(0, windowSize.width - popupContentSize.width))
+        var y = anchorBounds.bottom + gapPx
+        if (y + popupContentSize.height > windowSize.height) y = maxOf(0, anchorBounds.top - gapPx - popupContentSize.height)
+        return IntOffset(x, y)
+    }
+}
+
+/** Rounded glass-style card (same border / tint as the sheet's chips) used by the Season and Episode pick lists. */
+@Composable
+private fun GlassPickerPopup(onDismiss: () -> Unit, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    val isDark = isAppInDarkTheme()
+    val shape = RoundedCornerShape(18.dp)
+    val gap = with(LocalDensity.current) { 6.dp.roundToPx() }
+    Popup(
+        popupPositionProvider = BelowAnchorPositionProvider(gap),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true)
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(min = 150.dp, max = 210.dp)
+                .shadow(14.dp, shape)
+                .clip(shape)
+                .background(if (isDark) Color(0xF21B2230) else Color(0xF5F4F7FB))
+                .border(1.dp, SheetButtonBorderColor, shape)
+                .padding(vertical = 6.dp),
+            content = content
+        )
+    }
+}
+
+@Composable
+private fun GlassPickerRow(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 6.dp, vertical = 1.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) ActiveHighlightColor.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (selected) ActiveHighlightColor else NormalItemColor,
+            fontSize = 13.5.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold,
+            maxLines = 1
+        )
+    }
+}
+
 /**
  * Header of the subtitle search screen, everything on ONE line:
  * [back] [language] [show name] [S3 v] [E 5] [search].
@@ -1036,22 +1110,16 @@ fun SubtitleSearchHeader(
         Spacer(Modifier.width(2.dp))
 
         // 1. Language (opens the language sheet)
-        Row(
+        Box(
             modifier = Modifier
                 .height(38.dp)
                 .liquidSearchSurface(chipShape, isDark, SheetButtonBgColor, SheetButtonBorderColor)
                 .clip(chipShape)
                 .clickable { onOpenLanguages() }
-                .padding(start = 9.dp, end = 3.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp),
+            contentAlignment = Alignment.Center
         ) {
             Text(langLabel, color = SheetButtonTextColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            StyledIcon(
-                imageVector = Icons.Outlined.KeyboardArrowDown,
-                contentDescription = "Choose subtitle language",
-                tint = SecondaryTextColor,
-                modifier = Modifier.size(16.dp)
-            )
         }
         Spacer(Modifier.width(4.dp))
 
@@ -1093,97 +1161,96 @@ fun SubtitleSearchHeader(
         }
         Spacer(Modifier.width(4.dp))
 
-        // 3. Season: "S3 v" (list of the seasons found online)
+        // 3. Season: "S3" (tap: glass list of the seasons found online)
         Box {
-            Row(
+            Box(
                 modifier = Modifier
                     .height(38.dp)
                     .liquidSearchSurface(chipShape, isDark, SheetButtonBgColor, SheetButtonBorderColor)
                     .clip(chipShape)
                     .clickable { seasonMenu = true }
-                    .padding(start = 10.dp, end = 3.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = "S" + (state.seasonNumber?.toString() ?: "–"),
                     color = SheetButtonTextColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1
                 )
-                StyledIcon(
-                    imageVector = Icons.Outlined.KeyboardArrowDown,
-                    contentDescription = "Choose season",
-                    tint = SecondaryTextColor,
-                    modifier = Modifier.size(16.dp)
-                )
             }
-            DropdownMenu(expanded = seasonMenu, onDismissRequest = { seasonMenu = false }) {
-                seasonList.forEach { n ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "Season $n",
-                                color = if (n == state.seasonNumber) ActiveHighlightColor else NormalItemColor,
-                                fontWeight = if (n == state.seasonNumber) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 13.5.sp
-                            )
-                        },
-                        onClick = { state.season = n.toString(); seasonMenu = false }
-                    )
+            if (seasonMenu) {
+                val seasonListState = rememberLazyListState(
+                    initialFirstVisibleItemIndex = (seasonList.indexOf(state.seasonNumber ?: -1) - 1).coerceAtLeast(0)
+                )
+                GlassPickerPopup(onDismiss = { seasonMenu = false }) {
+                    LazyColumn(state = seasonListState, modifier = Modifier.heightIn(max = 300.dp)) {
+                        items(seasonList, key = { it }) { n ->
+                            GlassPickerRow("Season $n", n == state.seasonNumber) {
+                                state.season = n.toString(); seasonMenu = false
+                            }
+                        }
+                    }
                 }
             }
         }
         Spacer(Modifier.width(4.dp))
 
-        // 4. Episode: "E 5" typed by hand (drop-down of the aired episodes when the lookup knows them)
+        // 4. Episode: "E4" (tap: glass pop-up with a box to type the number, and the aired episodes when they are known)
         Box {
-            Row(
+            Box(
                 modifier = Modifier
                     .height(38.dp)
                     .liquidSearchSurface(chipShape, isDark, SheetButtonBgColor, SheetButtonBorderColor)
-                    .padding(start = 10.dp, end = if (episodeCount > 0) 3.dp else 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .clip(chipShape)
+                    .clickable { episodeMenu = true }
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Text("E", color = SheetButtonTextColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(2.dp))
-                BasicTextField(
-                    value = state.episode,
-                    onValueChange = { state.episode = it.filter(Char::isDigit).take(3) },
-                    singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(
-                        fontSize = 13.sp, color = SheetButtonTextColor, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Start
-                    ),
-                    cursorBrush = SolidColor(ActiveHighlightColor),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { submit() }),
-                    modifier = Modifier.width(26.dp),
-                    decorationBox = { inner ->
-                        if (state.episode.isEmpty()) Text("–", color = SecondaryTextColor, fontSize = 13.sp)
-                        inner()
-                    }
+                Text(
+                    text = "E" + (state.episodeNumber?.toString() ?: "–"),
+                    color = SheetButtonTextColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1
                 )
-                if (episodeCount > 0) {
-                    Box(Modifier.size(24.dp).clip(CircleShape).clickable { episodeMenu = true }, contentAlignment = Alignment.Center) {
-                        StyledIcon(
-                            imageVector = Icons.Outlined.KeyboardArrowDown,
-                            contentDescription = "Choose episode",
-                            tint = SecondaryTextColor,
-                            modifier = Modifier.size(16.dp)
+            }
+            if (episodeMenu) {
+                val focusRequester = remember { FocusRequester() }
+                val episodeListState = rememberLazyListState(
+                    initialFirstVisibleItemIndex = ((state.episodeNumber ?: 1) - 2).coerceAtLeast(0)
+                )
+                LaunchedEffect(Unit) { try { focusRequester.requestFocus() } catch (_: Throwable) {} }
+                GlassPickerPopup(onDismiss = { episodeMenu = false }) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .fillMaxWidth()
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isDark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.06f))
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        BasicTextField(
+                            value = state.episode,
+                            onValueChange = { state.episode = it.filter(Char::isDigit).take(3) },
+                            singleLine = true,
+                            textStyle = LocalTextStyle.current.copy(fontSize = 13.5.sp, color = SheetButtonTextColor, fontWeight = FontWeight.SemiBold),
+                            cursorBrush = SolidColor(ActiveHighlightColor),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { episodeMenu = false; submit() }),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                            decorationBox = { inner ->
+                                if (state.episode.isEmpty()) Text("Type episode number", color = SecondaryTextColor, fontSize = 13.sp, maxLines = 1)
+                                inner()
+                            }
                         )
                     }
-                }
-            }
-            DropdownMenu(expanded = episodeMenu, onDismissRequest = { episodeMenu = false }) {
-                (1..episodeCount).forEach { n ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "Episode $n",
-                                color = if (n == state.episodeNumber) ActiveHighlightColor else NormalItemColor,
-                                fontWeight = if (n == state.episodeNumber) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 13.5.sp
-                            )
-                        },
-                        onClick = { state.episode = n.toString(); episodeMenu = false }
-                    )
+                    if (episodeCount > 0) {
+                        LazyColumn(state = episodeListState, modifier = Modifier.heightIn(max = 260.dp)) {
+                            items((1..episodeCount).toList(), key = { it }) { n ->
+                                GlassPickerRow("Episode $n", n == state.episodeNumber) {
+                                    state.episode = n.toString(); episodeMenu = false
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1265,6 +1332,7 @@ fun SubtitleLanguageSheet(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 /**
  * Body of the "Online Subtitles" section (shown when the section is expanded): provider status line, API keys,
  * and every result found. Tapping a result downloads it and loads it into the player ([onSubtitleFile]).
@@ -1363,9 +1431,18 @@ fun OnlineSubtitleSectionContent(
                                 if (r.season != null && r.episode != null) append("  S%02dE%02d".format(r.season, r.episode))
                                 else if (r.episode != null) append("  E%02d".format(r.episode))
                             }
-                            Text(head, color = NormalItemColor, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            // long names glide from left to right (and repeat) so the whole name can be read
+                            Text(
+                                head, color = NormalItemColor, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.fillMaxWidth().basicMarquee(iterations = Int.MAX_VALUE)
+                            )
                             if (r.release.isNotBlank()) {
-                                Text(r.release, color = SecondaryTextColor, fontSize = 11.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    r.release, color = SecondaryTextColor, fontSize = 11.5.sp,
+                                    maxLines = 1, softWrap = false,
+                                    modifier = Modifier.fillMaxWidth().basicMarquee(iterations = Int.MAX_VALUE)
+                                )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(r.provider, color = ActiveHighlightColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
