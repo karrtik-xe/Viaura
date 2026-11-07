@@ -32,6 +32,8 @@ object BackgroundAnimationSettings {
     private val parallaxState = mutableStateOf(true)
     private val overWallpaperState = mutableStateOf(true)
     private val seasonalState = mutableStateOf(true)
+    // False until the user picks an animation by hand (None included). While false, a running festival may take over.
+    private val typeChosenState = mutableStateOf(false)
     // Names of the "NEW" backdrops the user has already tapped (their tag is gone for good).
     private val seenNewState = mutableStateOf<Set<String>>(emptySet())
 
@@ -40,6 +42,7 @@ object BackgroundAnimationSettings {
     val parallax: Boolean get() = parallaxState.value
     val overWallpaper: Boolean get() = overWallpaperState.value
     val seasonalThemes: Boolean get() = seasonalState.value
+    val typeChosen: Boolean get() = typeChosenState.value
 
     private fun prefs(): android.content.SharedPreferences? =
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -48,6 +51,7 @@ object BackgroundAnimationSettings {
         val app = context.applicationContext
         appContext = app
         val p = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        typeChosenState.value = p.contains("type")
         typeState.value = BackgroundType.PICKABLE.firstOrNull { it.name == p.getString("type", null) } ?: BackgroundType.NONE
         intervalState.value = RandomInterval.entries.firstOrNull { it.name == p.getString("interval", null) } ?: RandomInterval.EACH_LAUNCH
         parallaxState.value = p.getBoolean("parallax", true)
@@ -70,6 +74,7 @@ object BackgroundAnimationSettings {
 
     fun setType(value: BackgroundType) {
         typeState.value = value
+        typeChosenState.value = true
         prefs()?.edit()?.putString("type", value.name)?.apply()
     }
 
@@ -157,7 +162,13 @@ fun rememberActiveBackground(): ActiveBackground {
     val resolved = remember(picked, interval, today, revision) {
         if (picked == BackgroundType.RANDOM) RandomBackground.current(interval) else picked
     }
-    val shown = event.backdropFor(picked, seasonal).let { if (it == BackgroundType.RANDOM) resolved else it }
+    // Nothing picked yet: the running festival (Diwali etc.) plays by itself and stops on its last day.
+    val festivalByDefault = event != null && seasonal && !BackgroundAnimationSettings.typeChosen
+    val shown = if (festivalByDefault) {
+        event!!.background
+    } else {
+        event.backdropFor(picked, seasonal).let { if (it == BackgroundType.RANDOM) resolved else it }
+    }
     return ActiveBackground(shown, parallax, overWallpaper, event?.takeIf { seasonal })
 }
 
