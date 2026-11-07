@@ -219,6 +219,18 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- Music library for Android Auto, car Bluetooth browsing and the Google Assistant -->
+        <service
+            android:name=".player.AudioMediaBrowserService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
         <!-- Foreground Service that keeps the video mini player (and its sound) alive with the screen off -->
         <service
             android:name=".player.VideoMiniPlaybackService"

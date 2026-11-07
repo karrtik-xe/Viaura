@@ -400,6 +400,7 @@ fun SubtitleSelectionPanel(
     onDismissRequest: () -> Unit
 ) {
     var isSearchMode by remember { mutableStateOf(false) }
+    var searchTab by remember { mutableStateOf(0) } // 0 = files on the device, 1 = online providers
     var searchQuery by remember(videoTitle) { mutableStateOf(cleanVideoTitleForSearch(videoTitle)) }
     var isSearching by remember { mutableStateOf(false) }
     var foundSubtitleFiles by remember { mutableStateOf<List<File>>(emptyList()) }
@@ -429,7 +430,7 @@ fun SubtitleSelectionPanel(
     PlayerGlassModalSheet(
         panelKey = "subtitles",
         isLandscape = isLandscape,
-        heightFraction = if (isSearchMode) 0.70f else 0.58f,
+        heightFraction = if (isSearchMode) (if (searchTab == 1) 0.84f else 0.70f) else 0.58f,
         glassBlurTransparency = glassBlurTransparency,
         onDismissRequest = onDismissRequest,
         headerCustomRow = {
@@ -455,7 +456,15 @@ fun SubtitleSelectionPanel(
 
                     Spacer(modifier = Modifier.width(4.dp))
 
-                    Box(
+                    if (searchTab == 1) {
+                        Text(
+                            text = "Search subtitles online",
+                            color = NormalItemColor,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else Box(
                         modifier = Modifier
                             .weight(1f)
                             .height(38.dp)
@@ -634,8 +643,38 @@ fun SubtitleSelectionPanel(
         }
     ) {
         if (isSearchMode) {
-            // SEARCH RESULTS VIEW
-            if (isSearching) {
+            // SEARCH RESULTS VIEW: tabs "On device" / "Online"
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf("On device", "Online").forEachIndexed { index, label ->
+                    val selected = searchTab == index
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) ActiveHighlightColor else Color.Transparent)
+                            .border(1.dp, if (selected) ActiveHighlightColor else SheetButtonBorderColor, RoundedCornerShape(10.dp))
+                            .clickable { searchTab = index }
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (selected) Color.White else SheetButtonTextColor,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+            if (searchTab == 1) {
+                OnlineSubtitleSearchContent(
+                    videoTitle = videoTitle,
+                    onSubtitleFile = { file -> onSelectSubtitleFile?.invoke(file) },
+                    onNotify = onShowNotification,
+                    onDone = onDismissRequest
+                )
+            } else if (isSearching) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()

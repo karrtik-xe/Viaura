@@ -111,6 +111,15 @@ object AudioNotificationManager {
                 override fun onStop() {
                     AudioPlaybackManager.closeAndStop()
                 }
+
+                // Android Auto / Bluetooth car browsing / Google Assistant (see AudioMediaBrowserService)
+                override fun onPlayFromMediaId(mediaId: String?, extras: android.os.Bundle?) {
+                    if (!mediaId.isNullOrBlank()) AutoLibrary.playFromMediaId(appContext, mediaId)
+                }
+
+                override fun onPlayFromSearch(query: String?, extras: android.os.Bundle?) {
+                    AutoLibrary.playFromSearch(appContext, query)
+                }
             })
 
             isActive = true
@@ -156,6 +165,8 @@ object AudioNotificationManager {
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
                     PlaybackStateCompat.ACTION_SEEK_TO or
+                    PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or
+                    PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH or
                     PlaybackStateCompat.ACTION_STOP
 
             val playbackState = PlaybackStateCompat.Builder()

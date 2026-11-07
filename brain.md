@@ -422,6 +422,7 @@ All folders are under `app/src/main/java/com/example/`. The Kotlin `package` of 
 
 | File | What it does | Main symbols | Lines |
 |---|---|---|---|
+| `AudioMediaBrowserService.kt` | Android Auto / car Bluetooth / Assistant music library (Songs, Recently added, Albums, Artists) and play-from-id / play-from-search | AudioMediaBrowserService, AutoLibrary | 150 |
 | `AudioNotificationActionReceiver.kt` | BroadcastReceiver for handling media notification actions (Play/Pause, Next, Previous, Stop). | AudioNotificationReceiver | 39 |
 | `AudioNotificationBuilder.kt` | Handles music playback system notification, MediaSessionCompat, | AudioNotificationManager | 504 |
 | `AudioPlaybackForegroundService.kt` | Foreground Service for persistent audio playback and media notification controls. | AudioPlaybackService | 178 |
@@ -1117,6 +1118,12 @@ All folders are under `app/src/main/java/com/example/`. The Kotlin `package` of 
 |---|---|---|---|
 | `GoogleFontsDownloader.kt` | Automatic Google Fonts support for ASS/SSA subtitles. | GoogleFontsManager | 469 |
 | `SubtitleFontResolver.kt` | Contains SubtitleFontManager | SubtitleFontManager | 1643 |
+
+### `subtitles/online/`  — packages: `com.example.ui.components`
+
+| File | What it does | Main symbols | Lines |
+|---|---|---|---|
+| `OnlineSubtitleSearch.kt` | Bazarr-style online subtitle search (Podnapisi, OpenSubtitles REST + IMDb, SubDL key): parallel provider search by name + season + episode + language, download / unzip / UTF-8, and the "Online" tab of the subtitle search sheet | OnlineSubtitleEngine, OnlineSubtitleSearchContent, OnlineSubtitleTitleParser | 640 |
 
 ### `subtitles/panels/`  — packages: `com.example.ui.components`
 
