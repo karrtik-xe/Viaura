@@ -133,6 +133,7 @@ import com.example.player.TrackAudioConfig
 import com.example.player.AudioChannelMode
 import com.example.player.VideoFilterPreset
 import com.example.player.ManualVideoAdjustments
+import com.example.player.Anime4KShaders
 import com.example.ui.state.PlayerLayoutConfig
 import com.example.ui.state.SeekbarStyle
 import kotlin.math.roundToInt
@@ -1081,6 +1082,7 @@ fun VideoSettingSelectionPanel(
 /**
  * 6B. MANUAL VIDEO ADJUSTMENT RIGHT-SIDE SLIDING PANEL
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ManualVideoAdjustmentPanel(
     manualAdjustments: ManualVideoAdjustments,
@@ -1239,6 +1241,107 @@ fun ManualVideoAdjustmentPanel(
                         checkedTrackColor = ActiveHighlightColor
                     )
                 )
+            }
+
+            // 10. Anime4K shaders (real-time anime upscaling / restoring, runs on the GPU)
+            val anime4kContext = LocalContext.current
+            val anime4kOn = Anime4KShaders.isOn(manualAdjustments.anime4k)
+            val anime4kFilesReady = remember(anime4kContext) { Anime4KShaders.isAvailable(anime4kContext, Anime4KShaders.modeId("a", false)) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(SheetButtonBgColor)
+                    .border(1.dp, SheetButtonBorderColor, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = anime4kFilesReady) {
+                            onManualAdjustmentsChange(
+                                manualAdjustments.copy(anime4k = if (anime4kOn) Anime4KShaders.OFF else Anime4KShaders.modeId("a", false))
+                            )
+                        },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Anime4K Shaders",
+                            color = SheetButtonTextColor,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (anime4kFilesReady) "Sharper lines for anime (uses more GPU / battery)" else "Shader files are not included in this build",
+                            color = Neutral.S475569,
+                            fontSize = 12.sp
+                        )
+                    }
+                    ViauraSwitch(
+                        checked = anime4kOn,
+                        onCheckedChange = {
+                            if (anime4kFilesReady) {
+                                onManualAdjustmentsChange(
+                                    manualAdjustments.copy(anime4k = if (it) Anime4KShaders.modeId("a", false) else Anime4KShaders.OFF)
+                                )
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = ActiveHighlightColor
+                        )
+                    )
+                }
+                if (anime4kOn) {
+                    val currentLetter = Anime4KShaders.letterOf(manualAdjustments.anime4k)
+                    val currentHq = Anime4KShaders.isHq(manualAdjustments.anime4k)
+                    @Composable
+                    fun Anime4KChip(label: String, selected: Boolean, onClick: () -> Unit) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) ActiveHighlightColor else Color.Transparent)
+                                .border(1.dp, if (selected) ActiveHighlightColor else SheetButtonBorderColor, RoundedCornerShape(10.dp))
+                                .clickable(onClick = onClick)
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (selected) Color.White else SheetButtonTextColor,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Anime4KChip("Mode A", currentLetter == "a") {
+                            onManualAdjustmentsChange(manualAdjustments.copy(anime4k = Anime4KShaders.modeId("a", currentHq)))
+                        }
+                        Anime4KChip("Mode B", currentLetter == "b") {
+                            onManualAdjustmentsChange(manualAdjustments.copy(anime4k = Anime4KShaders.modeId("b", currentHq)))
+                        }
+                        Anime4KChip("Mode C", currentLetter == "c") {
+                            onManualAdjustmentsChange(manualAdjustments.copy(anime4k = Anime4KShaders.modeId("c", currentHq)))
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Anime4KChip("Fast", !currentHq) {
+                            onManualAdjustmentsChange(manualAdjustments.copy(anime4k = Anime4KShaders.modeId(currentLetter, false)))
+                        }
+                        Anime4KChip("High quality", currentHq) {
+                            onManualAdjustmentsChange(manualAdjustments.copy(anime4k = Anime4KShaders.modeId(currentLetter, true)))
+                        }
+                    }
+                    Text(
+                        text = "A: clean 1080p anime · B: soft / slightly blurry · C: noisy or low-res (480p–720p). High quality needs a strong phone.",
+                        color = Neutral.S475569,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
     }

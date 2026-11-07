@@ -97,6 +97,7 @@ data class PlayerSettings(
 
     // Video Filter & Manual Adjustments settings
     val videoFilterPreset: String = "none",
+    val videoAnime4k: String = "off",
     val videoBrightness: Int = 0,
     val videoContrast: Int = 0,
     val videoSaturation: Int = 0,
@@ -270,6 +271,7 @@ data class PlayerSettings(
                     surroundSoundMode = o.optString("surroundSoundMode", "OFF"),
                     trackAudioConfigsJson = o.optString("trackAudioConfigsJson", "{}"),
                     videoFilterPreset = o.optString("videoFilterPreset", "none"),
+                    videoAnime4k = o.optString("videoAnime4k", "off"),
                     videoBrightness = o.optInt("videoBrightness", 0).coerceIn(-100, 100),
                     videoContrast = o.optInt("videoContrast", 0).coerceIn(-100, 100),
                     videoSaturation = o.optInt("videoSaturation", 0).coerceIn(-100, 100),
@@ -424,6 +426,7 @@ data class PlayerSettings(
             o.put("surroundSoundMode", value.surroundSoundMode)
             o.put("trackAudioConfigsJson", value.trackAudioConfigsJson)
             o.put("videoFilterPreset", value.videoFilterPreset)
+            o.put("videoAnime4k", value.videoAnime4k)
             o.put("videoBrightness", value.videoBrightness)
             o.put("videoContrast", value.videoContrast)
             o.put("videoSaturation", value.videoSaturation)

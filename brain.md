@@ -865,6 +865,7 @@ All folders are under `app/src/main/java/com/example/`. The Kotlin `package` of 
 
 | File | What it does | Main symbols | Lines |
 |---|---|---|---|
+| `Anime4KShaders.kt` | Anime4K glsl-shader chains (modes a/b/c, fast/hq) and asset copy for mpv | Anime4KShaders | 95 |
 | `VideoFilterPresets.kt` | 12 Rich Real-Time Video Filter Presets | VideoFilterPreset, ManualVideoAdjustments | 146 |
 
 ### `player/layout/`  — packages: `com.example.ui.components`, `com.example.ui.state`
@@ -1426,7 +1427,8 @@ All zips keep entries relative to the folder named in their step (icons: `app/sr
 6. Fetch bundled subtitle font (GoNotoCurrent-Regular.ttf)
 7. Fetch yt-dlp Python standard library archive (python313.zip)
 8. Fetch latest yt-dlp release
-9. Fetch QuickJS-NG sources
+9. Fetch Anime4K shaders (`app/src/main/assets/anime4k/`, non-fatal) 
+9b. Fetch QuickJS-NG sources
 10. Fetch yt-dlp CA bundle and libpython.so
 11. Prepare CloudStream runtime module (`cloudstream-lib.zip`)
 12. JDK 17, Android SDK, licences, resource / SDK checks (duplicate resource names)

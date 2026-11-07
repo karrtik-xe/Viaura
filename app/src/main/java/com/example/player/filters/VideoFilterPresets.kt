@@ -137,9 +137,10 @@ data class ManualVideoAdjustments(
     val hue: Int = 0,            // -100 to 100 (Default: 0)
     val temperature: Int = 0,    // -100 to 100 (Default: 0)
     val tint: Int = 0,           // -100 to 100 (Default: 0)
-    val deband: Boolean = false  // Banding reduction filter
+    val deband: Boolean = false, // Banding reduction filter
+    val anime4k: String = "off"  // Anime4K shader mode id ("off" or "a_fast" / "b_hq" ...), see Anime4KShaders
 ) {
     fun isNeutral(): Boolean =
         brightness == 0 && contrast == 0 && saturation == 0 && gamma == 0 &&
-        sharpness == 0 && hue == 0 && temperature == 0 && tint == 0 && !deband
+        sharpness == 0 && hue == 0 && temperature == 0 && tint == 0 && !deband && anime4k == "off"
 }

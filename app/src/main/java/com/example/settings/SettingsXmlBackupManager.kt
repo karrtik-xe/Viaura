@@ -210,6 +210,7 @@ object ViauraSettingsXmlManager {
         serializer.startTag(null, "Decoder")
         writeSetting("hwAccelMode", state.hwAccelMode.name)
         writeSetting("videoFilterPreset", p.videoFilterPreset)
+        writeSetting("videoAnime4k", p.videoAnime4k)
         writeSetting("videoBrightness", p.videoBrightness)
         writeSetting("videoContrast", p.videoContrast)
         writeSetting("videoSaturation", p.videoSaturation)
@@ -564,6 +565,7 @@ object ViauraSettingsXmlManager {
 
                     // Video filters
                     videoFilterPreset = getStr("videoFilterPreset", basePlayer.videoFilterPreset),
+                    videoAnime4k = getStr("videoAnime4k", basePlayer.videoAnime4k),
                     videoBrightness = getInt("videoBrightness", basePlayer.videoBrightness, -100, 100),
                     videoContrast = getInt("videoContrast", basePlayer.videoContrast, -100, 100),
                     videoSaturation = getInt("videoSaturation", basePlayer.videoSaturation, -100, 100),

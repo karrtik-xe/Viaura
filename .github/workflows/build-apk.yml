@@ -149,6 +149,30 @@ jobs:
           unzip -l app/src/ytdlp/assets/ytdl/yt-dlp | grep -q "yt_dlp/version.py"
           ls -lh app/src/ytdlp/assets/ytdl/yt-dlp
 
+      # Anime4K (MIT) GLSL shaders for the player's "Anime4K Shaders" switch. Not kept in the repo: cloned here and flattened into
+      # app/src/main/assets/anime4k/. A failed download never breaks the build - the app then shows the switch as unavailable.
+      - name: Fetch Anime4K shaders
+        run: |
+          set +e
+          rm -rf /tmp/anime4k-src app/src/main/assets/anime4k
+          mkdir -p app/src/main/assets/anime4k
+          for i in 1 2 3; do
+            git clone --depth 1 https://github.com/bloc97/Anime4K.git /tmp/anime4k-src && break
+            rm -rf /tmp/anime4k-src; sleep 5
+          done
+          if [ -d /tmp/anime4k-src/glsl ]; then
+            find /tmp/anime4k-src/glsl -type f -name 'Anime4K_*.glsl' -exec cp {} app/src/main/assets/anime4k/ \;
+          fi
+          MISSING=0
+          for F in Anime4K_Clamp_Highlights Anime4K_AutoDownscalePre_x2 Anime4K_AutoDownscalePre_x4 \
+                   Anime4K_Restore_CNN_M Anime4K_Restore_CNN_VL Anime4K_Restore_CNN_Soft_M Anime4K_Restore_CNN_Soft_VL \
+                   Anime4K_Upscale_CNN_x2_S Anime4K_Upscale_CNN_x2_M Anime4K_Upscale_CNN_x2_VL \
+                   Anime4K_Upscale_Denoise_CNN_x2_M Anime4K_Upscale_Denoise_CNN_x2_VL; do
+            [ -s "app/src/main/assets/anime4k/$F.glsl" ] || { echo "::warning::Anime4K shader missing: $F.glsl"; MISSING=1; }
+          done
+          echo "Anime4K shaders ready: $(ls app/src/main/assets/anime4k | wc -l) files (missing=$MISSING)"
+          exit 0
+
       # QuickJS-NG (MIT) is the JavaScript runtime yt-dlp needs for YouTube challenges. Its C sources (~3 MB) are NOT kept
       # in the repo any more: this step downloads the pinned release and recreates app/src/main/cpp/third_party/quickjs
       # exactly as CMakeLists.txt expects it (byte-identical to the files that used to be committed).

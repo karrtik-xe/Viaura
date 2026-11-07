@@ -2670,9 +2670,24 @@ class MpvPlayerController {
         applyVideoAdjustments(immediate = immediate)
     }
 
+    /**
+     * Anime4K: sets mpv's `glsl-shaders` chain (GPU shaders, so no `vf` / hwdec change is needed).
+     * Does nothing unless the wanted chain differs from what mpv already has; an unavailable mode clears the chain.
+     */
+    private fun applyAnime4kShaders(view: VideoPlayerMpvView) {
+        try {
+            val wanted = Anime4KShaders.resolveMpvValue(view.context.applicationContext, currentManualVideoAdjustments.anime4k)
+            val current = try { view.mpv.getPropertyString("glsl-shaders") ?: "" } catch (_: Throwable) { "" }
+            if (current != wanted) view.mpv.setPropertyString("glsl-shaders", wanted)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+    }
+
     private fun applyVideoAdjustments(immediate: Boolean = false) {
         try {
             val view = mpvView ?: return
+            applyAnime4kShaders(view)
 
             val totalBrightness = (currentVideoFilterPreset.brightness + currentManualVideoAdjustments.brightness).coerceIn(-100, 100)
             val totalContrast = (currentVideoFilterPreset.contrast + currentManualVideoAdjustments.contrast).coerceIn(-100, 100)
@@ -4662,112 +4677,94 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
-    private var audioSwitchJob: Job? = null
-    private val audioSwitchGeneration = AtomicLong(0L)
+    /** Eases the volume down for the instant mpv flushes its audio for a track refresh, then brings it back (no click / cut). */
+    private fun duckAudioForTrackRefresh() {
+        try {
+            if (!_isPlaying.value || System.currentTimeMillis() < seamlessHandOverUntil) return
+            val original = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+            if (original == null || original <= 0.0) return
+            for (i in 1..4) {
+                val vol = original * (1.0 - i / 4.0)
+                withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                Thread.sleep(6L)
+            }
+            playerScope.launch(Dispatchers.Default) {
+                delay(260L)
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    val now = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+                    if (now != null && kotlin.math.abs(now) < 0.6) {
+                        for (i in 1..8) {
+                            val vol = original * (i / 8.0)
+                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                            delay(14L)
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
 
-    /** Volume that has to come back after an audio-track switch; non-null only while a switch has the volume lowered. */
-    @Volatile private var trackSwitchRestoreVolume: Double? = null
-    /** Last volume the switch itself wrote, so a volume the user changed meanwhile is never overwritten. */
-    @Volatile private var trackSwitchLastWrittenVolume: Double? = null
+    private var audioSwitchJob: Job? = null
 
     /**
-     * Switches the audio track without a click, a pop or a stall of the picture: the picker shows the new choice at once,
-     * the sound is faded out over a few milliseconds (so the buffered audio is never chopped mid-wave), the track is
-     * switched on a background thread, and the sound is faded back in the moment the new stream really delivers audio
-     * (no blind fixed wait). Video is never paused or seeked. Rapid taps are coalesced: the volume to restore is kept
-     * across interrupted switches, so it can never get stuck low.
+     * Switches the audio track without a pop or a stall of the screen: the picker shows the new choice at once, the volume
+     * is eased down for a few milliseconds, the track is switched on a background thread, and the volume comes back
+     * smoothly once the new stream is running.
      */
     fun setAudioTrack(trackId: Int) {
         try {
             _audioTracks.value = _audioTracks.value.map { it.copy(isSelected = (it.id == trackId)) }
         } catch (_: Throwable) {}
-        val generation = audioSwitchGeneration.incrementAndGet()
         audioSwitchJob?.cancel()
         audioSwitchJob = playerScope.launch(Dispatchers.Default) {
             try {
-                switchAudioTrackSmoothly(trackId, generation)
+                switchAudioTrackSmoothly(trackId)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (_: Throwable) {}
         }
     }
 
-    private fun readMpvVolume(): Double? =
-        withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
-
-    private fun writeMpvVolume(vol: Double) {
-        trackSwitchLastWrittenVolume = vol
-        withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-    }
-
-    /** Raised-cosine volume ramp: no corner at either end, so the ramp itself cannot be heard as a click. */
-    private suspend fun rampMpvVolume(from: Double, to: Double, steps: Int, stepMs: Long) {
-        for (i in 1..steps) {
-            val t = i / steps.toDouble()
-            val eased = 0.5 - 0.5 * kotlin.math.cos(Math.PI * t)
-            writeMpvVolume(from + (to - from) * eased)
-            if (i < steps) delay(stepMs)
+    private suspend fun switchAudioTrackSmoothly(trackId: Int) {
+        val already = withMpvLock(false) { v ->
+            val cur = try { v.mpv.getPropertyInt("aid") } catch (_: Throwable) { null }
+            trackId > 0 && cur == trackId
         }
-    }
-
-    /** Position of the audio actually being output; it only moves while the (new) stream is producing sound. */
-    private fun audioPtsOrNull(): Double? =
-        withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("audio-pts") } catch (_: Throwable) { null } }
-
-    private suspend fun switchAudioTrackSmoothly(trackId: Int, generation: Long) {
+        if (already) return
+        val fade = _isPlaying.value && System.currentTimeMillis() >= seamlessHandOverUntil
+        val original: Double? = if (fade) {
+            withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+        } else null
+        val fading = fade && original != null && original > 0.0
+        var last = original
         try {
-            val already = withMpvLock(false) { v ->
-                val cur = try { v.mpv.getPropertyInt("aid") } catch (_: Throwable) { null }
-                trackId > 0 && cur == trackId
-            }
-            if (already) return
-
-            val fade = _isPlaying.value && System.currentTimeMillis() >= seamlessHandOverUntil
-            if (fade) {
-                val live = readMpvVolume()
-                // an interrupted earlier switch left the volume part-way down: its target is the real volume
-                val target = trackSwitchRestoreVolume ?: live
-                if (live != null && target != null && target > 0.0) {
-                    trackSwitchRestoreVolume = target
-                    if (live > 0.5) rampMpvVolume(live, 0.0, steps = 9, stepMs = 4L)
-                    // the audio that is already queued in the output has to play out (silent) before it is flushed
-                    delay(40L)
+            if (fading && original != null) {
+                for (i in 1..5) {
+                    val vol = original * (1.0 - i / 5.0)
+                    withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                    last = vol
+                    delay(8L)
                 }
             }
-
             holdPreciseSeekForTrackSwitch()
             withMpvLock(Unit) { v ->
                 if (trackId <= 0) v.mpv.setPropertyString("aid", "no")
                 else v.mpv.setPropertyInt("aid", trackId)
             }
-
-            if (trackSwitchRestoreVolume != null && trackId > 0) {
-                // bring the sound back as soon as the new stream really delivers audio
-                val startedAt = System.currentTimeMillis()
-                var lastPts: Double? = null
-                while (System.currentTimeMillis() - startedAt < 900L) {
-                    delay(8L)
-                    if (System.currentTimeMillis() - startedAt < 40L) continue
-                    val pts = audioPtsOrNull() ?: continue
-                    val prev = lastPts
-                    if (prev != null && kotlin.math.abs(pts - prev) >= 0.02) break
-                    if (prev == null) lastPts = pts
-                }
-            }
+            // the new stream needs a moment before it produces sound
+            if (fading) delay(320L)
         } finally {
-            // a newer switch took over: it continues from the same lowered volume and restores it itself
-            if (generation == audioSwitchGeneration.get()) {
-                kotlinx.coroutines.withContext(NonCancellable) {
-                    val target = trackSwitchRestoreVolume
-                    if (target != null) {
-                        val now = readMpvVolume()
-                        val written = trackSwitchLastWrittenVolume
-                        // only bring the volume back if nobody (the volume slider) changed it meanwhile
-                        if (now != null && written != null && kotlin.math.abs(now - written) < 0.6) {
-                            rampMpvVolume(now, target, steps = 12, stepMs = 4L)
+            if (fading && original != null) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    // only bring the volume back if nobody (the volume slider) changed it meanwhile
+                    val now = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
+                    val expected = last
+                    if (now != null && expected != null && kotlin.math.abs(now - expected) < 0.6) {
+                        for (i in 1..8) {
+                            val vol = original * (i / 8.0)
+                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                            delay(14L)
                         }
-                        trackSwitchRestoreVolume = null
-                        trackSwitchLastWrittenVolume = null
                     }
                 }
             }
@@ -4935,8 +4932,8 @@ class MpvPlayerController {
         try {
             val view = mpvView
             if (view != null && !isReleased) {
-                // Subtitle changes never touch the audio: no mute, no volume dip, no flush.
                 holdPreciseSeekForTrackSwitch()
+                duckAudioForTrackRefresh()
                 val playbackPrimaryTrackId = resolveAdvancedAssPlaybackId(primaryTrackId)
                 if (primaryTrackId <= 0) {
                     subtitleUsesGeneratedAss = false

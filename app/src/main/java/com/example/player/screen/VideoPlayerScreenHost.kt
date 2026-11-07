@@ -512,7 +512,8 @@ private fun VideoPlayerScreenImpl(
                 hue = uiState.playerSettings.videoHue,
                 temperature = uiState.playerSettings.videoTemperature,
                 tint = uiState.playerSettings.videoTint,
-                deband = uiState.playerSettings.videoDeband
+                deband = uiState.playerSettings.videoDeband,
+                anime4k = uiState.playerSettings.videoAnime4k
             )
         )
     }
@@ -3406,7 +3407,8 @@ private fun VideoPlayerScreenImpl(
                                 videoHue = manual.hue,
                                 videoTemperature = manual.temperature,
                                 videoTint = manual.tint,
-                                videoDeband = manual.deband
+                                videoDeband = manual.deband,
+                                videoAnime4k = manual.anime4k
                             )
                         )
                     }
