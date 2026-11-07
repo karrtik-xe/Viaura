@@ -32,6 +32,9 @@ object BackgroundAnimationSettings {
     private val parallaxState = mutableStateOf(true)
     private val overWallpaperState = mutableStateOf(true)
     private val seasonalState = mutableStateOf(true)
+    // True from the first launch after the Diwali update until the user picks a background by hand:
+    // while Diwali runs, its backdrop plays whatever the pick is. Never touched again after the festival ends.
+    private val festivalAutoState = mutableStateOf(false)
     // Names of the "NEW" backdrops the user has already tapped (their tag is gone for good).
     private val seenNewState = mutableStateOf<Set<String>>(emptySet())
 
@@ -40,6 +43,7 @@ object BackgroundAnimationSettings {
     val parallax: Boolean get() = parallaxState.value
     val overWallpaper: Boolean get() = overWallpaperState.value
     val seasonalThemes: Boolean get() = seasonalState.value
+    val festivalAuto: Boolean get() = festivalAutoState.value
 
     private fun prefs(): android.content.SharedPreferences? =
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -52,40 +56,13 @@ object BackgroundAnimationSettings {
         intervalState.value = RandomInterval.entries.firstOrNull { it.name == p.getString("interval", null) } ?: RandomInterval.EACH_LAUNCH
         parallaxState.value = p.getBoolean("parallax", true)
         overWallpaperState.value = p.getBoolean("over_wallpaper", true)
+        // One-time switch-on for the Diwali update: the key is missing only on the first launch of this version
+        if (!p.contains("festival_auto")) {
+            p.edit().putBoolean("festival_auto", true).putBoolean("seasonal", true).apply()
+        }
+        festivalAutoState.value = p.getBoolean("festival_auto", false)
         seasonalState.value = p.getBoolean("seasonal", true)
         seenNewState.value = p.getStringSet("seen_new", emptySet())?.toSet() ?: emptySet()
-        syncDiwaliAutoOn(LocalDate.now())
-    }
-
-    /**
-     * One-time Diwali switch-on: the first time the app starts while Diwali is running, the background animation is
-     * turned ON by itself (Random + Seasonal themes, so Diwali plays) and the user's previous pick is remembered.
-     * When the Diwali dates end it goes back to that pick on its own. If the user chooses a background by hand while
-     * Diwali is running, their choice stays and nothing is restored. Runs once per year.
-     */
-    fun syncDiwaliAutoOn(today: LocalDate) {
-        val p = prefs() ?: return
-        val running = SeasonalEvent.DIWALI.isRunningOn(today)
-        val state = p.getString("diwali_auto", "") ?: ""
-        val tag = today.year.toString()
-        if (running && state != "$tag:active" && state != "$tag:done") {
-            p.edit()
-                .putString("diwali_auto_prev", typeState.value.name)
-                .putString("diwali_auto", "$tag:active")
-                .putString("type", BackgroundType.RANDOM.name)
-                .putBoolean("seasonal", true)
-                .apply()
-            typeState.value = BackgroundType.RANDOM
-            seasonalState.value = true
-        } else if (!running && state.endsWith(":active")) {
-            val prev = BackgroundType.PICKABLE.firstOrNull { it.name == p.getString("diwali_auto_prev", null) } ?: BackgroundType.NONE
-            val edit = p.edit().putString("diwali_auto", state.removeSuffix(":active") + ":done")
-            if (typeState.value == BackgroundType.RANDOM) {
-                edit.putString("type", prev.name)
-                typeState.value = prev
-            }
-            edit.apply()
-        }
     }
 
     /** True while [type] is a newer backdrop that the user has not tapped yet (shows the "NEW" tag). */
@@ -102,12 +79,9 @@ object BackgroundAnimationSettings {
 
     fun setType(value: BackgroundType) {
         typeState.value = value
-        val p = prefs() ?: return
-        val edit = p.edit().putString("type", value.name)
-        // The user picked a background by hand: the Diwali auto-switch must not touch it again
-        val state = p.getString("diwali_auto", "") ?: ""
-        if (state.endsWith(":active")) edit.putString("diwali_auto", state.removeSuffix(":active") + ":done")
-        edit.apply()
+        // The user chose a background by hand: from now on their pick wins over the automatic festival backdrop
+        festivalAutoState.value = false
+        prefs()?.edit()?.putString("type", value.name)?.putBoolean("festival_auto", false)?.apply()
     }
 
     fun setRandomInterval(value: RandomInterval) {
@@ -127,7 +101,11 @@ object BackgroundAnimationSettings {
 
     fun setSeasonalThemes(value: Boolean) {
         seasonalState.value = value
-        prefs()?.edit()?.putBoolean("seasonal", value)?.apply()
+        if (!value) festivalAutoState.value = false
+        val e = prefs()?.edit()
+        e?.putBoolean("seasonal", value)
+        if (!value) e?.putBoolean("festival_auto", false)
+        e?.apply()
     }
 
     internal fun lastRandom(): String = prefs()?.getString("last_random", "") ?: ""
@@ -185,6 +163,7 @@ fun rememberActiveBackground(): ActiveBackground {
     val picked = BackgroundAnimationSettings.type
     val interval = BackgroundAnimationSettings.randomInterval
     val seasonal = BackgroundAnimationSettings.seasonalThemes
+    val festivalAuto = BackgroundAnimationSettings.festivalAuto
     val parallax = BackgroundAnimationSettings.parallax
     val overWallpaper = BackgroundAnimationSettings.overWallpaper
     val today = rememberBackdropDate()
@@ -194,7 +173,7 @@ fun rememberActiveBackground(): ActiveBackground {
     val resolved = remember(picked, interval, today, revision) {
         if (picked == BackgroundType.RANDOM) RandomBackground.current(interval) else picked
     }
-    val shown = event.backdropFor(picked, seasonal).let { if (it == BackgroundType.RANDOM) resolved else it }
+    val shown = event.backdropFor(picked, seasonal, festivalAuto).let { if (it == BackgroundType.RANDOM) resolved else it }
     return ActiveBackground(shown, parallax, overWallpaper, event?.takeIf { seasonal })
 }
 
@@ -217,10 +196,7 @@ fun PageBackdrop(themeMode: com.example.ui.state.ThemeMode?) {
 @Composable
 private fun rememberBackdropDate(): LocalDate {
     var today by remember { mutableStateOf(LocalDate.now()) }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        today = LocalDate.now()
-        BackgroundAnimationSettings.syncDiwaliAutoOn(today)
-    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { today = LocalDate.now() }
     return today
 }
 

@@ -87,8 +87,12 @@ object FestivalDates {
 /**
  * The backdrop to draw. While a festival runs, "Random" always lands on that festival's backdrop (the same one every
  * time, for as long as the festival lasts). A backdrop the user picked by hand is never replaced, and NONE stays none.
+ * [festivalAuto] (set once by the Diwali update, cleared as soon as the user picks a background) lets Diwali play over
+ * any pick, including None, until the festival window ends.
  */
 fun SeasonalEvent?.backdropFor(
   picked: BackgroundType,
   seasonalThemes: Boolean,
-): BackgroundType = this?.takeIf { seasonalThemes && picked == BackgroundType.RANDOM }?.background ?: picked
+  festivalAuto: Boolean = false,
+): BackgroundType =
+  this?.takeIf { seasonalThemes && (picked == BackgroundType.RANDOM || (festivalAuto && this == SeasonalEvent.DIWALI)) }?.background ?: picked

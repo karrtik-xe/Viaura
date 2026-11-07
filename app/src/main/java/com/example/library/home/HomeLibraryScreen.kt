@@ -1833,6 +1833,9 @@ fun HomeScreen(
                     HeaderBar(
                         title = headerTitle,
                         subtitle = headerSubtitle,
+                        // "(Beta)" beside the app name, only on the Home screen itself and only for beta builds (version name contains "beta")
+                        titleSuffix = if (effectiveSelectedTab == NavigationTab.HOME && !isOnlineVideoOpen && currentFolder == null &&
+                            com.example.BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) "(Beta)" else null,
                         onBackClick = when (effectiveSelectedTab) {
                             NavigationTab.HOME -> if (isOnlineVideoOpen) {
                                 {

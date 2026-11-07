@@ -140,10 +140,10 @@ fun BackgroundAnimationSettingsSection(
                 }
             }
         }
-        if (active.event != null && active.type.isSeasonal && picked != BackgroundType.NONE) {
+        if (active.event != null && active.type.isSeasonal) {
             Spacer(Modifier.height(12.dp))
             Text(
-                "${active.type.label} is playing for the current festival. Turn off Seasonal themes to see your own pick.",
+                "${active.type.label} is playing for the current festival. Pick any background below, or turn off Seasonal themes, to use your own.",
                 fontSize = 12.5.sp, color = AccentSkyBlue
             )
         }
