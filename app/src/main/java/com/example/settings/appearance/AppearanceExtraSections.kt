@@ -122,7 +122,7 @@ fun BackgroundAnimationSettingsSection(
         Text("The animation that plays behind the app's screens", fontSize = 12.5.sp, color = secondaryText)
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ChoiceChip("None", picked == BackgroundType.NONE && (BackgroundAnimationSettings.typeChosen || active.type == BackgroundType.NONE), isDark, primaryText, { choose(BackgroundType.NONE) })
+            ChoiceChip("None", picked == BackgroundType.NONE, isDark, primaryText, { choose(BackgroundType.NONE) })
             ChoiceChip("Random", picked == BackgroundType.RANDOM, isDark, primaryText, { choose(BackgroundType.RANDOM) })
         }
         if (picked == BackgroundType.RANDOM) {
@@ -140,11 +140,10 @@ fun BackgroundAnimationSettingsSection(
                 }
             }
         }
-        if (active.event != null && active.type.isSeasonal && (picked != BackgroundType.NONE || !BackgroundAnimationSettings.typeChosen)) {
+        if (active.event != null && active.type.isSeasonal && picked != BackgroundType.NONE) {
             Spacer(Modifier.height(12.dp))
             Text(
-                if (BackgroundAnimationSettings.typeChosen) "${active.type.label} is playing for the current festival. Turn off Seasonal themes to see your own pick."
-                else "${active.type.label} is playing for the current festival and stops on its own after it ends. Tap None or pick any animation to change it.",
+                "${active.type.label} is playing for the current festival. Turn off Seasonal themes to see your own pick.",
                 fontSize = 12.5.sp, color = AccentSkyBlue
             )
         }

@@ -2,7 +2,6 @@ package com.example.ui.components
 
 import android.content.Context
 import android.util.Xml
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,8 +24,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,6 +61,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -456,6 +455,50 @@ private object SubdlProvider : OnlineSubProvider {
 // ENGINE: parallel search + download
 // ---------------------------------------------------------------------------------------------------------------
 
+/**
+ * How many seasons a show has so far, looked up on the internet (Cinemeta: name -> IMDb id -> episode list).
+ * Cached per name for the life of the process; null when the show is not found or the network fails.
+ */
+object OnlineSubtitleSeasons {
+    private val cache = HashMap<String, Int?>()
+
+    suspend fun count(name: String): Int? {
+        val key = name.trim().lowercase()
+        if (key.isBlank()) return null
+        synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
+        val found = withContext(Dispatchers.IO) {
+            try {
+                val metas = JSONObject(
+                    OnlineSubHttp.getText("https://v3-cinemeta.strem.io/catalog/series/top/search=${OnlineSubHttp.enc(name.trim())}.json")
+                ).optJSONArray("metas")
+                val first = metas?.optJSONObject(0)
+                val imdb = first?.optString("imdb_id").orEmpty().ifBlank { first?.optString("id").orEmpty() }
+                if (!imdb.startsWith("tt")) {
+                    null
+                } else {
+                    val videos = JSONObject(OnlineSubHttp.getText("https://v3-cinemeta.strem.io/meta/series/$imdb.json"))
+                        .optJSONObject("meta")?.optJSONArray("videos")
+                    var max = 0
+                    if (videos != null) {
+                        for (i in 0 until videos.length()) {
+                            val n = videos.optJSONObject(i)?.optInt("season", 0) ?: 0
+                            if (n > max) max = n
+                        }
+                    }
+                    max.takeIf { it > 0 }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+        }
+        // A failed lookup is not remembered, so the next try can succeed
+        if (found != null) synchronized(cache) { cache[key] = found }
+        return found
+    }
+}
+
 object OnlineSubtitleEngine {
     private val providers: List<OnlineSubProvider> = listOf(PodnapisiProvider, OpenSubtitlesRestProvider, StremioOpenSubtitlesProvider, SubdlProvider)
 
@@ -601,39 +644,6 @@ private object OnlineSubPrefs {
     fun setKey(c: Context, v: String) { try { c.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putString("subdl_key", v.trim()).apply() } catch (_: Throwable) {} }
 }
 
-/** How many seasons of a show have already aired (TVMaze, no key needed). Cached per name; null when unknown. */
-private object OnlineSeasonLookup {
-    private val cache = java.util.concurrent.ConcurrentHashMap<String, Int>()
-
-    suspend fun aired(name: String): Int? {
-        val key = name.trim().lowercase()
-        if (key.length < 2) return null
-        cache[key]?.let { return it }
-        return withContext(Dispatchers.IO) {
-            try {
-                val show = JSONObject(OnlineSubHttp.getText("https://api.tvmaze.com/singlesearch/shows?q=${OnlineSubHttp.enc(name.trim())}"))
-                val id = show.optInt("id", 0)
-                if (id <= 0) return@withContext null
-                val arr = JSONArray(OnlineSubHttp.getText("https://api.tvmaze.com/shows/$id/seasons"))
-                val today = java.time.LocalDate.now().toString()
-                var max = 0
-                for (i in 0 until arr.length()) {
-                    val o = arr.optJSONObject(i) ?: continue
-                    val n = o.optInt("number", 0)
-                    if (n <= 0 || o.isNull("premiereDate")) continue
-                    if (o.optString("premiereDate") <= today) max = maxOf(max, n)
-                }
-                if (max > 0) cache[key] = max
-                max.takeIf { it > 0 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                null
-            }
-        }
-    }
-}
-
 /**
  * The "Online" tab of the subtitle search sheet: name + season + episode + language, results from all providers,
  * tap a result to download and load it ([onSubtitleFile]).
@@ -661,6 +671,9 @@ fun ColumnScope.OnlineSubtitleSearchContent(
     var searched by remember { mutableStateOf(false) }
     var downloadingUrl by remember { mutableStateOf<String?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    var seasonCount by remember { mutableStateOf<Int?>(null) }
+    var langMenu by remember { mutableStateOf(false) }
+    var seasonMenu by remember { mutableStateOf(false) }
 
     val language = OnlineSubtitleLanguages.byCode(langCode)
     val isDark = isAppInDarkTheme()
@@ -694,6 +707,14 @@ fun ColumnScope.OnlineSubtitleSearchContent(
 
     LaunchedEffect(videoTitle) { if (query.isNotBlank()) runSearch() }
 
+    // Seasons the show has had so far, fetched from the internet for the typed name (short pause while typing)
+    LaunchedEffect(query) {
+        seasonCount = null
+        if (query.isBlank()) return@LaunchedEffect
+        delay(600)
+        seasonCount = OnlineSubtitleSeasons.count(query)
+    }
+
     @Composable
     fun Field(value: String, onChange: (String) -> Unit, hint: String, modifier: Modifier, number: Boolean = false, onSearch: (() -> Unit)? = null) {
         Box(
@@ -723,42 +744,31 @@ fun ColumnScope.OnlineSubtitleSearchContent(
         }
     }
 
-    // 1. One line: language | name | S | E | search
-    var langMenu by remember { mutableStateOf(false) }
-    var seasonMenu by remember { mutableStateOf(false) }
-    var seasonCount by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(query) {
-        val q = query.trim()
-        if (q.length < 2) { seasonCount = null; return@LaunchedEffect }
-        kotlinx.coroutines.delay(600)
-        seasonCount = OnlineSeasonLookup.aired(q)
-    }
-
-    @Composable
-    fun Pill(modifier: Modifier = Modifier, onClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
-        Row(
-            modifier = modifier
-                .height(40.dp)
-                .liquidSearchSurface(RoundedCornerShape(14.dp), isDark, SheetButtonBgColor, SheetButtonBorderColor)
-                .clip(RoundedCornerShape(14.dp))
-                .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) { content() }
-    }
-
+    // 1. One line: language -> title -> S -> E -> search
     Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        // Language
+        // Language (short code, dropdown)
         Box {
-            Pill(onClick = { langMenu = true }) {
-                Text(language.code.uppercase(), color = SheetButtonTextColor, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                StyledIcon(imageVector = Icons.Filled.ArrowDropDown, contentDescription = "Language", tint = SecondaryTextColor, modifier = Modifier.size(18.dp))
+            Row(
+                modifier = Modifier
+                    .height(40.dp)
+                    .liquidSearchSurface(RoundedCornerShape(14.dp), isDark, SheetButtonBgColor, SheetButtonBorderColor)
+                    .clickable { langMenu = true }
+                    .padding(start = 10.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(language.code.uppercase(), color = SheetButtonTextColor, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                StyledIcon(imageVector = Icons.Outlined.KeyboardArrowDown, contentDescription = "Language", tint = SecondaryTextColor, modifier = Modifier.size(18.dp))
             }
             DropdownMenu(expanded = langMenu, onDismissRequest = { langMenu = false }) {
                 OnlineSubtitleLanguages.all.forEach { l ->
                     DropdownMenuItem(
-                        text = { Text(l.name, fontWeight = if (l.code == langCode) FontWeight.Bold else FontWeight.Normal) },
+                        text = {
+                            Text(
+                                "${l.name} (${l.code.uppercase()})",
+                                color = if (l.code == langCode) ActiveHighlightColor else SheetButtonTextColor,
+                                fontWeight = if (l.code == langCode) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
                         onClick = {
                             langMenu = false
                             langCode = l.code
@@ -770,50 +780,74 @@ fun ColumnScope.OnlineSubtitleSearchContent(
             }
         }
         Spacer(Modifier.width(6.dp))
-        // Name
+
+        // Title
         Field(query, { query = it }, "Show or movie name", Modifier.weight(1f), onSearch = { runSearch() })
         Spacer(Modifier.width(6.dp))
-        // Season: list comes from the internet (aired seasons), falls back to a plain 1-10 list
+
+        // Season: "S3 v", the list comes from the number of seasons found online
         Box {
-            Pill(onClick = { seasonMenu = true }) {
+            Row(
+                modifier = Modifier
+                    .height(40.dp)
+                    .liquidSearchSurface(RoundedCornerShape(14.dp), isDark, SheetButtonBgColor, SheetButtonBorderColor)
+                    .clickable { seasonMenu = true }
+                    .padding(start = 10.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    if (season.isBlank()) "S" else "S$season",
+                    text = "S" + season.ifBlank { "" },
                     color = if (season.isBlank()) SecondaryTextColor else SheetButtonTextColor,
-                    fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1
+                    fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold
                 )
-                StyledIcon(imageVector = Icons.Filled.ArrowDropDown, contentDescription = "Season", tint = SecondaryTextColor, modifier = Modifier.size(18.dp))
+                StyledIcon(imageVector = Icons.Outlined.KeyboardArrowDown, contentDescription = "Season", tint = SecondaryTextColor, modifier = Modifier.size(18.dp))
             }
             DropdownMenu(expanded = seasonMenu, onDismissRequest = { seasonMenu = false }) {
+                val known = seasonCount
+                val shown = maxOf(known ?: 12, season.toIntOrNull() ?: 0)
                 DropdownMenuItem(
-                    text = { Text("Movie (no season)") },
+                    text = { Text("Movie (no season)", color = SecondaryTextColor) },
                     onClick = { seasonMenu = false; season = ""; episode = "" }
                 )
-                val count = maxOf(seasonCount ?: 10, season.toIntOrNull() ?: 0)
-                for (n in 1..count) {
+                for (n in 1..shown) {
                     DropdownMenuItem(
-                        text = { Text("S$n", fontWeight = if (season == n.toString()) FontWeight.Bold else FontWeight.Normal) },
+                        text = {
+                            Text(
+                                "Season $n",
+                                color = if (season == n.toString()) ActiveHighlightColor else SheetButtonTextColor,
+                                fontWeight = if (season == n.toString()) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
                         onClick = { seasonMenu = false; season = n.toString() }
                     )
                 }
             }
         }
         Spacer(Modifier.width(6.dp))
-        // Episode: type the number
-        Pill(modifier = Modifier.width(60.dp)) {
-            Text("E", color = SecondaryTextColor, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(3.dp))
+
+        // Episode: "E" + typed number
+        Row(
+            modifier = Modifier
+                .width(64.dp)
+                .height(40.dp)
+                .liquidSearchSurface(RoundedCornerShape(14.dp), isDark, SheetButtonBgColor, SheetButtonBorderColor)
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("E", color = if (episode.isBlank()) SecondaryTextColor else SheetButtonTextColor, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
             BasicTextField(
                 value = episode,
                 onValueChange = { episode = it.filter(Char::isDigit).take(3) },
                 singleLine = true,
-                textStyle = LocalTextStyle.current.copy(fontSize = 13.5.sp, color = SheetButtonTextColor, fontWeight = FontWeight.Medium),
+                textStyle = LocalTextStyle.current.copy(fontSize = 13.5.sp, color = SheetButtonTextColor, fontWeight = FontWeight.SemiBold),
                 cursorBrush = SolidColor(ActiveHighlightColor),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { runSearch() }),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.fillMaxWidth()
             )
         }
         Spacer(Modifier.width(6.dp))
+
         // Search
         Box(
             modifier = Modifier
