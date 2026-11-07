@@ -250,19 +250,12 @@ fun cleanVideoTitleForSearch(title: String): String {
 /**
  * Searches local device storage folders for matching subtitle files
  */
-suspend fun searchLocalDeviceSubtitles(
-    query: String,
-    videoTitle: String,
-    season: Int? = null,
-    episode: Int? = null,
-    languages: List<OnlineSubLanguage> = emptyList()
-): List<File> = withContext(Dispatchers.IO) {
+suspend fun searchLocalDeviceSubtitles(query: String, videoTitle: String): List<File> = withContext(Dispatchers.IO) {
     data class ScoredFile(val file: File, val score: Int)
 
     val visited = mutableSetOf<String>()
     val scored = mutableListOf<ScoredFile>()
-    // The typed name is not a file name: do not cut it at a "." ("Dr. Stone" must stay "dr stone").
-    val normalizedQuery = query.replace(Regex("[\\[\\]()_.-]"), " ").trim().replace(Regex("\\s+"), " ").lowercase(Locale.ROOT)
+    val normalizedQuery = cleanVideoTitleForSearch(query).lowercase(Locale.ROOT)
     val normalizedVideo = cleanVideoTitleForSearch(videoTitle).lowercase(Locale.ROOT)
 
     // Search by meaningful tokens instead of requiring the complete filename to match.
@@ -289,7 +282,7 @@ suspend fun searchLocalDeviceSubtitles(
 
     if (effectiveTokens.isEmpty()) return@withContext emptyList()
 
-    fun baseScore(file: File): Int {
+    fun scoreFile(file: File): Int {
         val fileName = file.nameWithoutExtension.lowercase(Locale.ROOT)
         val folderName = file.parentFile?.name?.lowercase(Locale.ROOT).orEmpty()
         val searchable = "$fileName $folderName"
@@ -324,63 +317,6 @@ suspend fun searchLocalDeviceSubtitles(
         if (matched == 0) return 0
         val minimum = if (queryTokens.size >= 2) 5 else 3
         return if (score >= minimum) score else 0
-    }
-
-    // With an episode given (the usual case for series), only files for exactly that season / episode are kept:
-    // "Show.S14E03.srt" is dropped when S14E02 is wanted. Without an episode the scoring above is used as before.
-    val queryNumbers = queryTokens.mapNotNull { it.toIntOrNull() }.toSet()
-    val markerLike = Regex("(?i)s\\d+e\\d+|\\d+x\\d+|\\d{1,4}")
-    val nameTokens = queryTokens.filter { !it.matches(markerLike) }
-
-    fun episodeScore(file: File): Int {
-        val fileName = file.nameWithoutExtension
-        val folder = file.parentFile?.name.orEmpty()
-        var verdict = SubtitleEpisodeMatcher.verdict(fileName, season, episode, queryNumbers)
-        if (verdict == 0) verdict = SubtitleEpisodeMatcher.verdict(folder, season, episode, queryNumbers)
-        if (verdict != 1) return 0
-        if (season != null) {
-            val folderSeason = SubtitleEpisodeMatcher.folderSeason(folder)
-            if (folderSeason != null && folderSeason != season) return 0
-        }
-        val searchable = "$fileName $folder".lowercase(Locale.ROOT)
-        val fileTokens = tokens(searchable)
-        var matched = 0
-        for (token in nameTokens) if (fileTokens.contains(token) || searchable.contains(token)) matched++
-        if (nameTokens.isNotEmpty()) {
-            val need = maxOf(1, (nameTokens.size + 1) / 2)
-            if (matched < need) return 0
-        }
-        var score = 22 + matched * 3
-        if (fileName.lowercase(Locale.ROOT) == normalizedVideo) score += 10
-        return score
-    }
-
-    // Language tag in the file name ("Show.S14E02.eng.srt"): a small boost for the chosen languages, a small
-    // penalty for another language. Files without a tag stay as they are.
-    fun firstWord(name: String) = name.lowercase(Locale.ROOT).substringBefore(' ')
-    val selectedWords = languages.flatMap { listOf(firstWord(it.name), it.code3) }.toSet()
-    val selectedShort = languages.map { it.code }.toSet()
-    val allWords = OnlineSubtitleLanguages.all.flatMap { listOf(firstWord(it.name), it.code3) }.toSet()
-    val allShort = OnlineSubtitleLanguages.all.map { it.code }.toSet()
-
-    fun languageAdjust(file: File): Int {
-        if (languages.isEmpty()) return 0
-        val parts = file.nameWithoutExtension.lowercase(Locale.ROOT).split(Regex("[^\\p{L}]+")).filter { it.isNotEmpty() }
-        if (parts.isEmpty()) return 0
-        val last = parts.last()
-        val hitSelected = parts.any { it in selectedWords } || last in selectedShort
-        val hitOther = parts.any { it in allWords && it !in selectedWords } || (last.length == 2 && last in allShort && last !in selectedShort)
-        return when {
-            hitSelected -> 4
-            hitOther -> -4
-            else -> 0
-        }
-    }
-
-    fun scoreFile(file: File): Int {
-        val base = if (episode != null) episodeScore(file) else baseScore(file)
-        if (base <= 0) return 0
-        return (base + languageAdjust(file)).coerceAtLeast(1)
     }
 
     val candidateRoots = listOfNotNull(
@@ -464,14 +400,8 @@ fun SubtitleSelectionPanel(
     onDismissRequest: () -> Unit
 ) {
     var isSearchMode by remember { mutableStateOf(false) }
-    // One search screen: show name + season + episode + language(s). The search button / keyboard search key bumps
-    // [searchNonce], which re-runs the on-device search and the online search together.
-    val searchPanelContext = LocalContext.current
-    val searchState = remember(videoTitle) { SubtitleSearchState(searchPanelContext.applicationContext, videoTitle) }
-    val searchScope = rememberCoroutineScope()
-    var searchNonce by remember { mutableStateOf(0) }
-    var showLanguageSheet by remember { mutableStateOf(false) }
-    var languagesBeforeSheet by remember { mutableStateOf<List<String>>(emptyList()) }
+    var searchTab by remember { mutableStateOf(0) } // 0 = files on the device, 1 = online providers
+    var searchQuery by remember(videoTitle) { mutableStateOf(cleanVideoTitleForSearch(videoTitle)) }
     var isSearching by remember { mutableStateOf(false) }
     var foundSubtitleFiles by remember { mutableStateOf<List<File>>(emptyList()) }
 
@@ -480,7 +410,6 @@ fun SubtitleSelectionPanel(
     var isUploadedExpanded by remember { mutableStateOf(true) }
     var isImportantExpanded by remember { mutableStateOf(true) }
     var isFilesExpanded by remember { mutableStateOf(true) }
-    var isOnlineExpanded by remember { mutableStateOf(false) }
 
     // ---- AI Subtitle Translate (real pipeline) ----
     val aiTranslateContext = androidx.compose.ui.platform.LocalContext.current
@@ -490,61 +419,107 @@ fun SubtitleSelectionPanel(
         aiSettingsSnapshot.subtitleTranslateEnabled &&
         aiSettingsSnapshot.hasUsableModel
 
-    // On-device search (runs when the search screen opens and whenever the search button is pressed)
-    LaunchedEffect(isSearchMode, searchNonce) {
+    LaunchedEffect(isSearchMode, searchQuery, videoTitle) {
         if (isSearchMode) {
             isSearching = true
-            try {
-                foundSubtitleFiles = searchLocalDeviceSubtitles(
-                    query = searchState.query,
-                    videoTitle = videoTitle,
-                    season = searchState.seasonNumber,
-                    episode = searchState.episodeNumber,
-                    languages = searchState.languages
-                )
-            } finally {
-                isSearching = false
-            }
-        }
-    }
-    // Online search (all providers, every selected language)
-    LaunchedEffect(isSearchMode, searchNonce) {
-        if (isSearchMode) {
-            try {
-                searchState.searchOnline()
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                onShowNotification("Search failed: ${t.message}")
-            }
-        }
-    }
-    val runSearch: () -> Unit = {
-        if (searchState.query.isBlank()) {
-            onShowNotification("Type a show or movie name first")
-        } else {
-            searchNonce += 1
+            foundSubtitleFiles = searchLocalDeviceSubtitles(searchQuery, videoTitle)
+            isSearching = false
         }
     }
 
     PlayerGlassModalSheet(
         panelKey = "subtitles",
         isLandscape = isLandscape,
-        heightFraction = if (isSearchMode) 0.84f else 0.58f,
+        heightFraction = if (isSearchMode) (if (searchTab == 1) 0.84f else 0.70f) else 0.58f,
         glassBlurTransparency = glassBlurTransparency,
         onDismissRequest = onDismissRequest,
         headerCustomRow = {
             if (isSearchMode) {
-                // Search header: back, language (opens a sheet), show name, search button + Season / Episode
-                SubtitleSearchHeader(
-                    state = searchState,
-                    onBack = { isSearchMode = false },
-                    onOpenLanguages = {
-                        languagesBeforeSheet = searchState.langCodes
-                        showLanguageSheet = true
-                    },
-                    onSearch = runSearch
-                )
+                // Search Header with Back Button and Auto-filled Search Field
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = { isSearchMode = false },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        StyledIcon(
+                                imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = "Back to Subtitle List",
+                            tint = NormalItemColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(4.dp))
+
+                    if (searchTab == 1) {
+                        Text(
+                            text = "Search subtitles online",
+                            color = NormalItemColor,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .liquidSearchSurface(RoundedCornerShape(16.dp), isAppInDarkTheme(), SheetButtonBgColor, SheetButtonBorderColor)
+                            .padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            StyledIcon(
+                                imageVector = Icons.Outlined.Search,
+                                contentDescription = null,
+                                tint = SecondaryTextColor,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            BasicTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                textStyle = LocalTextStyle.current.copy(
+                                    fontSize = 13.5.sp,
+                                    color = SheetButtonTextColor,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                decorationBox = { innerTextField ->
+                                    if (searchQuery.isEmpty()) {
+                                        Text(
+                                            text = "Search subtitles across folders...",
+                                            color = SecondaryTextColor,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                    innerTextField()
+                                }
+                            )
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { searchQuery = "" },
+                                    modifier = Modifier.size(22.dp)
+                                ) {
+                                    StyledIcon(
+                                imageVector = Icons.Outlined.Close,
+                                        contentDescription = "Clear search",
+                                        tint = SecondaryTextColor,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 // Standard Header matching User's Exact Screenshot:
                 // Left: "+ Add external subtitles"
@@ -668,101 +643,184 @@ fun SubtitleSelectionPanel(
         }
     ) {
         if (isSearchMode) {
-            // SEARCH RESULTS VIEW: "Matching Subtitle Files" (device) and "Online Subtitles" - both expand / collapse the same way
-            val deduplicatedSubtitleFiles = remember(foundSubtitleFiles) {
-                val seen = HashSet<String>()
-                foundSubtitleFiles.filter { file -> seen.add(file.absolutePath) }
-            }
-            val sectionEnter = fadeIn(animationSpec = tween(240)) +
-                slideInVertically(
-                    initialOffsetY = { fullHeight -> fullHeight / 3 },
-                    animationSpec = tween(300, easing = FastOutSlowInEasing)
-                ) +
-                expandVertically(
-                    expandFrom = Alignment.Top,
-                    animationSpec = tween(300, easing = FastOutSlowInEasing)
-                )
-            val sectionExit = fadeOut(animationSpec = tween(180)) +
-                slideOutVertically(
-                    targetOffsetY = { fullHeight -> -fullHeight / 4 },
-                    animationSpec = tween(240, easing = FastOutSlowInEasing)
-                ) +
-                shrinkVertically(
-                    shrinkTowards = Alignment.Top,
-                    animationSpec = tween(240, easing = FastOutSlowInEasing)
-                )
-
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(vertical = 2.dp)
+            // SEARCH RESULTS VIEW: tabs "On device" / "Online"
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // ---- Device section
-                item(key = "device_header") {
-                    SubtitleSearchSectionHeader(
-                        title = if (isSearching) "Matching Subtitle Files" else "Matching Subtitle Files (${deduplicatedSubtitleFiles.size})",
-                        trailingLabel = "Device",
-                        expanded = isFilesExpanded,
-                        loading = isSearching,
-                        onToggle = { isFilesExpanded = !isFilesExpanded }
+                listOf("On device", "Online").forEachIndexed { index, label ->
+                    val selected = searchTab == index
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) ActiveHighlightColor else Color.Transparent)
+                            .border(1.dp, if (selected) ActiveHighlightColor else SheetButtonBorderColor, RoundedCornerShape(10.dp))
+                            .clickable { searchTab = index }
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (selected) Color.White else SheetButtonTextColor,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+            if (searchTab == 1) {
+                OnlineSubtitleSearchContent(
+                    videoTitle = videoTitle,
+                    onSubtitleFile = { file -> onSelectSubtitleFile?.invoke(file) },
+                    onNotify = onShowNotification,
+                    onDone = onDismissRequest
+                )
+            } else if (isSearching) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 2.5.dp,
+                        color = ActiveHighlightColor
                     )
                 }
-                item(key = "device_content") {
-                    AnimatedVisibility(visible = isFilesExpanded, enter = sectionEnter, exit = sectionExit) {
-                        if (isSearching) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(28.dp),
-                                    strokeWidth = 2.5.dp,
-                                    color = ActiveHighlightColor
-                                )
+            } else if (foundSubtitleFiles.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    StyledIcon(
+                                imageVector = Icons.Outlined.Subtitles,
+                        contentDescription = null,
+                        tint = Neutral.S94A3B8,
+                        modifier = Modifier.size(40.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (searchQuery.isBlank()) "No subtitle files found on device" else "No subtitle files found for \"$searchQuery\"",
+                        color = SecondaryTextColor,
+                        fontSize = 13.5.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(sheetWhite(AccentContainerLight))
+                            .clickable {
+                                onImportSubtitle()
+                                onDismissRequest()
                             }
-                        } else if (deduplicatedSubtitleFiles.isEmpty()) {
-                            Column(
+                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                    ) {
+                        Text(
+                            text = "Browse in Full File Explorer",
+                            color = AccentSkyBlueStrong,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            } else {
+                val deduplicatedSubtitleFiles = remember(foundSubtitleFiles) {
+                    val seen = HashSet<String>()
+                    foundSubtitleFiles.filter { file ->
+                        val key = file.absolutePath
+                        seen.add(key)
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { isFilesExpanded = !isFilesExpanded }
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StyledIcon(
+                            imageVector = Icons.Outlined.Subtitles,
+                            contentDescription = null,
+                            tint = ActiveHighlightColor,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Matching Subtitle Files (${deduplicatedSubtitleFiles.size})",
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = NormalItemColor
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Device",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = SecondaryTextColor
+                        )
+                        val arrowRotation by animateFloatAsState(
+                            targetValue = if (isFilesExpanded) 180f else 0f,
+                            animationSpec = tween(260, easing = FastOutSlowInEasing),
+                            label = "filesArrowRotation"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable { isFilesExpanded = !isFilesExpanded },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.viaura_list_arrow_down,
+                                contentDescription = if (isFilesExpanded) "Collapse files" else "Expand files",
+                                tint = SecondaryTextColor,
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 18.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                StyledIcon(
-                                    imageVector = Icons.Outlined.Subtitles,
-                                    contentDescription = null,
-                                    tint = Neutral.S94A3B8,
-                                    modifier = Modifier.size(40.dp)
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = if (searchState.query.isBlank()) "No subtitle files found on device" else "No subtitle files found for \"${searchState.query}\"",
-                                    color = SecondaryTextColor,
-                                    fontSize = 13.5.sp
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(sheetWhite(AccentContainerLight))
-                                        .clickable {
-                                            onImportSubtitle()
-                                            onDismissRequest()
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                                ) {
-                                    Text(
-                                        text = "Browse in Full File Explorer",
-                                        color = AccentSkyBlueStrong,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.sp
-                                    )
-                                }
-                            }
-                        } else {
+                                    .size(14.dp)
+                                    .graphicsLayer { rotationZ = arrowRotation }
+                            )
+                        }
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(vertical = 2.dp)
+                ) {
+                    item {
+                        AnimatedVisibility(
+                            visible = isFilesExpanded,
+                            enter = fadeIn(animationSpec = tween(240)) +
+                                    slideInVertically(
+                                        initialOffsetY = { fullHeight -> fullHeight / 3 },
+                                        animationSpec = tween(300, easing = FastOutSlowInEasing)
+                                    ) +
+                                    expandVertically(
+                                        expandFrom = Alignment.Top,
+                                        animationSpec = tween(300, easing = FastOutSlowInEasing)
+                                    ),
+                            exit = fadeOut(animationSpec = tween(180)) +
+                                   slideOutVertically(
+                                       targetOffsetY = { fullHeight -> -fullHeight / 4 },
+                                       animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                   ) +
+                                   shrinkVertically(
+                                       shrinkTowards = Alignment.Top,
+                                       animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                   )
+                        ) {
                             Column(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -858,28 +916,6 @@ fun SubtitleSelectionPanel(
                                 }
                             }
                         }
-                    }
-                }
-
-                // ---- Online section (same look; collapsed until expanded)
-                item(key = "online_header") {
-                    SubtitleSearchSectionHeader(
-                        title = if (searchState.running) "Online Subtitles" else "Online Subtitles (${searchState.results.size})",
-                        trailingLabel = "Online",
-                        expanded = isOnlineExpanded,
-                        loading = searchState.running,
-                        onToggle = { isOnlineExpanded = !isOnlineExpanded }
-                    )
-                }
-                item(key = "online_content") {
-                    AnimatedVisibility(visible = isOnlineExpanded, enter = sectionEnter, exit = sectionExit) {
-                        OnlineSubtitleSectionContent(
-                            state = searchState,
-                            scope = searchScope,
-                            onSubtitleFile = { file -> onSelectSubtitleFile?.invoke(file) },
-                            onNotify = onShowNotification,
-                            onDone = onDismissRequest
-                        )
                     }
                 }
             }
@@ -1407,94 +1443,6 @@ fun SubtitleSelectionPanel(
                         }
                     }
                 }
-            }
-        }
-    }
-
-    if (isSearchMode && showLanguageSheet) {
-        SubtitleLanguageSheet(
-            state = searchState,
-            isLandscape = isLandscape,
-            glassBlurTransparency = glassBlurTransparency,
-            onDismiss = {
-                showLanguageSheet = false
-                if (searchState.langCodes != languagesBeforeSheet && searchState.query.isNotBlank()) searchNonce += 1
-            }
-        )
-    }
-}
-
-/** Collapsible section header of the search screen: [icon] Title (count) ........ Device / Online [arrow]. */
-@Composable
-private fun SubtitleSearchSectionHeader(
-    title: String,
-    trailingLabel: String,
-    expanded: Boolean,
-    loading: Boolean,
-    onToggle: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .clickable { onToggle() }
-            .padding(horizontal = 4.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            StyledIcon(
-                imageVector = Icons.Outlined.Subtitles,
-                contentDescription = null,
-                tint = ActiveHighlightColor,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = title,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.Bold,
-                color = NormalItemColor
-            )
-            if (loading) {
-                Spacer(modifier = Modifier.width(8.dp))
-                CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
-                    strokeWidth = 1.5.dp,
-                    color = ActiveHighlightColor
-                )
-            }
-        }
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                text = trailingLabel,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                color = SecondaryTextColor
-            )
-            val arrowRotation by animateFloatAsState(
-                targetValue = if (expanded) 180f else 0f,
-                animationSpec = tween(260, easing = FastOutSlowInEasing),
-                label = "searchSectionArrowRotation"
-            )
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .clickable { onToggle() },
-                contentAlignment = Alignment.Center
-            ) {
-                StyledIcon(
-                    drawableRes = R.drawable.viaura_list_arrow_down,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = SecondaryTextColor,
-                    modifier = Modifier
-                        .size(14.dp)
-                        .graphicsLayer { rotationZ = arrowRotation }
-                )
             }
         }
     }
