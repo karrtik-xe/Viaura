@@ -130,7 +130,7 @@ jobs:
         run: |
           set -e
           mkdir -p app/src/ytdlp/assets/ytdl
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+          curl -fL --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors \
             -o app/src/ytdlp/assets/ytdl/python313.zip \
             "https://raw.githubusercontent.com/Riteshp2001/mpvRx/master/app/src/ytdlp/assets/ytdl/python313.zip"
           test -s app/src/ytdlp/assets/ytdl/python313.zip
@@ -140,14 +140,36 @@ jobs:
       # The newest yt-dlp release is packed INTO the app: installing it on the phone is a file copy (no download, no wait),
       # and the app then only checks for a newer version in the background.
       - name: Fetch latest yt-dlp release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
+          OUT=app/src/ytdlp/assets/ytdl/yt-dlp
           mkdir -p app/src/ytdlp/assets/ytdl
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
-            -o app/src/ytdlp/assets/ytdl/yt-dlp \
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-          unzip -l app/src/ytdlp/assets/ytdl/yt-dlp | grep -q "yt_dlp/version.py"
-          ls -lh app/src/ytdlp/assets/ytdl/yt-dlp
+          # github.com release downloads sometimes answer 504 for a while: retry with a growing pause, and fall back to
+          # the authenticated GitHub API (gh) and the nightly repository when the plain download keeps failing.
+          valid() { [ -s "$OUT" ] && unzip -l "$OUT" 2>/dev/null | grep -q "yt_dlp/version.py"; }
+          fetch_curl() {
+            curl -fL --retry 3 --retry-delay 3 --retry-all-errors --connect-timeout 20 --max-time 300 -o "$OUT" "$1"
+          }
+          OK=0
+          for i in 1 2 3 4; do
+            rm -f "$OUT"
+            if fetch_curl "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" && valid; then OK=1; break; fi
+            echo "::warning::yt-dlp download attempt $i failed (curl)"
+            rm -f "$OUT"
+            if gh release download --repo yt-dlp/yt-dlp --pattern yt-dlp --output "$OUT" --clobber && valid; then OK=1; break; fi
+            echo "::warning::yt-dlp download attempt $i failed (gh)"
+            rm -f "$OUT"
+            if gh release download --repo yt-dlp/yt-dlp-nightly-builds --pattern yt-dlp --output "$OUT" --clobber && valid; then OK=1; break; fi
+            echo "::warning::yt-dlp download attempt $i failed (nightly)"
+            sleep $((i * 10))
+          done
+          if [ "$OK" != "1" ]; then
+            echo "::error::yt-dlp could not be downloaded from GitHub (all mirrors failed)."
+            exit 1
+          fi
+          ls -lh "$OUT"
 
       # Anime4K (MIT) GLSL shaders for the player's "Anime4K Shaders" switch. Not kept in the repo: cloned here and flattened into
       # app/src/main/assets/anime4k/. A failed download never breaks the build - the app then shows the switch as unavailable.
@@ -183,7 +205,7 @@ jobs:
           DIR=app/src/main/cpp/third_party/quickjs
           rm -rf "$DIR" /tmp/qjs-src
           mkdir -p "$DIR/gen" /tmp/qjs-src
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+          curl -fL --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors \
             -o /tmp/quickjs.tar.gz \
             "https://github.com/quickjs-ng/quickjs/archive/refs/tags/${QJS_VERSION}.tar.gz"
           tar -xzf /tmp/quickjs.tar.gz -C /tmp/qjs-src --strip-components=1
@@ -211,7 +233,7 @@ jobs:
         run: |
           set -e
           mkdir -p app/src/ytdlp/assets
-          curl -fL --retry 5 --retry-delay 3 --retry-connrefused \
+          curl -fL --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors \
             -o app/src/ytdlp/assets/cacert.pem "https://curl.se/ca/cacert.pem"
           ls -lh app/src/ytdlp/assets/cacert.pem
 
@@ -231,7 +253,7 @@ jobs:
             fi
             [ -n "$URL" ] || { echo "::error::Could not find the mpvRx universal APK. Commit app/src/ytdlp/jniLibs/<abi>/libpython.so or set the MPVRX_APK_URL repository variable."; exit 1; }
             echo "Downloading $URL"
-            curl -fL --retry 5 --retry-delay 3 --retry-connrefused -o /tmp/mpvrx.apk "$URL"
+            curl -fL --retry 5 --retry-delay 5 --retry-connrefused --retry-all-errors -o /tmp/mpvrx.apk "$URL"
             for ABI in $MISSING; do
               mkdir -p "app/src/ytdlp/jniLibs/$ABI"
               unzip -o -j /tmp/mpvrx.apk "lib/$ABI/libpython.so" -d "app/src/ytdlp/jniLibs/$ABI" || true
