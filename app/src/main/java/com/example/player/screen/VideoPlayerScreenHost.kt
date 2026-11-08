@@ -2561,7 +2561,10 @@ private fun VideoPlayerScreenImpl(
                 }
                 Lifecycle.Event.ON_PAUSE -> {
                     persistPlaybackPosition()
-                    controller.onPause()
+                    // Picture-in-Picture / split-screen: the picture is still on screen, so the video keeps running.
+                    val pausedAct = activity
+                    val stillVisible = pausedAct != null && (pausedAct.isInPictureInPictureMode || pausedAct.isInMultiWindowMode)
+                    if (!stillVisible) controller.onPause()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     persistPlaybackPosition()

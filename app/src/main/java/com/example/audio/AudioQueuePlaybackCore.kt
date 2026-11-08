@@ -58,6 +58,16 @@ object AudioPlaybackManager {
     private var progressJob: Job? = null
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
+
+    // ONE listener object for the whole life of the player. A new listener per request makes the system treat every
+    // request as a different client: the previous one then receives AUDIOFOCUS_LOSS and pauses the track that has just
+    // started (a random cut right after tapping next / a new song).
+    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change -> handleAudioFocusChange(change) }
+    @Volatile private var audioFocusHeld: Boolean = false
+    // Short sounds (notification, navigation prompt) only lower the music instead of pausing it.
+    @Volatile private var duckedForFocus: Boolean = false
+    private var volumeAppliedTo: MediaPlayer? = null
+    private var volumeApplied: Float = -1f
     private var applicationContext: Context? = null
 
     // Real-Time Hardware-Accelerated Audio Effects (Zero-glitch live equalizer)
@@ -935,6 +945,8 @@ object AudioPlaybackManager {
             applyPlaybackSpeed(_playbackSpeed.value)
             setupAudioEffects(mp.audioSessionId)
             mp.start()
+            // A new MediaPlayer always starts at 1.0x: the chosen speed is applied once it runs.
+            applySpeedTo(mp, _playbackSpeed.value)
             if (seamless) {
                 try {
                     previousPlayer?.let { old ->
@@ -1520,6 +1532,7 @@ object AudioPlaybackManager {
                 requestAudioFocus()
                 applyPlaybackSpeed(_playbackSpeed.value)
                 player.start()
+                applySpeedTo(player, _playbackSpeed.value)
                 _isPlaying.value = true
                 _isBuffering.value = false
                 startProgressTracker()
@@ -1560,6 +1573,7 @@ object AudioPlaybackManager {
                 requestAudioFocus()
                 applyPlaybackSpeed(_playbackSpeed.value)
                 player.start()
+                applySpeedTo(player, _playbackSpeed.value)
                 _isPlaying.value = true
                 startProgressTracker()
                 targetContext?.let { updateNotification(it, _currentTrack.value, true) }
@@ -1742,9 +1756,7 @@ object AudioPlaybackManager {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 mediaPlayer?.let { player ->
                     if (player.isPlaying || _isPlaying.value) {
-                        val params = player.playbackParams ?: PlaybackParams()
-                        params.speed = speed.coerceIn(0.25f, 3.0f)
-                        player.playbackParams = params
+                        applySpeedTo(player, speed)
                     }
                 }
             }
@@ -1863,12 +1875,8 @@ object AudioPlaybackManager {
      */
     fun setHeadphoneSurround(enabled: Boolean) {
         isHeadphoneSurroundEnabled = enabled
-        try {
-            virtualizer?.enabled = enabled
-            if (enabled) {
-                virtualizer?.setStrength(1000.toShort())
-            }
-        } catch (_: Exception) {}
+        // Goes through the changed-value guard: re-writing an unchanged effect setting is an audible tick.
+        applyAudioFxImmediately()
     }
 
     private fun applyAudioFxImmediately() {
@@ -1932,16 +1940,7 @@ object AudioPlaybackManager {
             }
         } catch (_: Exception) {}
 
-        try {
-            mediaPlayer?.let { player ->
-                if (eqVolumeBoostDb > 0.05f) {
-                    val multiplier = Math.pow(10.0, (eqVolumeBoostDb / 25.0)).toFloat().coerceIn(1.0f, 2.0f)
-                    player.setVolume(multiplier, multiplier)
-                } else {
-                    player.setVolume(1.0f, 1.0f)
-                }
-            }
-        } catch (_: Exception) {}
+        applyOutputVolume()
     }
 
     private fun handleOnlineStreamStall(context: Context?, track: AudioTrackItem, pos: Long) {
@@ -2044,6 +2043,8 @@ object AudioPlaybackManager {
     private fun handleAudioFocusChange(focusChange: Int) {
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS -> {
+                audioFocusHeld = false
+                duckedForFocus = false
                 resumeOnFocusGain = false
                 mediaPlayer?.let { player ->
                     if (player.isPlaying) {
@@ -2054,8 +2055,13 @@ object AudioPlaybackManager {
                     }
                 }
             }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // A short sound over the music: keep playing, only lower the volume (no pause / resume gap).
+                duckedForFocus = true
+                applyOutputVolume()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                audioFocusHeld = false
                 // If music was actively playing when mic or external app requested audio focus,
                 // pause immediately so microphone (e.g. keyboard voice typing) does not record music.
                 // However, if the user had ALREADY explicitly paused playback, keep resumeOnFocusGain = false
@@ -2074,6 +2080,11 @@ object AudioPlaybackManager {
                 }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
+                audioFocusHeld = true
+                if (duckedForFocus) {
+                    duckedForFocus = false
+                    applyOutputVolume()
+                }
                 // NEVER resume if user explicitly paused the music!
                 if (resumeOnFocusGain && !userExplicitlyPaused) {
                     resumeOnFocusGain = false
@@ -2081,6 +2092,7 @@ object AudioPlaybackManager {
                         if (!player.isPlaying) {
                             applyPlaybackSpeed(_playbackSpeed.value)
                             player.start()
+                            applySpeedTo(player, _playbackSpeed.value)
                             _isPlaying.value = true
                             startProgressTracker()
                             applicationContext?.let { updateNotification(it, _currentTrack.value, true) }
@@ -2093,45 +2105,85 @@ object AudioPlaybackManager {
         }
     }
 
+    /** The volume the player really needs: volume boost and the short duck while another app makes a sound. */
+    private fun applyOutputVolume() {
+        try {
+            val player = mediaPlayer ?: return
+            val base = if (eqVolumeBoostDb > 0.05f) {
+                Math.pow(10.0, (eqVolumeBoostDb / 25.0)).toFloat().coerceIn(1.0f, 2.0f)
+            } else 1.0f
+            val wanted = if (duckedForFocus) base * 0.2f else base
+            // An unchanged value is not written again (every write is one more tick in the output).
+            if (player === volumeAppliedTo && wanted == volumeApplied) return
+            player.setVolume(wanted, wanted)
+            volumeAppliedTo = player
+            volumeApplied = wanted
+        } catch (_: Exception) {}
+    }
+
+    private var speedAppliedTo: MediaPlayer? = null
+    private var speedApplied: Float = 1.0f
+
+    private fun applySpeedTo(player: MediaPlayer, speed: Float) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        // A fresh MediaPlayer runs at 1.0x; an unchanged speed is not written again (re-configures the output = a tick).
+        val current = if (player === speedAppliedTo) speedApplied else 1.0f
+        if (speed == current) return
+        try {
+            val params = player.playbackParams ?: PlaybackParams()
+            params.speed = speed.coerceIn(0.25f, 3.0f)
+            player.playbackParams = params
+            speedAppliedTo = player
+            speedApplied = speed
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to apply playback speed: ${e.message}")
+        }
+    }
+
     private fun requestAudioFocus() {
         try {
             val am = audioManager ?: return
+            // Already ours: asking again would only create one more entry in the system's focus stack.
+            if (audioFocusHeld) return
+            val result: Int
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                val req = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                     .setAudioAttributes(
                         AudioAttributes.Builder()
                             .setUsage(AudioAttributes.USAGE_MEDIA)
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
-                    .setOnAudioFocusChangeListener { focusChange ->
-                        handleAudioFocusChange(focusChange)
-                    }
+                    .setOnAudioFocusChangeListener(focusChangeListener)
                     .build()
-                focusRequest = req
-                am.requestAudioFocus(req)
+                    .also { focusRequest = it }
+                result = am.requestAudioFocus(req)
             } else {
                 @Suppress("DEPRECATION")
-                am.requestAudioFocus(
-                    { focusChange ->
-                        handleAudioFocusChange(focusChange)
-                    },
+                result = am.requestAudioFocus(
+                    focusChangeListener,
                     AudioManager.STREAM_MUSIC,
                     AudioManager.AUDIOFOCUS_GAIN
                 )
             }
+            audioFocusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         } catch (_: Exception) {}
     }
 
     private fun abandonAudioFocus() {
         try {
             resumeOnFocusGain = false
+            audioFocusHeld = false
+            if (duckedForFocus) {
+                duckedForFocus = false
+                applyOutputVolume()
+            }
             val am = audioManager ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 focusRequest?.let { am.abandonAudioFocusRequest(it) }
             } else {
                 @Suppress("DEPRECATION")
-                am.abandonAudioFocus(null)
+                am.abandonAudioFocus(focusChangeListener)
             }
         } catch (_: Exception) {}
     }

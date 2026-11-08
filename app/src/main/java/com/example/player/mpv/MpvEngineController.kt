@@ -1389,9 +1389,18 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * onPause records whether the video was really running (a pause by the user stays a pause); onStop adds that the
+     * screen was left; onResume continues only what the lifecycle itself paused. Pulling down the notification shade or
+     * a system dialog only pauses the activity (no stop): the picture is still there, so playback simply continues.
+     */
+    @Volatile private var lifecyclePauseRecorded = false
+    @Volatile private var stoppedSinceLifecyclePause = false
+
     fun onStop() {
         try {
-            wasPlayingBeforeStop = _isPlaying.value
+            if (!lifecyclePauseRecorded) wasPlayingBeforeStop = _isPlaying.value
+            stoppedSinceLifecyclePause = true
             withMpvLock(Unit) { view ->
                 try { view.mpv.setPropertyBoolean("pause", true) } catch (_: Throwable) {}
             }
@@ -1402,14 +1411,41 @@ class MpvPlayerController {
     fun onPause() {
         try {
             withMpvLock(Unit) { view ->
-                try { view.mpv.setPropertyBoolean("pause", true) } catch (_: Throwable) {}
+                try {
+                    if (!lifecyclePauseRecorded) {
+                        val running = !(view.mpv.getPropertyBoolean("pause") ?: true) || handOverPaused
+                        wasPlayingBeforeStop = running
+                        lifecyclePauseRecorded = true
+                        stoppedSinceLifecyclePause = false
+                    }
+                    view.mpv.setPropertyBoolean("pause", true)
+                } catch (_: Throwable) {}
             }
         } catch (_: Throwable) {}
     }
 
     fun onResume() {
-        // Only rebuild the native surface after a genuine background/foreground cycle.
+        val pausedOnly = lifecyclePauseRecorded && !stoppedSinceLifecyclePause
+        lifecyclePauseRecorded = false
+        stoppedSinceLifecyclePause = false
         if (!wasPlayingBeforeStop) return
+        if (pausedOnly) {
+            // Never stopped: the surface and the decoder are intact, nothing to rebuild - just carry on.
+            wasPlayingBeforeStop = false
+            try {
+                playerScope.launch {
+                    delay(40)
+                    withMpvLock(Unit) { view ->
+                        try {
+                            view.mpv.setPropertyBoolean("pause", false)
+                            _isPlaying.value = true
+                        } catch (_: Throwable) {}
+                    }
+                }
+            } catch (_: Throwable) {}
+            return
+        }
+        // Only rebuild the native surface after a genuine background/foreground cycle.
         try {
             playerScope.launch {
                 delay(50)
@@ -2799,8 +2835,11 @@ class MpvPlayerController {
             currentVolumeLevel = clamped
             playerScope.launch(Dispatchers.Default) {
                 try {
-                    mpvView?.mpv?.setPropertyString("volume-max", "200")
-                    mpvView?.mpv?.setPropertyInt("volume", clamped)
+                    // While a track switch holds the volume down, its own ramp brings it to the new level.
+                    withMpvLock(Unit) { v ->
+                        if ((v.mpv.getPropertyDouble("volume-max") ?: 0.0) != 200.0) v.mpv.setPropertyString("volume-max", "200")
+                        if (!audioSwitchVolumeLowered) v.mpv.setPropertyInt("volume", clamped)
+                    }
                     if (wasBoosted != isBoosted) {
                         updateAudioFilters(immediate = true)
                     }
@@ -2817,7 +2856,7 @@ class MpvPlayerController {
             _playbackSpeed.value = clamped
             playerScope.launch(Dispatchers.Default) {
                 try {
-                    mpvView?.mpv?.setPropertyDouble("speed", clamped)
+                    withMpvLock(Unit) { v -> v.mpv.setPropertyDouble("speed", clamped) }
                 } catch (_: Throwable) {}
             }
         } catch (t: Throwable) {
@@ -4696,44 +4735,50 @@ class MpvPlayerController {
 
     private var audioSwitchJob: Job? = null
 
+    /** Bumped by every audio-track tap, so a switch that was overtaken by a newer tap knows it must not touch the volume any more. */
+    private val audioSwitchSeq = AtomicLong(0L)
+
+    /** True while a track switch holds the volume down. A quick second tap must never remember that lowered level as "the" volume. */
+    @Volatile private var audioSwitchVolumeLowered = false
+
     /**
      * Switches the audio track without a pop or a stall of the screen: the picker shows the new choice at once, the volume
      * is eased down for a few milliseconds, the track is switched on a background thread, and the volume comes back
-     * smoothly once the new stream is running.
+     * smoothly once the new stream is running. The volume always returns to the user's real level
+     * ([currentVolumeLevel]), however fast the taps follow each other.
      */
     fun setAudioTrack(trackId: Int) {
         lastTrackChangeAt = System.currentTimeMillis()
         try {
             _audioTracks.value = _audioTracks.value.map { it.copy(isSelected = (it.id == trackId)) }
         } catch (_: Throwable) {}
+        val seq = audioSwitchSeq.incrementAndGet()
         audioSwitchJob?.cancel()
         audioSwitchJob = playerScope.launch(Dispatchers.Default) {
             try {
-                switchAudioTrackSmoothly(trackId)
+                switchAudioTrackSmoothly(trackId, seq)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (_: Throwable) {}
         }
     }
 
-    private suspend fun switchAudioTrackSmoothly(trackId: Int) {
-        val already = withMpvLock(false) { v ->
-            val cur = try { v.mpv.getPropertyInt("aid") } catch (_: Throwable) { null }
-            trackId > 0 && cur == trackId
-        }
-        if (already) return
-        val fade = _isPlaying.value && System.currentTimeMillis() >= seamlessHandOverUntil
-        val original: Double? = if (fade) {
-            withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
-        } else null
-        val fading = fade && original != null && original > 0.0
-        var last = original
+    private suspend fun switchAudioTrackSmoothly(trackId: Int, seq: Long) {
         try {
-            if (fading && original != null) {
+            val already = withMpvLock(false) { v ->
+                val cur = try { v.mpv.getPropertyInt("aid") } catch (_: Throwable) { null }
+                trackId > 0 && cur == trackId
+            }
+            if (already) return
+            val userVolume = currentVolumeLevel.toDouble()
+            val fade = _isPlaying.value && System.currentTimeMillis() >= seamlessHandOverUntil && userVolume > 0.0
+            // A switch that overtakes an earlier one finds the volume already down and simply carries on from there.
+            if (fade && !audioSwitchVolumeLowered) {
+                audioSwitchVolumeLowered = true
                 for (i in 1..5) {
-                    val vol = original * (1.0 - i / 5.0)
+                    if (seq != audioSwitchSeq.get()) break
+                    val vol = userVolume * (1.0 - i / 5.0)
                     withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-                    last = vol
                     delay(8L)
                 }
             }
@@ -4743,20 +4788,19 @@ class MpvPlayerController {
                 else v.mpv.setPropertyInt("aid", trackId)
             }
             // the new stream needs a moment before it produces sound
-            if (fading) delay(320L)
+            if (audioSwitchVolumeLowered) delay(320L)
         } finally {
-            if (fading && original != null) {
+            // Only the newest switch brings the volume back (a superseded one leaves it to its successor).
+            if (audioSwitchVolumeLowered && seq == audioSwitchSeq.get()) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                    // only bring the volume back if nobody (the volume slider) changed it meanwhile
-                    val now = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
-                    val expected = last
-                    if (now != null && expected != null && kotlin.math.abs(now - expected) < 0.6) {
-                        for (i in 1..8) {
-                            val vol = original * (i / 8.0)
-                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-                            delay(14L)
-                        }
+                    var completed = true
+                    for (i in 1..8) {
+                        if (seq != audioSwitchSeq.get()) { completed = false; break }
+                        val vol = currentVolumeLevel.toDouble() * (i / 8.0)
+                        withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                        delay(14L)
                     }
+                    if (completed && seq == audioSwitchSeq.get()) audioSwitchVolumeLowered = false
                 }
             }
         }
@@ -4921,7 +4965,12 @@ class MpvPlayerController {
             subtitleSelectExecutor.execute {
                 // A newer tap already carries the full wanted state, so an older pending one is simply dropped.
                 if (isReleased || selectionGeneration != subtitleSelectionGeneration.get()) return@execute
-                applySubtitleSelectionToMpv(primaryTrackId, secondaryTrackId, selectionGeneration)
+                // Under the native lock: the polling thread, a release and this selection never touch libmpv together.
+                withMpvLock(Unit) { _ ->
+                    if (selectionGeneration == subtitleSelectionGeneration.get()) {
+                        applySubtitleSelectionToMpv(primaryTrackId, secondaryTrackId, selectionGeneration)
+                    }
+                }
             }
         } catch (_: Throwable) {}
     }
@@ -5265,21 +5314,51 @@ class MpvPlayerController {
         return String.format(Locale.US, "%02d:%02d:%02d,%03d", h, m, s, milli)
     }
 
+    /**
+     * Subtitles on / off. Same path as a subtitle selection: the visible state changes at once, the libmpv work runs
+     * in order on the background thread under the native lock, only values that really differ are written, and a
+     * newer tap supersedes an older pending one - so rapid toggling never blocks the UI thread, never races with a
+     * pending selection and never touches the video or audio.
+     */
     fun setSubtitleVisibility(visible: Boolean) {
+        val generation = subtitleSelectionGeneration.incrementAndGet()
+        markSubtitleOp()
+        val targetSid = lastActiveSubtitleTrackId
         try {
-            val view = mpvView ?: return
-            view.mpv.setPropertyBoolean("sub-visibility", visible)
             if (!visible) {
                 isSubtitleExplicitlyDisabled = true
-                try { view.mpv.setPropertyString("sid", "no") } catch (_: Throwable) {}
                 _subtitleTracks.value = _subtitleTracks.value.map { it.copy(isSelected = false) }
             } else {
                 isSubtitleExplicitlyDisabled = false
-                if (lastActiveSubtitleTrackId > 0) {
-                    val targetSid = lastActiveSubtitleTrackId
-                    try { view.mpv.setPropertyInt("sid", targetSid) } catch (_: Throwable) {}
+                if (targetSid > 0) {
                     _subtitleTracks.value = _subtitleTracks.value.map { it.copy(isSelected = (it.id == targetSid)) }
                 }
+            }
+        } catch (_: Throwable) {}
+        try {
+            subtitleSelectExecutor.execute {
+                if (isReleased || generation != subtitleSelectionGeneration.get()) return@execute
+                withMpvLock(Unit) { view ->
+                    try {
+                        holdPreciseSeekForTrackSwitch()
+                        val subGuard = SubtitlePropGuard(view)
+                        if (!visible) {
+                            subGuard.setPropertyBoolean("sub-visibility", false)
+                            if ((try { view.mpv.getPropertyString("sid") } catch (_: Throwable) { null }) != "no") {
+                                view.mpv.setPropertyString("sid", "no")
+                            }
+                        } else {
+                            subGuard.setPropertyBoolean("sub-visibility", true)
+                            if (targetSid > 0 &&
+                                (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) != targetSid
+                            ) {
+                                view.mpv.setPropertyInt("sid", targetSid)
+                            }
+                        }
+                        Unit
+                    } catch (_: Throwable) {}
+                }
+                nudgeRedrawIfPaused()
             }
         } catch (_: Throwable) {}
     }
