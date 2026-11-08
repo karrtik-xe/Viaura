@@ -1071,5 +1071,7 @@
   "Episode Queue & Playlist Manager": "Episode Queue & Playlist Manager",
   "🌐": "🌐",
   "Save QR": "Save QR",
-  "Save Here": "Save Here"
+  "Save Here": "Save Here",
+  "Smart Auto Playback": "Smart Auto Playback",
+  "Picks the best decoder for every video and keeps playback smooth without needlessly lowering quality": "Picks the best decoder for every video and keeps playback smooth without needlessly lowering quality"
 }

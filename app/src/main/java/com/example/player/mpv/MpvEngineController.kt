@@ -100,6 +100,7 @@ class MpvPlayerController {
     private val builtInSubtitleNames: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     /** Until this time a refresh-seek caused by a subtitle change is not shown as buffering. */
     @Volatile private var subtitleOpUntilMs = 0L
+    @Volatile private var lastTrackChangeAt = 0L
 
     /** The subtitle called [name] belongs to the stream itself (listed as Built-in, not as an upload). */
     fun markBuiltInSubtitle(name: String) {
@@ -1656,6 +1657,7 @@ class MpvPlayerController {
     private var smartHwCheckDone = false
     private var smartFallbackSteps = 0
     private var smartPerfModeAt = 0L
+    private var smartLastDropAt = 0L
     private var smartAdviceSent = false
     private var smartAdviceId = 0
     private var smartLastDrops = 0
@@ -1839,17 +1841,32 @@ class MpvPlayerController {
         }
 
         // 2. Sustained dropped frames: cheaper rendering first, then a lower-resolution suggestion.
-        if (_isBuffering.value || now - smartAnalyzedAt < 3000L || now - lastSeekAt < 3000L) {
+        // A subtitle / audio track change briefly stalls playback by itself: those drops are not a sign that the device
+        // is too slow, so they must never switch Smart Auto Playback into its lower-quality performance mode.
+        if (_isBuffering.value || now - smartAnalyzedAt < 3000L || now - lastSeekAt < 3000L ||
+            now < subtitleOpUntilMs + 4000L || now - lastTrackChangeAt < 4000L) {
             smartLastDrops = (view.mpv.getPropertyInt("frame-drop-count") ?: 0) + (view.mpv.getPropertyInt("decoder-frame-drop-count") ?: 0)
             return
         }
         val drops = (view.mpv.getPropertyInt("frame-drop-count") ?: 0) + (view.mpv.getPropertyInt("decoder-frame-drop-count") ?: 0)
         val delta = (drops - smartLastDrops).coerceAtLeast(0)
         smartLastDrops = drops
-        if (delta > 0) smartDropWindow.addLast(now to delta)
+        if (delta > 0) { smartDropWindow.addLast(now to delta); smartLastDropAt = now }
         while (smartDropWindow.isNotEmpty() && now - smartDropWindow.first().first > 10_000L) smartDropWindow.removeFirst()
         val windowDrops = smartDropWindow.sumOf { it.second }
         val threshold = maxOf(20, (plan.stream.fps * 10.0 * 0.06).toInt())
+
+        // Performance mode is temporary: once playback has been clean for a while the normal sharp rendering comes back.
+        if (smartPerfModeAt != 0L && windowDrops == 0 && now - smartPerfModeAt >= 45_000L && now - smartLastDropAt >= 45_000L) {
+            smartPerfModeAt = 0L
+            smartLastDropAt = now
+            if (!onlineStreamMode && !directStreamMode) {
+                smartSet(view, "scale", plan.tuning.scale)
+                smartSet(view, "dscale", plan.tuning.dscale)
+            }
+            smartPublishReport(plan, null)
+            return
+        }
         if (windowDrops < threshold) return
 
         if (smartPerfModeAt == 0L) {
@@ -4685,6 +4702,7 @@ class MpvPlayerController {
      * smoothly once the new stream is running.
      */
     fun setAudioTrack(trackId: Int) {
+        lastTrackChangeAt = System.currentTimeMillis()
         try {
             _audioTracks.value = _audioTracks.value.map { it.copy(isSelected = (it.id == trackId)) }
         } catch (_: Throwable) {}

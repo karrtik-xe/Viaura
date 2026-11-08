@@ -1071,5 +1071,7 @@
   "Episode Queue & Playlist Manager": "एपिसोड क्यू और प्लेलिस्ट मैनेजर",
   "🌐": "🌐",
   "Save QR": "QR सेव करो",
-  "Save Here": "यहाँ सेव करो"
+  "Save Here": "यहाँ सेव करो",
+  "Smart Auto Playback": "स्मार्ट ऑटो प्लेबैक",
+  "Picks the best decoder for every video and keeps playback smooth without needlessly lowering quality": "हर वीडियो के लिए सबसे अच्छा डिकोडर खुद चुनता है और बिना वजह क्वालिटी घटाए प्लेबैक को स्मूद रखता है"
 }

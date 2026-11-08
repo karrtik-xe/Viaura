@@ -94,6 +94,7 @@ import androidx.compose.material.icons.outlined.Animation
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.foundation.layout.navigationBars
@@ -3359,13 +3360,36 @@ HorizontalPager(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
 
+                        // The decoder is shared with the player (same stored choice as the player's decoder button):
+                        // "Smart Auto Playback" + the three manual modes. A null entry below is the Smart option.
+                        val decoderChoicePrefs = remember { context.getSharedPreferences("smart_playback", android.content.Context.MODE_PRIVATE) }
+                        var storedDecoderMode by remember {
+                            mutableStateOf(
+                                runCatching {
+                                    com.example.ui.screens.DecoderMode.valueOf(
+                                        decoderChoicePrefs.getString("decoder_mode", com.example.ui.screens.DecoderMode.AUTO.name)
+                                            ?: com.example.ui.screens.DecoderMode.AUTO.name
+                                    )
+                                }.getOrDefault(com.example.ui.screens.DecoderMode.AUTO)
+                            )
+                        }
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            HwAccelMode.entries.forEach { mode ->
-                                val isSelected = uiState.hwAccelMode == mode
+                            (listOf<HwAccelMode?>(null) + HwAccelMode.entries).forEach { mode ->
+                                val rowDecoder = when (mode) {
+                                    null -> com.example.ui.screens.DecoderMode.AUTO
+                                    HwAccelMode.FORCE -> com.example.ui.screens.DecoderMode.HW_PLUS
+                                    HwAccelMode.PREFER -> com.example.ui.screens.DecoderMode.HW
+                                    HwAccelMode.DISABLE -> com.example.ui.screens.DecoderMode.SW
+                                }
+                                val isSelected = storedDecoderMode == rowDecoder
+                                val rowTitle = mode?.getDisplayName(lang) ?: "Smart Auto Playback"
+                                val rowDescription = mode?.getDescription(lang)
+                                    ?: "Picks the best decoder for every video and keeps playback smooth without needlessly lowering quality"
                                 val icon = when (mode) {
+                                    null -> Icons.Outlined.AutoAwesome
                                     HwAccelMode.FORCE -> Icons.Outlined.Speed
                                     HwAccelMode.PREFER -> Icons.Outlined.Memory
                                     HwAccelMode.DISABLE -> Icons.Outlined.Tune
@@ -3397,7 +3421,11 @@ HorizontalPager(
                                             color = cardBorder,
                                             shape = cardShape
                                         )
-                                        .clickable { onHwAccelModeChange(mode) }
+                                        .clickable {
+                                            storedDecoderMode = rowDecoder
+                                            decoderChoicePrefs.edit().putString("decoder_mode", rowDecoder.name).apply()
+                                            if (mode != null) onHwAccelModeChange(mode)
+                                        }
                                         .padding(horizontal = 16.dp, vertical = 14.dp)
                                 ) {
                                     Row(
@@ -3406,7 +3434,7 @@ HorizontalPager(
                                     ) {
                                         StyledIcon(
                                             imageVector = icon,
-                                            contentDescription = mode.getDisplayName(lang),
+                                            contentDescription = rowTitle,
                                             tint = iconTint,
                                             modifier = Modifier.size(24.dp)
                                         )
@@ -3417,14 +3445,14 @@ HorizontalPager(
                                             modifier = Modifier.weight(1f)
                                         ) {
                                             Text(
-                                                text = mode.getDisplayName(lang),
+                                                text = rowTitle,
                                                 fontSize = 15.5.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = primaryText
                                             )
                                             Spacer(modifier = Modifier.height(3.dp))
                                             Text(
-                                                text = mode.getDescription(lang),
+                                                text = rowDescription,
                                                 fontSize = 12.sp,
                                                 lineHeight = 16.sp,
                                                 color = secondaryText
