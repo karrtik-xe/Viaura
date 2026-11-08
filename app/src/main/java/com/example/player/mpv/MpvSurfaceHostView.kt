@@ -85,6 +85,8 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         // on mpv's core thread. Without a persistent fontconfig cache that is a full font scan each time (a short
         // freeze of audio + video). A tiny fontconfig config gives it a cache folder so only the first scan is slow.
         setupFontconfigCache(context)
+        // Needs to run before "sub-font" is set below: it finds the phone's default font family that SRT/VTT subtitles use.
+        val fontsDir = SubtitleFontManager.initializeFontEnvironment(context)
         // yt-dlp bridge (ported from mpvRx): ytdl_hook paths must exist before init, but the hook stays OFF until
         // Viaura routes a link to yt-dlp (so NewPipe / HLS / direct streams are never hijacked by it).
         val self = java.lang.ref.WeakReference(this)
@@ -168,7 +170,6 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         } catch (_: Throwable) {}
 
         // Custom Fonts Directory & Pre-initialized Fallback Fonts (libass font loader)
-        val fontsDir = SubtitleFontManager.initializeFontEnvironment(context)
         mpv.setOptionString("sub-fonts-dir", fontsDir.absolutePath)
     }
 

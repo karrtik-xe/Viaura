@@ -575,18 +575,14 @@ object SubtitleFontManager {
         synchronized(systemFallbackLock) {
             val again = systemFallbacks
             if (systemFallbackKey == key && (again.isEmpty() || again.all { it.link.exists() })) return again
-            // The links live OUTSIDE sub_fonts. libass reads every file of its fonts folder each time a subtitle
+            // Most links live OUTSIDE sub_fonts. libass reads every file of its fonts folder each time a subtitle
             // track is started (select / switch), on mpv's core thread; ~100 linked system fonts (100+ MB) made
-            // every subtitle change stall picture and sound. libass/fontconfig still finds these same system fonts
-            // by family name (their folders are in fonts.conf), so the glyph fallback keeps working.
+            // every subtitle change stall picture and sound. Only the few fonts that must always be found by libass
+            // (the phone's default font + the phone-language fonts) are also linked into sub_fonts. The rest is still
+            // found by fontconfig by family name (their folders are in fonts.conf).
             val sysDir = File(fontsDir.parentFile ?: fontsDir, SYS_LINK_DIR_NAME).apply { mkdirs() }
-            try {
-                fontsDir.listFiles()?.forEach { f ->
-                    if (f.name.startsWith(SYS_LINK_PREFIX)) { try { f.delete() } catch (_: Throwable) {} }
-                }
-            } catch (_: Throwable) {}
             val built = try {
-                buildSystemFallbacks(sysDir, java.util.Locale.getDefault())
+                buildSystemFallbacks(sysDir, fontsDir, java.util.Locale.getDefault())
             } catch (t: Throwable) {
                 Log.w(TAG, "Unable to link system fonts for subtitle fallback", t)
                 emptyList()
@@ -598,7 +594,7 @@ object SubtitleFontManager {
         }
     }
 
-    private fun buildSystemFallbacks(fontsDir: File, locale: java.util.Locale): List<SystemFallbackFont> {
+    private fun buildSystemFallbacks(fontsDir: File, libassDir: File, locale: java.util.Locale): List<SystemFallbackFont> {
         var entries = parseSystemFontsXml()
         if (entries.isEmpty()) entries = scanSystemFontDirs()
 
@@ -623,6 +619,7 @@ object SubtitleFontManager {
         )
 
         val wanted = HashSet<String>()
+        val libassWanted = HashSet<String>()
         val result = ArrayList<SystemFallbackFont>()
         val seen = HashSet<String>()
         for (e in sorted) {
@@ -636,6 +633,17 @@ object SubtitleFontManager {
                 } catch (_: Throwable) { continue }
             }
             wanted.add(linkName)
+            if (e.isDefaultSans || langMatches(e.lang)) {
+                // Always visible to libass itself (small set), independent of fontconfig.
+                val direct = File(libassDir, linkName)
+                if (!direct.exists()) {
+                    try {
+                        direct.delete()
+                        android.system.Os.symlink(e.src.absolutePath, direct.absolutePath)
+                    } catch (_: Throwable) {}
+                }
+                libassWanted.add(linkName)
+            }
             val names = readFaceNames(link, e.ttcIndex) ?: continue
             val family = (names.first ?: names.second)?.takeIf { it.isNotBlank() } ?: continue
             if (family.any { it == '{' || it == '}' || it == '\\' || it == ',' }) continue
@@ -645,6 +653,12 @@ object SubtitleFontManager {
         // Remove links from an older font set (e.g. after a system update) so libass never scans stale entries.
         fontsDir.listFiles()?.forEach { f ->
             if (f.name.startsWith(SYS_LINK_PREFIX) && f.name !in wanted) {
+                try { f.delete() } catch (_: Throwable) {}
+            }
+        }
+        // Links of earlier builds (all system fonts) and of an older font set must not stay in the libass folder.
+        libassDir.listFiles()?.forEach { f ->
+            if (f.name.startsWith(SYS_LINK_PREFIX) && f.name !in libassWanted) {
                 try { f.delete() } catch (_: Throwable) {}
             }
         }
