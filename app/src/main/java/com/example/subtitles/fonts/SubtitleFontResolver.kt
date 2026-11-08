@@ -529,6 +529,9 @@ object SubtitleFontManager {
     /** Prefix of the symlinks (in sub_fonts) that point at the phone's own font files. */
     private const val SYS_LINK_PREFIX = "sys_"
 
+    /** Folder (next to sub_fonts, never scanned by libass) that holds the links to the phone's own fonts. */
+    private const val SYS_LINK_DIR_NAME = "sub_fonts_sys"
+
     private class SystemFallbackFont(
         val link: File,
         val ttcIndex: Int,
@@ -560,8 +563,8 @@ object SubtitleFontManager {
     }
 
     /**
-     * Makes the phone's own script fonts (Roboto, Noto Sans Devanagari/Arabic/Thai/CJK/... exactly as
-     * listed in /system/etc/fonts.xml) visible to libass by linking them into sub_fonts. Nothing is
+     * Indexes the phone's own script fonts (Roboto, Noto Sans Devanagari/Arabic/Thai/CJK/... exactly as
+     * listed in /system/etc/fonts.xml) by linking them into sub_fonts_sys (not into sub_fonts, see below). Nothing is
      * copied, so it costs no storage, and it works offline. Returned in priority order: the default
      * sans-serif first, then fonts of the phone's current language, then the rest.
      */
@@ -572,8 +575,18 @@ object SubtitleFontManager {
         synchronized(systemFallbackLock) {
             val again = systemFallbacks
             if (systemFallbackKey == key && (again.isEmpty() || again.all { it.link.exists() })) return again
+            // The links live OUTSIDE sub_fonts. libass reads every file of its fonts folder each time a subtitle
+            // track is started (select / switch), on mpv's core thread; ~100 linked system fonts (100+ MB) made
+            // every subtitle change stall picture and sound. libass/fontconfig still finds these same system fonts
+            // by family name (their folders are in fonts.conf), so the glyph fallback keeps working.
+            val sysDir = File(fontsDir.parentFile ?: fontsDir, SYS_LINK_DIR_NAME).apply { mkdirs() }
+            try {
+                fontsDir.listFiles()?.forEach { f ->
+                    if (f.name.startsWith(SYS_LINK_PREFIX)) { try { f.delete() } catch (_: Throwable) {} }
+                }
+            } catch (_: Throwable) {}
             val built = try {
-                buildSystemFallbacks(fontsDir, java.util.Locale.getDefault())
+                buildSystemFallbacks(sysDir, java.util.Locale.getDefault())
             } catch (t: Throwable) {
                 Log.w(TAG, "Unable to link system fonts for subtitle fallback", t)
                 emptyList()
