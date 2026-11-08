@@ -1252,7 +1252,7 @@ Planned for CI download only (never committed): `app/src/main/assets/fonts/GoNot
 
 ## 6. Icon catalog
 
-- **Zip:** `app/src/viaura-icons.zip` — entries `drawable/viaura_*.xml` (149 vector icons), relative to `app/src/main/res`. CI unpacks them into `app/src/main/res/drawable/` (git-ignored). Edit: unzip, change, then `cd app/src/main/res && zip -X ../../viaura-icons.zip drawable/viaura_*.xml`.
+- **Zip:** `app/src/viaura-icons.zip` — entries `drawable/viaura_*.xml` (150 vector icons), relative to `app/src/main/res`. CI unpacks them into `app/src/main/res/drawable/` (git-ignored). Edit: unzip, change, then `cd app/src/main/res && zip -X ../../viaura-icons.zip drawable/viaura_*.xml`.
 - Icons are referenced statically as `R.drawable.<name>`; there is no name-based dynamic lookup. Every icon below has at least one user.
 - Loose (not zipped) drawables: `ic_abouticon` (used by `widgets/TopHeaderBar.kt`, `widgets/ShineAppLogoIcon.kt`, `settings/about/AboutDashboardPanel.kt`, `app/StartupSplashScreen.kt`), `ic_launcher_background`, `ic_launcher_foreground`, `ic_launcher_monochrome` (adaptive launcher icon, `mipmap-anydpi/ic_launcher.xml`), `launch_window_background`.
 - **CloudStream / provider icons:** there are NO icon files bundled for CloudStream or providers (the zip `cloudstream-lib.zip` contains only Kotlin sources, `build.gradle.kts` and a manifest). A provider/plugin icon is a remote URL (`iconUrl` of the repository manifest) read in `providers/store/PluginInstallStore.kt` and shown through `widgets/TopHeaderBar.kt` (`leadingIconUrl`) and the plugin rows in `providers/ui/PluginRepositoryManager.kt`. Provider/CloudStream placeholders use the normal `viaura_*` icons listed below.
@@ -1396,6 +1396,7 @@ Planned for CI download only (never committed): `app/src/main/assets/fonts/GoNot
 | `viaura_tuning` | `ViauraStyledIcon.kt` |
 | `viaura_updates` | `UpdateSettingsCardAndSheet.kt` |
 | `viaura_upi` | `AboutDashboardPanel.kt` |
+| `viaura_upi_qr` | `AboutDashboardPanel.kt` (UPI QR shown under the UPI ID; also rendered to PNG by "Save QR") |
 | `viaura_upload_minimalistic` | `ViauraStyledIcon.kt` |
 | `viaura_user` | `SettingsDashboardSheet.kt` |
 | `viaura_video` | `RecentlyPlayedTab.kt`, `HomeLibraryScreen.kt`, `ProviderHomePage.kt`, `ProviderPostCards.kt`, `ViauraStyledIcon.kt` |

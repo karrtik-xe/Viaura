@@ -4677,33 +4677,6 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
-    /** Eases the volume down for the instant mpv flushes its audio for a track refresh, then brings it back (no click / cut). */
-    private fun duckAudioForTrackRefresh() {
-        try {
-            if (!_isPlaying.value || System.currentTimeMillis() < seamlessHandOverUntil) return
-            val original = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
-            if (original == null || original <= 0.0) return
-            for (i in 1..4) {
-                val vol = original * (1.0 - i / 4.0)
-                withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-                Thread.sleep(6L)
-            }
-            playerScope.launch(Dispatchers.Default) {
-                delay(260L)
-                kotlinx.coroutines.withContext(NonCancellable) {
-                    val now = withMpvLock<Double?>(null) { v -> try { v.mpv.getPropertyDouble("volume") } catch (_: Throwable) { null } }
-                    if (now != null && kotlin.math.abs(now) < 0.6) {
-                        for (i in 1..8) {
-                            val vol = original * (i / 8.0)
-                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-                            delay(14L)
-                        }
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
-    }
-
     private var audioSwitchJob: Job? = null
 
     /**
@@ -4777,11 +4750,16 @@ class MpvPlayerController {
         holdPreciseSeekForTrackSwitch()
         try {
             val view = mpvView ?: return
+            // Only changed values are written: a same-value subtitle option write still makes libass
+            // rebuild its renderer on mpv's core thread (a short audio cut / silence).
+            val subGuard = SubtitlePropGuard(view)
             if (trackId <= 0) {
                 isSubtitleExplicitlyDisabled = true
                 subtitleUsesGeneratedAss = false
-                view.mpv.setPropertyBoolean("sub-visibility", false)
-                view.mpv.setPropertyString("sid", "no")
+                subGuard.setPropertyBoolean("sub-visibility", false)
+                if ((try { view.mpv.getPropertyString("sid") } catch (_: Throwable) { null }) != "no") {
+                    view.mpv.setPropertyString("sid", "no")
+                }
                 lastActiveSubtitleTrackId = 0
             } else {
                 isSubtitleExplicitlyDisabled = false
@@ -4800,12 +4778,14 @@ class MpvPlayerController {
                         break
                     }
                 }
-                view.mpv.setPropertyInt("sid", playbackTrackId)
-                view.mpv.setPropertyBoolean("sub-visibility", true)
-                view.mpv.setPropertyString("sub-ass", "yes")
+                if ((try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) != playbackTrackId) {
+                    view.mpv.setPropertyInt("sid", playbackTrackId)
+                }
+                subGuard.setPropertyBoolean("sub-visibility", true)
+                subGuard.setPropertyString("sub-ass", "yes")
                 // Keep the delay the user dialled in: re-selecting / auto-reselecting a track must
                 // never silently fall back to 0 while the UI still shows the old value.
-                view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+                subGuard.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
             }
             // Mark the new selection BEFORE recomputing/re-applying appearance below, so that
             // Override ASS/SSA (and every Typography/Colors value) is evaluated against the
@@ -4932,14 +4912,20 @@ class MpvPlayerController {
         try {
             val view = mpvView
             if (view != null && !isReleased) {
+                // No volume ducking here: audio must stay completely untouched when a subtitle changes.
+                // Only values that really differ are written to mpv (see SubtitlePropGuard), because every
+                // subtitle option write - even with the same value - makes libass rebuild its renderer and
+                // fonts on mpv's core thread, which is what starved the audio for a few milliseconds.
                 holdPreciseSeekForTrackSwitch()
-                duckAudioForTrackRefresh()
+                val subGuard = SubtitlePropGuard(view)
                 val playbackPrimaryTrackId = resolveAdvancedAssPlaybackId(primaryTrackId)
                 if (primaryTrackId <= 0) {
                     subtitleUsesGeneratedAss = false
-                    view.mpv.setPropertyBoolean("sub-visibility", false)
-                    view.mpv.setPropertyString("sid", "no")
-                    view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+                    subGuard.setPropertyBoolean("sub-visibility", false)
+                    if ((try { view.mpv.getPropertyString("sid") } catch (_: Throwable) { null }) != "no") {
+                        view.mpv.setPropertyString("sid", "no")
+                    }
+                    subGuard.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
                 } else {
                     subtitleUsesGeneratedAss = false
                     val trackCount = (try { view.mpv.getPropertyInt("track-list/count") } catch (_: Throwable) { null }) ?: 0
@@ -4951,23 +4937,29 @@ class MpvPlayerController {
                             break
                         }
                     }
-                    view.mpv.setPropertyInt("sid", playbackPrimaryTrackId)
-                    view.mpv.setPropertyBoolean("sub-visibility", true)
-                    view.mpv.setPropertyString("sub-ass", "yes")
-                    view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+                    if ((try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) != playbackPrimaryTrackId) {
+                        view.mpv.setPropertyInt("sid", playbackPrimaryTrackId)
+                    }
+                    subGuard.setPropertyBoolean("sub-visibility", true)
+                    subGuard.setPropertyString("sub-ass", "yes")
+                    subGuard.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
                 }
 
                 if (secondaryTrackId <= 0) {
-                    view.mpv.setPropertyString("secondary-sid", "no")
+                    if ((try { view.mpv.getPropertyString("secondary-sid") } catch (_: Throwable) { null }) != "no") {
+                        view.mpv.setPropertyString("secondary-sid", "no")
+                    }
                 } else {
-                    view.mpv.setPropertyInt("secondary-sid", secondaryTrackId)
-                    view.mpv.setPropertyBoolean("secondary-sub-visibility", true)
-                    view.mpv.setPropertyString("secondary-sub-ass-override", if (effectiveOverrideForTrack(secondaryTrackId)) "force" else "no")
+                    if ((try { view.mpv.getPropertyInt("secondary-sid") } catch (_: Throwable) { null }) != secondaryTrackId) {
+                        view.mpv.setPropertyInt("secondary-sid", secondaryTrackId)
+                    }
+                    subGuard.setPropertyBoolean("secondary-sub-visibility", true)
+                    subGuard.setPropertyString("secondary-sub-ass-override", if (effectiveOverrideForTrack(secondaryTrackId)) "force" else "no")
                     try {
-                        view.mpv.setPropertyDouble("secondary-sub-pos", 10.0)
+                        subGuard.setPropertyDouble("secondary-sub-pos", 10.0)
                     } catch (_: Throwable) {}
                     val secDelay = trackDelayMap[secondaryTrackId] ?: 0L
-                    view.mpv.setPropertyDouble("secondary-sub-delay", secDelay / 1000.0)
+                    subGuard.setPropertyDouble("secondary-sub-delay", secDelay / 1000.0)
                 }
 
                 // _subtitleTracks already reflects the new primary/secondary selection (set at
@@ -5425,8 +5417,9 @@ class MpvPlayerController {
                     loadedExternalSubtitles.add(filePath)
                 }
                 isSubtitleExplicitlyDisabled = false
-                view.mpv.setPropertyBoolean("sub-visibility", true)
-                view.mpv.setPropertyString("sub-ass", "yes")
+                val streamGuard = SubtitlePropGuard(view)
+                streamGuard.setPropertyBoolean("sub-visibility", true)
+                streamGuard.setPropertyString("sub-ass", "yes")
                 view.mpv.command("sub-add", filePath, if (select) "select" else "auto", origTitle)
                 refreshTracksAndChapters()
                 val activeSid = try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }
@@ -5481,21 +5474,24 @@ class MpvPlayerController {
             }
 
             isSubtitleExplicitlyDisabled = false
-            view.mpv.setPropertyString("sub-fonts-dir", fontsDir.absolutePath)
-            view.mpv.setPropertyBoolean("embeddedfonts", true)
-            view.mpv.setPropertyBoolean("sub-visibility", true)
-            view.mpv.setPropertyString("sub-ass", "yes")
-            view.mpv.setPropertyString("sub-ass-override", if (subtitleOverrideAssSsa) "force" else "no")
-            view.mpv.setPropertyString("sub-use-margins", "yes")
+            // Same-value subtitle option writes make libass rebuild its renderer/fonts on mpv's core thread
+            // (audio cut / silence while a subtitle is added), so only changed values are written.
+            val addGuard = SubtitlePropGuard(view)
+            addGuard.setPropertyString("sub-fonts-dir", fontsDir.absolutePath)
+            addGuard.setPropertyBoolean("embeddedfonts", true)
+            addGuard.setPropertyBoolean("sub-visibility", true)
+            addGuard.setPropertyString("sub-ass", "yes")
+            addGuard.setPropertyString("sub-ass-override", if (subtitleOverrideAssSsa) "force" else "no")
+            addGuard.setPropertyString("sub-use-margins", "yes")
             if (!subtitleOverrideAssSsa) {
-                view.mpv.setPropertyString("sub-ass-force-style", "")
+                addGuard.setPropertyString("sub-ass-force-style", "")
             }
             // Native ASS/SSA must reach libass with its own script intact.  Keep the override
             // mode neutral during the initial attach; the user's explicit override preference is
             // re-applied only after the real track id has been discovered.
             if (isNativeAss) {
-                view.mpv.setPropertyString("sub-ass-override", "no")
-                view.mpv.setPropertyString("sub-ass-force-style", "")
+                addGuard.setPropertyString("sub-ass-override", "no")
+                addGuard.setPropertyString("sub-ass-force-style", "")
             }
             // a subtitle added while the video is still opening (streams) would be refused by mpv: wait for the media first
             waitForMediaLoaded(view, 6_000L)

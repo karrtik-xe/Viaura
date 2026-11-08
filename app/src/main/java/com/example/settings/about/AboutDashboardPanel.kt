@@ -11,15 +11,23 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaCodecList
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.util.DisplayMetrics
 import android.view.Display
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -41,6 +49,7 @@ import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeviceHub
 import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Memory
@@ -51,6 +60,10 @@ import androidx.compose.material3.Icon
 import com.example.ui.i18n.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,6 +83,12 @@ import com.example.ui.state.UiState
 import com.example.ui.theme.AccentGradient
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Dedicated About Settings Screen Composable.
@@ -85,6 +104,11 @@ fun AboutSettingsPanel(
     lang: AppLanguage
 ) {
     val context = LocalContext.current
+
+    // UPI QR (opens when the UPI ID is tapped) + folder picker to save it as PNG
+    var showUpiQr by remember { mutableStateOf(false) }
+    var showUpiQrSavePicker by remember { mutableStateOf(false) }
+    val upiQrScope = rememberCoroutineScope()
 
     // Dynamically detected information (memoized safely)
     val displayInfo = remember(context) { detectDisplayInfo(context) }
@@ -332,7 +356,14 @@ fun AboutSettingsPanel(
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("upi_id_toggle")
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { showUpiQr = !showUpiQr }
+                            .padding(vertical = 2.dp)
+                    ) {
                         Text(
                             text = "UPI ID",
                             fontSize = 12.sp,
@@ -385,6 +416,60 @@ fun AboutSettingsPanel(
                     }
                 }
 
+                // QR code revealed below the UPI ID (tap the UPI ID to show / hide)
+                AnimatedVisibility(
+                    visible = showUpiQr,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Image(
+                            painter = painterResource(id = R.drawable.viaura_upi_qr),
+                            contentDescription = "UPI QR code",
+                            modifier = Modifier
+                                .testTag("upi_qr_image")
+                                .size(220.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Small "Save QR" button (opens the folder picker)
+                        Box(
+                            modifier = Modifier
+                                .testTag("save_upi_qr_button")
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isDark) Color(0x20FFFFFF) else Color(0x10000000))
+                                .border(1.dp, borderColor, RoundedCornerShape(12.dp))
+                                .clickable { showUpiQrSavePicker = true }
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                StyledIcon(
+                                    imageVector = Icons.Outlined.FileDownload,
+                                    contentDescription = null,
+                                    tint = primaryTextColor,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "Save QR",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = primaryTextColor
+                                )
+                            }
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 // Pay / Support Button (Universal UPI Intent)
@@ -433,6 +518,45 @@ fun AboutSettingsPanel(
                     }
                 }
             }
+        }
+
+        // DIRECTORY PICKER: save the UPI QR as a PNG into a folder chosen by the user
+        if (showUpiQrSavePicker) {
+            FloatingDirectoryPickerSheet(
+                action = DirectoryPickerAction.EXPORT_SETTINGS,
+                itemCount = 1,
+                itemDescription = "UPI QR image (PNG)",
+                isDark = isDark,
+                glassBlurTransparency = uiState.glassBlurTransparency,
+                customTitle = "Select Destination Folder",
+                customActionLabel = "Save Here",
+                customActionIcon = Icons.Outlined.FileDownload,
+                onConfirmTargetDir = { dir ->
+                    showUpiQrSavePicker = false
+                    upiQrScope.launch {
+                        val result = withContext(Dispatchers.IO) { saveUpiQrPngToDirectory(context, dir) }
+                        result.fold(
+                            onSuccess = { file ->
+                                val msg = when (lang) {
+                                    AppLanguage.ENGLISH -> "QR saved: ${file.name}"
+                                    AppLanguage.HINGLISH -> "QR save ho gaya: ${file.name}"
+                                    AppLanguage.HINDI -> "QR सेव हो गया: ${file.name}"
+                                }
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            },
+                            onFailure = { err ->
+                                val msg = when (lang) {
+                                    AppLanguage.ENGLISH -> "Could not save QR: ${err.localizedMessage ?: "Unknown error"}"
+                                    AppLanguage.HINGLISH -> "QR save nahi ho paya: ${err.localizedMessage ?: "Error"}"
+                                    AppLanguage.HINDI -> "QR सेव नहीं हो सका: ${err.localizedMessage ?: "त्रुटि"}"
+                                }
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            }
+                        )
+                    }
+                },
+                onDismiss = { showUpiQrSavePicker = false }
+            )
         }
 
         Spacer(modifier = Modifier.height(22.dp))
@@ -700,4 +824,45 @@ private fun AboutInfoRow(
             modifier = Modifier.weight(1f, fill = false)
         )
     }
+}
+
+/**
+ * Draws the bundled UPI QR vector (R.drawable.viaura_upi_qr) into a square bitmap.
+ * The vector already contains its own white background and quiet zone.
+ */
+private fun renderUpiQrBitmap(context: Context, sizePx: Int = 1024): Bitmap {
+    val drawable = ContextCompat.getDrawable(context, R.drawable.viaura_upi_qr)?.mutate()
+        ?: throw IllegalStateException("QR resource missing")
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    drawable.setBounds(0, 0, sizePx, sizePx)
+    drawable.draw(canvas)
+    return bitmap
+}
+
+/** Saves the UPI QR as a PNG into [dir] (never overwrites: Viaura_UPI_QR.png, Viaura_UPI_QR_1.png, ...). */
+private fun saveUpiQrPngToDirectory(context: Context, dir: File): Result<File> = runCatching {
+    if (!dir.exists()) dir.mkdirs()
+    if (!dir.isDirectory || !dir.canWrite()) throw IllegalStateException("Folder is not writable")
+    var target = File(dir, "Viaura_UPI_QR.png")
+    var n = 1
+    while (target.exists()) {
+        target = File(dir, "Viaura_UPI_QR_$n.png")
+        n++
+    }
+    val bitmap = renderUpiQrBitmap(context)
+    try {
+        FileOutputStream(target).use { out ->
+            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                throw IllegalStateException("PNG encode failed")
+            }
+        }
+    } finally {
+        bitmap.recycle()
+    }
+    try {
+        MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf("image/png"), null)
+    } catch (_: Throwable) { }
+    target
 }
