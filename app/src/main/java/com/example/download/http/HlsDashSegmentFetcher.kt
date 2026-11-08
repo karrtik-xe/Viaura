@@ -153,9 +153,14 @@ object SegmentFetch {
     /** Output file extension of the joined stream. */
     fun outputExt(part: PlanPart): String = if (part.protocol == "hls") "ts" else part.ext.ifBlank { "mp4" }
 
-    suspend fun download(context: Context, part: PlanPart, dest: File, token: CancelToken, counter: AtomicLong, connections: Int = 8) {
+    suspend fun download(
+        context: Context, part: PlanPart, dest: File, token: CancelToken, counter: AtomicLong, connections: Int = 8,
+        /** Receives the size the finished file will have: measured from the segments already downloaded, exact at the end. */
+        totalOut: AtomicLong? = null
+    ) {
         if (HttpFetch.isDone(dest)) {
             counter.set(dest.length())
+            totalOut?.set(dest.length())
             return
         }
         withContext(Dispatchers.IO) {
@@ -176,11 +181,18 @@ object SegmentFetch {
             val all = (listOfNotNull(init) + segments)
             val keys = ConcurrentHashMap<String, ByteArray>()
             var already = 0L
+            var alreadyCount = 0
             for (i in all.indices) {
                 val f = File(segDir, "s%06d".format(i))
-                if (f.exists()) already += f.length()
+                if (f.exists()) { already += f.length(); alreadyCount++ }
             }
             counter.set(already)
+            val finishedSegments = AtomicInteger(alreadyCount)
+            fun publishEstimate() {
+                val n = finishedSegments.get()
+                if (n > 0 && totalOut != null) totalOut.set(maxOf(counter.get(), counter.get() * all.size / n))
+            }
+            publishEstimate()
             val next = AtomicInteger(0)
             val lastProgress = AtomicLong(System.currentTimeMillis())
             coroutineScope {
@@ -201,6 +213,8 @@ object SegmentFetch {
                                     tmp.writeBytes(bytes)
                                     tmp.renameTo(f)
                                     counter.addAndGet(bytes.size.toLong())
+                                    finishedSegments.incrementAndGet()
+                                    publishEstimate()
                                     lastProgress.set(System.currentTimeMillis())
                                     break
                                 } catch (e: FetchCancelled) {
@@ -220,9 +234,9 @@ object SegmentFetch {
             }
             // join: the segments are copied into one file in their order
             val joined = File(dest.path + ".join")
-            BufferedOutputStream(FileOutputStream(joined), 1 shl 20).use { out ->
+            FileOutputStream(joined).use { out ->
                 for (i in all.indices) {
-                    File(segDir, "s%06d".format(i)).inputStream().use { it.copyTo(out, 1 shl 20) }
+                    FastFileCopy.copy(File(segDir, "s%06d".format(i)), out)
                 }
             }
             dest.delete()
@@ -230,6 +244,46 @@ object SegmentFetch {
             segDir.deleteRecursively()
             File(dest.path + ".done").writeText("1")
             counter.set(dest.length())
+            totalOut?.set(dest.length())
+        }
+    }
+
+    /**
+     * Size a segmented stream will really have, without downloading it: a few segments spread over the whole stream are measured
+     * (one tiny request each) and the average is multiplied by the segment count. The segment bitrate that a website lists is only
+     * a peak value, so a size computed from it is much too big - this is measured from the real files. -1 = could not be measured.
+     */
+    fun estimateSize(context: Context, part: PlanPart): Long {
+        return try {
+            val token = CancelToken()
+            val segments: List<String>
+            var fixed = 0L
+            var ranged: List<Segment>? = null
+            if (part.protocol == "hls") {
+                val pl = parseHls(context, part.url, part.headers, token)
+                ranged = pl.segments
+                segments = pl.segments.map { it.url }
+                pl.initSegment?.let { fixed = if (it.rangeLen > 0) it.rangeLen else HttpFetch.probeSize(context, it.url, part.headers).coerceAtLeast(0L) }
+                if (pl.segments.all { it.rangeLen > 0 }) return fixed + pl.segments.sumOf { it.rangeLen }
+            } else {
+                if (part.fragments.isEmpty()) return -1L
+                segments = part.fragments
+            }
+            if (segments.isEmpty()) return -1L
+            val picks = if (segments.size <= 5) segments.indices.toList()
+            else listOf(0, segments.size / 4, segments.size / 2, segments.size * 3 / 4, segments.size - 1)
+            var sum = 0L
+            var n = 0
+            for (i in picks.distinct()) {
+                val r = ranged?.getOrNull(i)
+                val size = if (r != null && r.rangeLen > 0) r.rangeLen else HttpFetch.probeSize(context, segments[i], part.headers)
+                if (size > 0L) { sum += size; n++ }
+            }
+            if (n == 0) -1L else fixed + (sum.toDouble() / n * segments.size).toLong()
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            -1L
         }
     }
 }

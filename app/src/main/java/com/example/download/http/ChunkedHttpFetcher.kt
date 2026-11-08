@@ -168,7 +168,19 @@ object HttpFetch {
         "The video server could not be reached (connection failed or timed out)."
     }
 
-    fun probeSize(context: Context, url: String, headers: Map<String, String>): Long = head(context, url, headers)?.size ?: -1L
+    /** Size of a file. One plain HEAD request answers it almost always; the slower HEAD + ranged pair is only the fallback. */
+    fun probeSize(context: Context, url: String, headers: Map<String, String>): Long {
+        try {
+            val len = call(context, request(url, headers).newBuilder().head().build(), null) { r ->
+                if (r.code !in 200..299) -1L else (r.header("Content-Length")?.toLongOrNull() ?: -1L)
+            }
+            if (len > 0L) return len
+        } catch (e: FetchCancelled) {
+            throw e
+        } catch (_: Throwable) {
+        }
+        return head(context, url, headers)?.size ?: -1L
+    }
 
     private fun failFor(code: Int, url: String): IOException =
         if (code == 403 || code == 404 || code == 410) LinkExpiredException("HTTP $code") else HttpStatusException(code, "HTTP $code")
@@ -215,6 +227,7 @@ object HttpFetch {
             markDone(dest)
             File(dest.path + ".chunks").delete()
             counter.set(dest.length())
+            totalOut?.set(dest.length())
         }
     }
 

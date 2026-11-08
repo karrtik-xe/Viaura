@@ -130,14 +130,17 @@ fun DownloadOptionsSheet(
     LaunchedEffect(url, attempt) {
         state = ProbeState.Loading
         // the panel opens as soon as the website has answered; exact sizes are measured right after and fill in by themselves
-        val r = MediaProbe.probe(context, url, headers, measureSizes = false)
+        val r = MediaProbe.probe(context, url, headers, measureSizes = false, useCache = attempt == 0)
         state = r.fold(
             onSuccess = { ProbeState.Ready(it) },
             onFailure = { ProbeState.Failed(it.message?.lineSequence()?.firstOrNull { l -> l.isNotBlank() }?.take(200) ?: "This link can't be downloaded") }
         )
         r.getOrNull()?.let { raw ->
             val measured = MediaProbe.refineSizes(context, raw)
-            if (measured != raw) state = ProbeState.Ready(measured)
+            if (measured != raw) {
+                state = ProbeState.Ready(measured)
+                MediaProbe.remember(url, headers, false, measured)
+            }
         }
     }
 

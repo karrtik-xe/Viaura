@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import com.example.download.FastFileCopy
 import java.io.File
 
 /**
@@ -58,11 +59,16 @@ object DownloadFileSaver {
                 }
                 val uri = resolver.insert(collection, values) ?: return null
                 try {
-                    resolver.openOutputStream(uri)?.use { out ->
-                        src.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
-                    } ?: run {
-                        resolver.delete(uri, null, null)
-                        return null
+                    val pfd = try { resolver.openFileDescriptor(uri, "w") } catch (_: Throwable) { null }
+                    if (pfd != null) {
+                        android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { out -> FastFileCopy.copy(src, out) }
+                    } else {
+                        resolver.openOutputStream(uri)?.use { out ->
+                            src.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                        } ?: run {
+                            resolver.delete(uri, null, null)
+                            return null
+                        }
                     }
                 } catch (t: Throwable) {
                     try { resolver.delete(uri, null, null) } catch (_: Throwable) {}
@@ -88,7 +94,7 @@ object DownloadFileSaver {
                     target = File(dir, if (ext.isEmpty()) "$base ($n)" else "$base ($n).$ext")
                     n++
                 }
-                src.copyTo(target, overwrite = false, bufferSize = 1 shl 20)
+                java.io.FileOutputStream(target).use { out -> FastFileCopy.copy(src, out) }
                 MediaScannerConnection.scanFile(app, arrayOf(target.absolutePath), arrayOf(mime), null)
                 Saved(target.absolutePath, Uri.fromFile(target).toString(), target.length())
             }

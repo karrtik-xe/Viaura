@@ -173,6 +173,14 @@ object YtdlpManager {
             add("--skip-download")
             add("--no-warnings")
             add("--no-progress")
+            // a slow or dead server must not hold the whole panel back for minutes
+            add("--socket-timeout")
+            add("15")
+            add("--extractor-retries")
+            add("2")
+            // YouTube: skip building the list of machine-translated caption languages (hundreds of entries nobody downloads)
+            add("--extractor-args")
+            add("youtube:skip=translated_subs")
             preferences.customUserAgent.get().takeIf(String::isNotBlank)?.let {
               add("--user-agent")
               add(it)

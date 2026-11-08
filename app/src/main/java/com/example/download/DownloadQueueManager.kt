@@ -326,7 +326,7 @@ object DownloadManager {
 
     /** Fresh addresses for the streams of [plan]: links of a website expire after a few hours. */
     private suspend fun refreshLinks(app: Context, plan: DownloadPlan): DownloadPlan? {
-        val info = MediaProbe.probe(app, plan.pageUrl).getOrNull() ?: return null
+        val info = MediaProbe.probe(app, plan.pageUrl, useCache = false).getOrNull() ?: return null
         val formats = (info.videos.map { it.format } + info.audioTracks.map { it.format } + info.audioQualities.map { it.format }).distinctBy { it.id }
         val byId = formats.associateBy { it.id }
         var changed = false
@@ -392,7 +392,7 @@ object DownloadManager {
                     val currentSpeed = speed
                     DownloadStore.update(app, id) {
                         if (it.status != DownloadStatus.DOWNLOADING) it else {
-                            val total = if (allKnown) knownTotal else maxOf(it.totalBytes, done)
+                            val total = if (allKnown) maxOf(knownTotal, done) else maxOf(it.totalBytes, done)
                             val eta = if (currentSpeed > 1.0 && total > done) ((total - done) / currentSpeed).toLong() else -1L
                             it.copy(downloadedBytes = done, totalBytes = total, speedBps = currentSpeed.toLong(), etaSec = eta, note = null)
                         }
@@ -411,7 +411,7 @@ object DownloadManager {
                                     if (part.protocol == "http") {
                                         HttpFetch.download(app, part, dest, token, counters[i], totals[i], 4)
                                     } else {
-                                        SegmentFetch.download(app, part, dest, token, counters[i], 6)
+                                        SegmentFetch.download(app, part, dest, token, counters[i], 6, totals[i])
                                     }
                                 }
                             }.awaitAll()
@@ -433,7 +433,8 @@ object DownloadManager {
         // from here on the transfer is over: PROCESSING can no longer be interrupted
         val doneBytes = counters.sumOf { it.get() }
         DownloadStore.update(app, id, persist = true) {
-            it.copy(status = DownloadStatus.PROCESSING, downloadedBytes = maxOf(it.downloadedBytes, doneBytes), speedBps = 0L, etaSec = -1L, note = "Finishing…")
+            // the transfer is complete: the total becomes the real number of bytes that were downloaded, so the bar ends exactly at 100 %
+            it.copy(status = DownloadStatus.PROCESSING, downloadedBytes = doneBytes, totalBytes = if (doneBytes > 0L) doneBytes else it.totalBytes, speedBps = 0L, etaSec = -1L, note = "Finishing…")
         }
         val finalPlan = plan
         withContext(Dispatchers.IO) { process(app, id, finalPlan, workDir) }

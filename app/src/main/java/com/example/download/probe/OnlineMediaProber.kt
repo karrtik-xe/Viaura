@@ -287,10 +287,42 @@ object MediaProbe {
         /** Playback only needs the streams, not their sizes: skipping the size requests makes a link open sooner. */
         forPlayback: Boolean = false,
         /** false = return as soon as the website answered; the real sizes are then measured separately with [refineSizes]. */
-        measureSizes: Boolean = true
+        measureSizes: Boolean = true,
+        /** false = always ask the website again (a retry, or fresh addresses for a download whose links expired). */
+        useCache: Boolean = true
     ): Result<LinkInfo> =
         withContext(Dispatchers.IO) {
             val app = context.applicationContext
+            if (useCache) cached(url, extraHeaders, forPlayback)?.let { return@withContext Result.success(it) }
+            val result = probeUncached(app, url, extraHeaders, forPlayback, measureSizes)
+            result.getOrNull()?.let { remember(url, extraHeaders, forPlayback, it) }
+            result
+        }
+
+    // The answer of a website (qualities + addresses) stays valid for a good while: opening the same link again shows the sheet at once.
+    private class CacheEntry(val info: LinkInfo, val at: Long)
+    private val infoCache = object : LinkedHashMap<String, CacheEntry>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>?): Boolean = size > 24
+    }
+    private const val CACHE_TTL_MS = 8 * 60_000L
+
+    private fun cacheKey(url: String, headers: Map<String, String>, forPlayback: Boolean) =
+        url + "\u0000" + headers.entries.sortedBy { it.key }.joinToString("&") { it.key + "=" + it.value } + "\u0000" + forPlayback
+
+    private fun cached(url: String, headers: Map<String, String>, forPlayback: Boolean): LinkInfo? = synchronized(infoCache) {
+        val e = infoCache[cacheKey(url, headers, forPlayback)] ?: return null
+        if (System.currentTimeMillis() - e.at > CACHE_TTL_MS) { infoCache.remove(cacheKey(url, headers, forPlayback)); null } else e.info
+    }
+
+    /** Also used by the sheet to store the version whose sizes were measured. */
+    fun remember(url: String, headers: Map<String, String>, forPlayback: Boolean, info: LinkInfo) {
+        synchronized(infoCache) { infoCache[cacheKey(url, headers, forPlayback)] = CacheEntry(info, System.currentTimeMillis()) }
+    }
+
+    private suspend fun probeUncached(
+        app: Context, url: String, extraHeaders: Map<String, String>, forPlayback: Boolean, measureSizes: Boolean
+    ): Result<LinkInfo> =
+        withContext(Dispatchers.IO) {
             try {
                 val uri = Uri.parse(url)
                 val isDirect = com.example.ytdlp.YtdlpUrlRules.isDirectMediaUrl(uri) && !url.contains(".m3u8", true) && !url.contains(".mpd", true)
@@ -422,19 +454,34 @@ object MediaProbe {
      * Same measuring as before (one tiny ranged request per stream whose size is not exact), but all at once and with a time limit:
      * a stream whose host answers late keeps the size the website itself gave (shown as approximate) instead of holding the whole panel back.
      */
-    suspend fun refineSizes(app: Context, info: LinkInfo, budgetMs: Long = 4_000L): LinkInfo {
+    suspend fun refineSizes(app: Context, info: LinkInfo, budgetMs: Long = 8_000L): LinkInfo {
         fun needs(f: RawFormat) = f.sizeBytes <= 0L || f.sizeApprox
         val protoHttp = { f: RawFormat -> f.protocol.startsWith("http") && !f.protocol.contains("dash") && f.url.isNotBlank() }
-        val targets = (info.videos.map { it.format } + info.audioTracks.map { it.format } + info.audioQualities.map { it.format })
-            .filter { needs(it) && protoHttp(it) }.distinctBy { it.url }.take(40)
-        if (targets.isEmpty()) return info
+        // HLS / DASH streams: the website only lists a peak bitrate, so a size computed from it is far too big. A few real segments are measured instead.
+        val segmented = { f: RawFormat -> (f.protocol.contains("m3u8") || (f.protocol.contains("dash") && f.fragments.isNotEmpty())) && f.url.isNotBlank() }
+        val all = (info.videos.map { it.format } + info.audioTracks.map { it.format } + info.audioQualities.map { it.format })
+        val targets = all.filter { needs(it) && protoHttp(it) }.distinctBy { it.url }.take(40)
+        val segTargets = all.filter { needs(it) && segmented(it) }.distinctBy { it.id + it.url }.take(16)
+        if (targets.isEmpty() && segTargets.isEmpty()) return info
         val sizes = java.util.concurrent.ConcurrentHashMap<String, Long>()
-        val jobs = targets.map { f -> sizeScope.launch { sizes[f.url] = HttpFetch.probeSize(app, f.url, f.headers) } }
+        val estimates = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        val jobs = targets.map { f -> sizeScope.launch { sizes[f.url] = HttpFetch.probeSize(app, f.url, f.headers) } } +
+            segTargets.map { f ->
+                sizeScope.launch {
+                    val part = partOf(f, "video", "", "")
+                    val e = SegmentFetch.estimateSize(app, part)
+                    if (e > 0L) estimates[f.id + f.url] = e
+                }
+            }
         kotlinx.coroutines.withTimeoutOrNull(budgetMs) { jobs.forEach { it.join() } }
         jobs.forEach { if (it.isActive) it.cancel() }
         fun upd(f: RawFormat): RawFormat {
-            val s = sizes[f.url] ?: return f
-            return if (s > 0L) f.copy(sizeBytes = s, sizeApprox = false) else f
+            val s = sizes[f.url]
+            if (s != null && s > 0L) return f.copy(sizeBytes = s, sizeApprox = false)
+            val e = estimates[f.id + f.url]
+            // measured from real segments: shown with "~", and the download itself then measures the exact total while it runs
+            if (e != null && e > 0L) return f.copy(sizeBytes = e, sizeApprox = true)
+            return f
         }
         return info.copy(
             videos = info.videos.map { v -> val nf = upd(v.format); v.copy(format = nf, sizeBytes = nf.sizeBytes, sizeApprox = nf.sizeApprox) },

@@ -612,12 +612,15 @@ object MkvMuxer {
                 0x1A45DFA3,
                 cat(u(0x4286, 1), u(0x42F7, 1), u(0x42F2, 4), u(0x42F3, 8), s(0x4282, "matroska"), u(0x4287, 4), u(0x4285, 2))
             )
-            BufferedOutputStream(FileOutputStream(out), 1 shl 20).use { o ->
-                o.write(ebmlHeader)
-                o.write(idBytes(0x18538067L)); o.write(size8(segmentPayload))
-                o.write(seekHead(positions))
-                for (e in finalElements) o.write(e)
-                clustersFile.inputStream().use { it.copyTo(o, 1 shl 20) }
+            FileOutputStream(out).use { fo ->
+                val head = ByteArrayOutputStream()
+                head.write(ebmlHeader)
+                head.write(idBytes(0x18538067L)); head.write(size8(segmentPayload))
+                head.write(seekHead(positions))
+                for (e in finalElements) head.write(e)
+                fo.write(head.toByteArray())
+                // the clusters (the whole video) are handed over by the kernel instead of being copied through a Java buffer
+                FastFileCopy.copy(clustersFile, fo)
             }
             clustersFile.delete()
             onProgress(1f)
