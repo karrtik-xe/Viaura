@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.wifi.WifiManager
 import android.os.PowerManager
 import android.util.Log
+import com.example.download.AudioTranscoder
 import com.example.download.AudioTagger
 import com.example.download.CancelToken
 import com.example.download.DownloadPlan
@@ -506,15 +507,38 @@ object DownloadManager {
             val single = plan.parts.size == 1 && plan.parts.first().role == "muxed" && plan.parts.first().protocol == "http"
             val sniffed = if (single) ContainerSniffer.fromFile(partFiles.first()) else null
             val noExtras = subtitleFiles.isEmpty() && plan.chapters.isEmpty() && cover == null
-            val keepOriginal = single && sniffed != null && sniffed != "ts" && (noExtras || sniffed == "mkv")
+            // Opus / Vorbis sound is silent on most TVs: such a file (webm, mp4) is not kept as it is, its sound is converted to AAC below
+            val soundTvUnfriendly = single && sniffed != "mkv" && AudioTranscoder.needsAac(partFiles.first())
+            val keepOriginal = single && sniffed != null && sniffed != "ts" && (noExtras || sniffed == "mkv") && !soundTvUnfriendly
             if (keepOriginal) {
                 out = partFiles.first()
                 finalName = "$title.$sniffed"
                 if (!noExtras) note = "Saved as the original MKV (all tracks kept)"
             } else {
                 out = File(workDir, "out.mkv")
-                val sources = plan.parts.mapIndexed { i, p ->
-                    MuxSource(partFiles[i], p.role, p.label, p.language, p.isDefault || i == 0)
+                val sources = ArrayList<MuxSource>()
+                plan.parts.forEachIndexed { i, p ->
+                    val f = partFiles[i]
+                    val isDef = p.isDefault || i == 0
+                    // TVs and USB players play AAC everywhere, but often NOT Opus / Vorbis: picture without sound
+                    if (p.role != "video" && AudioTranscoder.needsAac(f)) {
+                        val aac = File(workDir, "aac$i.m4a")
+                        var lastNote = 0L
+                        val ok = AudioTranscoder.toAac(f, aac) { pr ->
+                            val now = System.currentTimeMillis()
+                            if (now - lastNote > 800L) {
+                                lastNote = now
+                                DownloadStore.update(app, id) { it.copy(note = "Making the sound TV-compatible… ${(pr * 100).toInt()}%") }
+                            }
+                        }
+                        if (ok) {
+                            if (p.role == "muxed") sources.add(MuxSource(f, "video", "", "", isDef))
+                            sources.add(MuxSource(aac, "audio", p.label, p.language, if (p.role == "muxed") true else isDef))
+                            return@forEachIndexed
+                        }
+                        aac.delete()
+                    }
+                    sources.add(MuxSource(f, p.role, p.label, p.language, isDef))
                 }
                 try {
                     var lastReport = 0L

@@ -152,6 +152,10 @@ object MediaProbe {
         }
         fun bestOf(list: List<RawFormat>): RawFormat =
             list.sortedWith(compareByDescending<RawFormat> { it.abr.takeIf { a -> a > 0 } ?: it.tbr }.thenBy { if (it.acodec.startsWith("mp4a")) 0 else 1 }).first()
+        // The audio that goes into a downloaded video: AAC first (plays on every TV / USB player), only then the higher bitrate.
+        // Opus (YouTube's biggest audio) is silent on many TVs when it sits in an MKV.
+        fun bestForVideo(list: List<RawFormat>): RawFormat =
+            list.sortedWith(compareBy<RawFormat> { if (it.acodec.startsWith("mp4a")) 0 else 1 }.thenByDescending { it.abr.takeIf { a -> a > 0 } ?: it.tbr }).first()
         var originalKey = groups.keys.firstOrNull { k -> groups[k]!!.any { it.note.contains("original", true) } }
         if (originalKey == null && groups.size > 1) {
             val maxPref = groups.values.maxOf { g -> g.maxOf { it.languagePreference } }
@@ -163,7 +167,7 @@ object MediaProbe {
         val usedNames = HashSet<String>()
         val orderedKeys = listOfNotNull(originalKey) + groups.keys.filter { it != originalKey }
         for (k in orderedKeys) {
-            val best = bestOf(groups[k]!!)
+            val best = bestForVideo(groups[k]!!)
             val isOriginal = k == originalKey
             var name = if (isOriginal) "Original" else languageName(best.language, best.note)
             var n = 2

@@ -16,6 +16,59 @@ class VideoPlayerMpvView @JvmOverloads constructor(
     attrs: AttributeSet? = null
 ) : BaseMPVView(context, attrs) {
 
+    companion object {
+        /** The mpv view that is playing right now (used to hand keyboard / remote keys to mpv's input.conf). */
+        @Volatile
+        var current: java.lang.ref.WeakReference<VideoPlayerMpvView>? = null
+
+        /**
+         * Settings > Advanced > input.conf: a key of a hardware keyboard / remote is given to mpv, which runs the command bound to it
+         * in input.conf. Returns true when the key was handed over (so the app does not use it a second time).
+         */
+        fun forwardKey(context: Context, event: android.view.KeyEvent): Boolean {
+            if (event.action != android.view.KeyEvent.ACTION_DOWN) return false
+            val file = com.example.ui.state.AdvancedEngineSettings.inputConfFile(context)
+            if (!file.isFile || file.length() == 0L) return false
+            val view = current?.get() ?: return false
+            val name = mpvKeyName(event) ?: return false
+            return try {
+                view.mpv.command("keypress", name)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        private fun mpvKeyName(e: android.view.KeyEvent): String? {
+            val k = e.keyCode
+            return when (k) {
+                android.view.KeyEvent.KEYCODE_BACK, android.view.KeyEvent.KEYCODE_HOME, android.view.KeyEvent.KEYCODE_POWER,
+                android.view.KeyEvent.KEYCODE_VOLUME_UP, android.view.KeyEvent.KEYCODE_VOLUME_DOWN, android.view.KeyEvent.KEYCODE_VOLUME_MUTE,
+                android.view.KeyEvent.KEYCODE_APP_SWITCH, android.view.KeyEvent.KEYCODE_MENU -> null
+                android.view.KeyEvent.KEYCODE_SPACE -> "SPACE"
+                android.view.KeyEvent.KEYCODE_ENTER, android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> "ENTER"
+                android.view.KeyEvent.KEYCODE_ESCAPE -> "ESC"
+                android.view.KeyEvent.KEYCODE_TAB -> "TAB"
+                android.view.KeyEvent.KEYCODE_DEL -> "BS"
+                android.view.KeyEvent.KEYCODE_FORWARD_DEL -> "DEL"
+                android.view.KeyEvent.KEYCODE_INSERT -> "INS"
+                android.view.KeyEvent.KEYCODE_MOVE_HOME -> "HOME"
+                android.view.KeyEvent.KEYCODE_MOVE_END -> "END"
+                android.view.KeyEvent.KEYCODE_PAGE_UP -> "PGUP"
+                android.view.KeyEvent.KEYCODE_PAGE_DOWN -> "PGDWN"
+                android.view.KeyEvent.KEYCODE_DPAD_UP -> "UP"
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> "DOWN"
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> "LEFT"
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> "RIGHT"
+                in android.view.KeyEvent.KEYCODE_F1..android.view.KeyEvent.KEYCODE_F12 -> "F" + (k - android.view.KeyEvent.KEYCODE_F1 + 1)
+                else -> {
+                    val ch = e.unicodeChar
+                    if (ch > 32 && !Character.isISOControl(ch)) String(Character.toChars(ch)) else null
+                }
+            }
+        }
+    }
+
     var onSurfaceCreatedCallback: (() -> Unit)? = null
     var onSurfaceDestroyedCallback: (() -> Unit)? = null
     var onSurfaceChangedCallback: (() -> Unit)? = null
@@ -90,8 +143,11 @@ class VideoPlayerMpvView @JvmOverloads constructor(
         // yt-dlp bridge (ported from mpvRx): ytdl_hook paths must exist before init, but the hook stays OFF until
         // Viaura routes a link to yt-dlp (so NewPipe / HLS / direct streams are never hijacked by it).
         val self = java.lang.ref.WeakReference(this)
+        current = self
         com.example.ytdlp.YtdlpManager.mpvOptionSink = { name, value -> self.get()?.mpv?.setOptionString(name, value) }
         com.example.ytdlp.YtdlpManager.configureMpvHookBeforeInit(context)
+        // Settings > Advanced: user scripts are put into mpv's scripts folder, verbose logging is switched on (mpv.conf / input.conf are read by mpv itself)
+        com.example.ui.state.AdvancedEngineSettings.beforeMpvInit(context) { name, value -> mpv.setOptionString(name, value) }
         mpv.setOptionString("profile", "fast")
         // "fast" renders with bilinear scaling, which makes every 720p / 1080p video look soft on a phone screen.
         // Sharper upscaling (and a normal chroma scaler) costs very little and makes the real quality visible.
@@ -175,6 +231,8 @@ class VideoPlayerMpvView @JvmOverloads constructor(
 
     override fun postInitOptions() {
         mpv.setOptionString("save-position-on-quit", "no")
+        // "mpv.conf has priority": its options are applied again on top of the app's own start-up options
+        com.example.ui.state.AdvancedEngineSettings.afterMpvInit(context) { name, value -> mpv.setPropertyString(name, value) }
     }
 
     override fun observeProperties() {

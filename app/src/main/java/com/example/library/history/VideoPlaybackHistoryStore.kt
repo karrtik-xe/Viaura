@@ -123,6 +123,7 @@ object PlaybackHistoryManager {
         title: String = "",
         forceDiskWrite: Boolean = false
     ) {
+        if (!com.example.ui.state.AdvancedEngineSettings.recentlyPlayedEnabled(context)) return
         val candidateKeys = generateCandidateKeys(videoId, path, uriString, title)
         val primaryKey = candidateKeys.firstOrNull() ?: return
         if (primaryKey == "unknown") return
@@ -228,6 +229,8 @@ object PlaybackHistoryManager {
         title: String = "",
         durationMs: Long = 0L
     ) {
+        // Settings > Advanced > "Recently played" OFF: nothing is recorded
+        if (!com.example.ui.state.AdvancedEngineSettings.recentlyPlayedEnabled(context)) return
         ensureMemoryCacheLoaded(context)
         val candidateKeys = generateCandidateKeys(videoId, path, uriString, title)
         val primaryKey = candidateKeys.firstOrNull() ?: return

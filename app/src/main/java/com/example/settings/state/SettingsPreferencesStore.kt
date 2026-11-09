@@ -569,6 +569,8 @@ object SettingsPreferencesManager {
             .putBoolean(KEY_REMEMBER_SELECTED_AUDIO_TRACK, state.rememberSelectedAudioTrack)
             .apply()
         PlayerSettings.save(context, state.playerSettings)
+        // Settings > Advanced > Auto backup
+        AdvancedEngineSettings.scheduleAutoBackup(context, state)
     }
 
     fun loadSortField(context: Context, tabId: String = "home"): SortField {

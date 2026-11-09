@@ -166,6 +166,15 @@ fun AdvancedSettingsPanel(
                 )
             }
         }
+
+        // mpvRx-style advanced options: auto backup, mpv.conf / input.conf, scripts, data & cache, logging
+        AdvancedEngineSections(
+            uiState = uiState,
+            isDark = isDark,
+            cardBg = cardBg,
+            borderColor = borderColor,
+            lang = lang
+        )
     }
 
     // DIRECTORY PICKER: EXPORT MODE

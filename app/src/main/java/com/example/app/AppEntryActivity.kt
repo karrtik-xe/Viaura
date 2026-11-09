@@ -180,6 +180,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Settings > Advanced > input.conf: keys of a hardware keyboard / remote run the commands bound in input.conf while a video plays.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        try {
+            if (viewModel.currentScreenState.value == Screen.PLAYER &&
+                com.example.player.VideoPlayerMpvView.forwardKey(this, event)
+            ) return true
+        } catch (_: Throwable) {}
+        return super.dispatchKeyEvent(event)
+    }
+
     // Every new touch is reported to the page backdrop (Diwali sets off a firework wherever the screen is touched).
     override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
         try {
