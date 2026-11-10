@@ -545,6 +545,26 @@ object SubtitleFontManager {
     private class SystemFontEntry(val src: File, val ttcIndex: Int, val lang: String?, val isDefaultSans: Boolean)
 
     @Volatile private var systemFallbacks: List<SystemFallbackFont> = emptyList()
+
+    // The libass folder only holds the fonts it is certain to need. A fallback font that a subtitle really uses (e.g. Noto Sans Devanagari
+    // for a Hindi line) is linked into it at that moment, so libass finds exactly the font that was written into the subtitle by its name
+    // and never has to search through all fonts of the phone for a glyph.
+    @Volatile private var libassFontsDir: File? = null
+    private val exposedToLibass: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    private fun exposeToLibass(f: SystemFallbackFont) {
+        val dir = libassFontsDir ?: return
+        if (!exposedToLibass.add(f.link.name)) return
+        try {
+            val l = File(dir, f.link.name)
+            if (!l.exists()) {
+                l.delete()
+                android.system.Os.symlink(f.link.canonicalPath, l.absolutePath)
+            }
+        } catch (_: Throwable) {
+            exposedToLibass.remove(f.link.name)
+        }
+    }
     @Volatile private var systemFallbackKey: String? = null
     private val systemFallbackLock = Any()
 
@@ -581,6 +601,7 @@ object SubtitleFontManager {
             // (the phone's default font + the phone-language fonts) are also linked into sub_fonts. The rest is still
             // found by fontconfig by family name (their folders are in fonts.conf).
             val sysDir = File(fontsDir.parentFile ?: fontsDir, SYS_LINK_DIR_NAME).apply { mkdirs() }
+            libassFontsDir = fontsDir
             val built = try {
                 buildSystemFallbacks(sysDir, fontsDir, java.util.Locale.getDefault())
             } catch (t: Throwable) {
@@ -1076,7 +1097,7 @@ object SubtitleFontManager {
                 cp == 0x200D || cp == 0xA0 || Character.getType(cp) == Character.FORMAT.toInt()
             val target: SystemFallbackFont? = if (neutral) null else {
                 val cov = coverageFor(currentFont())
-                if (cov != null && !cov.covers(cp)) pickFallback(cp) else null
+                if (cov != null && !cov.covers(cp)) pickFallback(cp)?.also { exposeToLibass(it) } else null
             }
             if (neutral) {
                 // spaces / joiners stay in whatever font the previous character used

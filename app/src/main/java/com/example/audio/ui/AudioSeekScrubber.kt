@@ -102,8 +102,8 @@ fun InteractiveAudioScrubber(
     // After the finger is lifted the thumb stays on the spot that was chosen until the player has really arrived there
     // (otherwise it shows the old position for a moment, jumps back and then forward again).
     var holdMs by remember { mutableStateOf(-1L) }
-    LaunchedEffect(holdMs, currentPositionMs, isDragging) {
-        if (holdMs >= 0L && !isDragging) {
+    if (holdMs >= 0L && !isDragging) {
+        LaunchedEffect(holdMs, currentPositionMs) {
             if (kotlin.math.abs(currentPositionMs - holdMs) <= 1500L) holdMs = -1L
             else {
                 kotlinx.coroutines.delay(2500L)

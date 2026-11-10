@@ -208,7 +208,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
@@ -4334,8 +4333,8 @@ fun PlayerScrubberBar(
     var scrubFraction by remember { mutableFloatStateOf(0f) }
     var holdMs by remember { mutableLongStateOf(-1L) }
     var barWidthPx by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(holdMs, currentPositionMs, scrubDragging) {
-        if (holdMs >= 0L && !scrubDragging) {
+    if (holdMs >= 0L && !scrubDragging) {
+        LaunchedEffect(holdMs, currentPositionMs) {
             if (kotlin.math.abs(currentPositionMs - barOffsetMs - holdMs) <= 1500L) holdMs = -1L
             else {
                 kotlinx.coroutines.delay(2500L)
