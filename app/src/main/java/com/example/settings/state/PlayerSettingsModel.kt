@@ -53,8 +53,6 @@ data class PlayerSettings(
     val showBufferedRange: Boolean = true,
     val preciseSeeking: Boolean = true,
     val thumbFastPreview: Boolean = false,
-    /** Seek slider: a small rounded picture of the frame under the finger floats above the slider; the video itself is moved only when the finger is lifted. */
-    val seekFramePreview: Boolean = false,
 
     val customSkipDuration: Int = 90,
     val onlineSkipMarkers: Boolean = false,
@@ -236,7 +234,6 @@ data class PlayerSettings(
                     showBufferedRange = o.optBoolean("showBufferedRange", true),
                     preciseSeeking = o.optBoolean("preciseSeeking", true),
                     thumbFastPreview = o.optBoolean("thumbFastPreview", false),
-                    seekFramePreview = o.optBoolean("seekFramePreview", false),
                     customSkipDuration = o.optInt("customSkipDuration", 90).coerceIn(1, 600),
                     onlineSkipMarkers = o.optBoolean("onlineSkipMarkers", false),
                     markerProvider = o.optString("markerProvider", "ANISKIP"),
@@ -392,7 +389,6 @@ data class PlayerSettings(
             o.put("showBufferedRange", value.showBufferedRange)
             o.put("preciseSeeking", value.preciseSeeking)
             o.put("thumbFastPreview", value.thumbFastPreview)
-            o.put("seekFramePreview", value.seekFramePreview)
             o.put("customSkipDuration", value.customSkipDuration)
             o.put("onlineSkipMarkers", value.onlineSkipMarkers)
             o.put("markerProvider", value.markerProvider)

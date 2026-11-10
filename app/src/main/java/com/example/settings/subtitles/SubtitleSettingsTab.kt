@@ -1802,16 +1802,6 @@ internal fun GestureSettingsPanel(
             }
         }
 
-        PlayerSettingsCategory("Seek Slider", cardBg, borderColor, secondaryText) {
-            PlayerSwitchRow(
-                title = "Frame preview while sliding",
-                description = "A small rounded picture of the frame under your finger floats above the seek slider. The video keeps playing unchanged and jumps to that spot (and plays on) when you lift your finger.",
-                checked = settings.seekFramePreview,
-                primaryText = primaryText,
-                secondaryText = secondaryText
-            ) { onSettingsChange(settings.copy(seekFramePreview = it)) }
-        }
-
         PlayerSettingsCategory("Subtitle Gestures", cardBg, borderColor, secondaryText) {
             PlayerSwitchRow(
                 title = "Hold and drag moves subtitles",
@@ -2118,6 +2108,16 @@ internal fun PlayerSettingsPanel(
                 primaryText = primaryText,
                 secondaryText = secondaryText
             ) { onSettingsChange(settings.copy(preciseSeeking = it)) }
+
+            HorizontalDivider(color = borderColor)
+
+            PlayerSwitchRow(
+                title = "Use ThumbFast seek preview",
+                description = "Display rapid visual thumbnail preview while seek scrubbing",
+                checked = settings.thumbFastPreview,
+                primaryText = primaryText,
+                secondaryText = secondaryText
+            ) { onSettingsChange(settings.copy(thumbFastPreview = it)) }
         }
 
         PlayerSettingsCategory("Skip", cardBg, borderColor, secondaryText) {

@@ -56,23 +56,6 @@ object AudioPlaybackManager {
 
     private var mediaPlayer: MediaPlayer? = null
     private var progressJob: Job? = null
-
-    // MediaPlayer reports the OLD position until a seek has landed: publishing it made the seek bar jump back and forward again.
-    @Volatile private var seekPendingTargetMs = -1L
-    @Volatile private var seekPendingAt = 0L
-
-    /** true = [polled] may be shown. While a seek is pending a far-away (old) position is held back for at most 2.5 s. */
-    private fun acceptPolledPosition(polled: Long): Boolean {
-        val target = seekPendingTargetMs
-        if (target < 0L) return true
-        val age = System.currentTimeMillis() - seekPendingAt
-        val expected = target + if (_isPlaying.value) age else 0L
-        if (age > 2500L || kotlin.math.abs(polled - expected) <= 1200L) {
-            seekPendingTargetMs = -1L
-            return true
-        }
-        return false
-    }
     private var audioManager: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
 
@@ -1601,8 +1584,6 @@ object AudioPlaybackManager {
     fun seekTo(positionMs: Long) {
         val dur = _durationMs.value.coerceAtLeast(1L)
         val clamped = positionMs.coerceIn(0L, dur)
-        seekPendingTargetMs = clamped
-        seekPendingAt = System.currentTimeMillis()
         _currentPositionMs.value = clamped
         applicationContext?.let { ctx -> AudioPlaybackHistoryManager.savePosition(ctx, _currentTrack.value, clamped, _durationMs.value, force = true) }
         try {
@@ -1996,8 +1977,7 @@ object AudioPlaybackManager {
                 try {
                     mediaPlayer?.let { player ->
                         if (player.isPlaying) {
-                            val rawPos = player.currentPosition.toLong()
-                            val pos = if (acceptPolledPosition(rawPos)) rawPos else _currentPositionMs.value
+                            val pos = player.currentPosition.toLong()
                             _currentPositionMs.value = pos
                             val dur = player.duration.toLong()
                             if (dur > 0L) {

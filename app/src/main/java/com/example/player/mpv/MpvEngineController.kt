@@ -381,15 +381,37 @@ class MpvPlayerController {
     @Volatile private var seekPendingTargetMs = -1L
     @Volatile private var seekPendingAt = 0L
     @Volatile private var lastScrubSeekAt = 0L
+    /** 0 = a normal seek, 1 = scrubbing: a key frame was shown and the exact seek is still to come, 2 = that exact seek was sent. */
+    @Volatile private var seekStage = 0
+    @Volatile private var lastScrubIssueAt = 0L
     private var trailingExactSeekJob: kotlinx.coroutines.Job? = null
+    private var scrubIssueJob: kotlinx.coroutines.Job? = null
 
     private fun publishPolledPosition(realMs: Long, paused: Boolean) {
         val target = seekPendingTargetMs
         if (target >= 0L) {
-            val age = System.currentTimeMillis() - seekPendingAt
-            val expected = target + if (paused) 0L else age
-            if (age > 2500L || kotlin.math.abs(realMs - expected) <= 1200L) seekPendingTargetMs = -1L
-            else return
+            val now = System.currentTimeMillis()
+            val age = now - seekPendingAt
+            if (seekStage == 1) {
+                // scrubbing: the picture is a key frame that can be seconds away from the chosen spot, and the exact seek follows a moment
+                // later. Publishing the key frame's time made the bar jump back and then forward: the chosen spot stays shown until the
+                // exact seek has landed (safety: not longer than 3 s after the last scrub move)
+                if (now - lastScrubSeekAt <= 3000L) return
+                seekPendingTargetMs = -1L
+                seekStage = 0
+            } else {
+                val expected = target + if (paused) 0L else age
+                val landed = if (seekStage == 2) {
+                    // the exact seek has landed when the position lies between the chosen spot and where playback would be by now
+                    realMs >= target - 350L && realMs <= expected + 350L
+                } else {
+                    kotlin.math.abs(realMs - expected) <= 1200L
+                }
+                if (age > 2500L || landed) {
+                    seekPendingTargetMs = -1L
+                    seekStage = 0
+                } else return
+            }
         }
         _currentPositionMs.value = realMs
     }
@@ -2529,24 +2551,43 @@ class MpvPlayerController {
             // seek to the final spot follows as soon as the finger rests (a few ms after the last move)
             val scrubbing = now - lastScrubSeekAt < 250L
             lastScrubSeekAt = now
-            val mode = when {
-                scrubbing -> "absolute+keyframes"
-                preciseSeekingEnabled -> "absolute+exact"
-                else -> "absolute"
-            }
             seekPendingTargetMs = timeMs
             seekPendingAt = now
-            mpvView?.mpv?.command("seek", "$sec", mode)
             _currentPositionMs.value = timeMs
             trailingExactSeekJob?.cancel()
-            if (scrubbing) {
+            if (!scrubbing) {
+                seekStage = 0
+                scrubIssueJob?.cancel()
+                scrubIssueJob = null
+                mpvView?.mpv?.command("seek", "$sec", if (preciseSeekingEnabled) "absolute+exact" else "absolute")
+            } else {
+                seekStage = 1
+                // a finger sends 60-120 moves a second: mpv gets at most one key-frame seek every 45 ms (always the newest spot),
+                // so it is never flooded and the picture keeps following the finger smoothly
+                scrubIssueJob?.cancel()
+                val sinceIssue = now - lastScrubIssueAt
+                if (sinceIssue >= 45L) {
+                    lastScrubIssueAt = now
+                    scrubIssueJob = null
+                    mpvView?.mpv?.command("seek", "$sec", "absolute+keyframes")
+                } else {
+                    scrubIssueJob = playerScope.launch {
+                        kotlinx.coroutines.delay(45L - sinceIssue)
+                        lastScrubIssueAt = System.currentTimeMillis()
+                        try { mpvView?.mpv?.command("seek", "$sec", "absolute+keyframes") } catch (_: Throwable) {}
+                    }
+                }
+                // the finger rests: the exact frame of the chosen spot
                 trailingExactSeekJob = playerScope.launch {
                     kotlinx.coroutines.delay(160L)
                     try {
                         seekPendingTargetMs = timeMs
                         seekPendingAt = System.currentTimeMillis()
+                        seekStage = 2
                         mpvView?.mpv?.command("seek", "$sec", "absolute+exact")
-                    } catch (_: Throwable) {}
+                    } catch (_: Throwable) {
+                        seekStage = 0
+                    }
                 }
             }
             if (wasAtEof) {

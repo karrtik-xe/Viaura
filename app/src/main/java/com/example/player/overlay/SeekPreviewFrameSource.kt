@@ -32,7 +32,7 @@ class SeekPreviewFrameSource(
     @Volatile private var released = false
     private var retriever: MediaMetadataRetriever? = null
 
-    private fun key(ms: Long) = ms / 250L
+    private fun key(ms: Long) = ms / 120L
 
     fun request(targetMs: Long, deliver: (Bitmap) -> Unit) {
         if (released) return
@@ -73,7 +73,8 @@ class SeekPreviewFrameSource(
     }
 
     private fun publish(bmp: Bitmap, exact: Boolean, target: Long) {
-        if (exact) cache.put(key(target), bmp) else if (cache.get(key(target)) == null) cache.put(key(target), bmp)
+        // only exact frames are remembered: a key frame can be seconds away from the position and must never be shown again as "the frame of this spot"
+        if (exact) cache.put(key(target), bmp)
         val cb = synchronized(lock) { onFrame }
         main.post { if (!released) cb?.invoke(bmp) }
     }
