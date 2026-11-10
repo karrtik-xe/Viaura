@@ -99,7 +99,23 @@ fun InteractiveAudioScrubber(
 
     val safeDuration = durationMs.coerceAtLeast(1L)
     val actualFraction = (currentPositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
-    val displayFraction = if (isDragging) dragFraction else actualFraction
+    // After the finger is lifted the thumb stays on the spot that was chosen until the player has really arrived there
+    // (otherwise it shows the old position for a moment, jumps back and then forward again).
+    var holdMs by remember { mutableStateOf(-1L) }
+    LaunchedEffect(holdMs, currentPositionMs, isDragging) {
+        if (holdMs >= 0L && !isDragging) {
+            if (kotlin.math.abs(currentPositionMs - holdMs) <= 1500L) holdMs = -1L
+            else {
+                kotlinx.coroutines.delay(2500L)
+                holdMs = -1L
+            }
+        }
+    }
+    val displayFraction = when {
+        isDragging -> dragFraction
+        holdMs >= 0L -> (holdMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+        else -> actualFraction
+    }
 
     val displayedPositionMs = (displayFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
     // Animated track height on touch/hold/drag - Thick pill slider matching screenshot
@@ -151,6 +167,7 @@ fun InteractiveAudioScrubber(
                                     val release = tryAwaitRelease()
                                     if (release) {
                                         val finalMs = (dragFraction * safeDuration).toLong()
+                                        holdMs = finalMs
                                         onSeekTo(finalMs)
                                     }
                                     isDragging = false
@@ -168,6 +185,7 @@ fun InteractiveAudioScrubber(
                                 },
                                 onDragEnd = {
                                     val finalMs = (dragFraction * safeDuration).toLong()
+                                    holdMs = finalMs
                                     onSeekTo(finalMs)
                                     isDragging = false
                                 },

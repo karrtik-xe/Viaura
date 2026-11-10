@@ -374,6 +374,26 @@ class MpvPlayerController {
     @Volatile private var lastPausedForCache = false
     @Volatile private var lastSeekAt = 0L
 
+    // ---- smooth seeking ----
+    // mpv answers a seek asynchronously: until it has landed, "time-pos" still reports the OLD position. Publishing that made the
+    // seek bar jump back for a moment and then forward again. While a seek is pending the polled value is therefore not published
+    // until it is near where the seek is going to (or 2.5 s passed).
+    @Volatile private var seekPendingTargetMs = -1L
+    @Volatile private var seekPendingAt = 0L
+    @Volatile private var lastScrubSeekAt = 0L
+    private var trailingExactSeekJob: kotlinx.coroutines.Job? = null
+
+    private fun publishPolledPosition(realMs: Long, paused: Boolean) {
+        val target = seekPendingTargetMs
+        if (target >= 0L) {
+            val age = System.currentTimeMillis() - seekPendingAt
+            val expected = target + if (paused) 0L else age
+            if (age > 2500L || kotlin.math.abs(realMs - expected) <= 1200L) seekPendingTargetMs = -1L
+            else return
+        }
+        _currentPositionMs.value = realMs
+    }
+
     /** How many times the stream ran dry (seeks do not count) in the last [windowMs] milliseconds. */
     fun rebuffersWithin(windowMs: Long): Int {
         val limit = System.currentTimeMillis() - windowMs
@@ -1957,7 +1977,7 @@ class MpvPlayerController {
                                 }
                                 // Keep target position displayed until first positive position is reached
                             } else {
-                                _currentPositionMs.value = realMs
+                                publishPolledPosition(realMs, paused)
                             }
                             if (posSec >= 0.0) {
                                 // Online: show the buffering animation while mpv waits for the cache (e.g. after a long
@@ -2504,9 +2524,31 @@ class MpvPlayerController {
             val wasAtEof = _eofReached.value || (try { mpvView?.mpv?.getPropertyBoolean("eof-reached") } catch (_: Throwable) { null } == true)
             _eofReached.value = false
             val sec = timeMs / 1000.0
-            val mode = if (preciseSeekingEnabled) "absolute+exact" else "absolute"
+            val now = System.currentTimeMillis()
+            // seeks that follow each other quickly = the finger is scrubbing: nearest-keyframe seeks show a new picture at once, the exact
+            // seek to the final spot follows as soon as the finger rests (a few ms after the last move)
+            val scrubbing = now - lastScrubSeekAt < 250L
+            lastScrubSeekAt = now
+            val mode = when {
+                scrubbing -> "absolute+keyframes"
+                preciseSeekingEnabled -> "absolute+exact"
+                else -> "absolute"
+            }
+            seekPendingTargetMs = timeMs
+            seekPendingAt = now
             mpvView?.mpv?.command("seek", "$sec", mode)
             _currentPositionMs.value = timeMs
+            trailingExactSeekJob?.cancel()
+            if (scrubbing) {
+                trailingExactSeekJob = playerScope.launch {
+                    kotlinx.coroutines.delay(160L)
+                    try {
+                        seekPendingTargetMs = timeMs
+                        seekPendingAt = System.currentTimeMillis()
+                        mpvView?.mpv?.command("seek", "$sec", "absolute+exact")
+                    } catch (_: Throwable) {}
+                }
+            }
             if (wasAtEof) {
                 mpvView?.mpv?.setPropertyBoolean("pause", false)
                 _isPlaying.value = true

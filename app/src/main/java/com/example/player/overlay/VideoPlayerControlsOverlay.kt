@@ -4334,27 +4334,13 @@ fun PlayerScrubberBar(
     val previewScope = rememberCoroutineScope()
     var previewBitmap by remember(previewVideoUri, previewVideoPath) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var previewTargetMs by remember { mutableLongStateOf(0L) }
-    var previewJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val previewSource = remember(previewVideoUri, previewVideoPath) { SeekPreviewFrameSource(context, previewVideoUri, previewVideoPath) }
+    DisposableEffect(previewSource) { onDispose { previewSource.release() } }
 
     fun requestPreview(targetMs: Long) {
         if (!thumbFastPreview || barDurationMs <= 0L || isLiveStream) return
         previewTargetMs = targetMs.coerceIn(0L, barDurationMs)
-        previewJob?.cancel()
-        previewJob = previewScope.launch {
-            kotlinx.coroutines.delay(70L)
-            val bmp = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    val retriever = android.media.MediaMetadataRetriever()
-                    if (previewVideoUri != null) retriever.setDataSource(context, previewVideoUri)
-                    else if (!previewVideoPath.isNullOrBlank()) retriever.setDataSource(previewVideoPath)
-                    else return@withContext null
-                    val frame = retriever.getFrameAtTime(previewTargetMs * 1000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    retriever.release()
-                    frame
-                } catch (_: Throwable) { null }
-            }
-            previewBitmap = bmp
-        }
+        previewSource.request(previewTargetMs) { bmp -> previewBitmap = bmp }
     }
 
     Row(
