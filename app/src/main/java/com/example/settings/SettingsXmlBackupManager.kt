@@ -111,6 +111,7 @@ object ViauraSettingsXmlManager {
         writeSetting("showBufferedRange", p.showBufferedRange)
         writeSetting("preciseSeeking", p.preciseSeeking)
         writeSetting("thumbFastPreview", p.thumbFastPreview)
+        writeSetting("seekFramePreview", p.seekFramePreview)
         writeSetting("customSkipDuration", p.customSkipDuration)
         writeSetting("onlineSkipMarkers", p.onlineSkipMarkers)
         writeSetting("markerProvider", p.markerProvider)
@@ -524,6 +525,7 @@ object ViauraSettingsXmlManager {
                     showBufferedRange = getBool("showBufferedRange", basePlayer.showBufferedRange),
                     preciseSeeking = getBool("preciseSeeking", basePlayer.preciseSeeking),
                     thumbFastPreview = getBool("thumbFastPreview", basePlayer.thumbFastPreview),
+                    seekFramePreview = getBool("seekFramePreview", basePlayer.seekFramePreview),
                     customSkipDuration = getInt("customSkipDuration", basePlayer.customSkipDuration, 1, 600),
                     onlineSkipMarkers = getBool("onlineSkipMarkers", basePlayer.onlineSkipMarkers),
                     markerProvider = getStr("markerProvider", basePlayer.markerProvider),

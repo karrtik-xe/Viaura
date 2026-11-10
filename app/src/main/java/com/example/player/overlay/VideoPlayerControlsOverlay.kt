@@ -208,6 +208,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import com.example.ui.components.shadow
@@ -4317,16 +4319,41 @@ fun PlayerScrubberBar(
     val haptic = LocalHapticFeedback.current
     var lastScrubberHapticSec by remember { mutableLongStateOf(-1L) }
     val liquidControls = LocalLiquidGlassControls.current
-    val scrubberProgressFraction by remember(currentPositionMs, barDurationMs, barOffsetMs, isLiveStream) {
+    val playbackFraction by remember(currentPositionMs, barDurationMs, barOffsetMs, isLiveStream) {
         derivedStateOf {
             if (isLiveStream && barDurationMs <= 0L) 1f
             else if (barDurationMs > 0) ((currentPositionMs - barOffsetMs).toFloat() / barDurationMs.toFloat()).coerceIn(0f, 1f)
             else 0f
         }
     }
-    val currentScrubberTimeText by remember(currentPositionMs) {
+    // "Seek Slider > Frame preview while sliding": while the finger is down only the small picture above the slider follows it; the video
+    // behind is not touched and jumps to the chosen spot when the finger is lifted. Needs a local file to take the pictures from.
+    val deferredSeek = thumbFastPreview && !isLiveStream && barDurationMs > 0L &&
+        (previewVideoUri != null || !previewVideoPath.isNullOrBlank())
+    var scrubDragging by remember { mutableStateOf(false) }
+    var scrubFraction by remember { mutableFloatStateOf(0f) }
+    var holdMs by remember { mutableLongStateOf(-1L) }
+    var barWidthPx by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(holdMs, currentPositionMs, scrubDragging) {
+        if (holdMs >= 0L && !scrubDragging) {
+            if (kotlin.math.abs(currentPositionMs - barOffsetMs - holdMs) <= 1500L) holdMs = -1L
+            else {
+                kotlinx.coroutines.delay(2500L)
+                holdMs = -1L
+            }
+        }
+    }
+    // after the finger is lifted the thumb stays on the chosen spot until the video has arrived there (no jump back and forward)
+    val scrubberProgressFraction = when {
+        scrubDragging -> scrubFraction
+        holdMs >= 0L && barDurationMs > 0L -> (holdMs.toFloat() / barDurationMs.toFloat()).coerceIn(0f, 1f)
+        else -> playbackFraction
+    }
+    val scrubTargetMs = (scrubFraction * barDurationMs).toLong()
+    val baseScrubberTimeText by remember(currentPositionMs) {
         derivedStateOf { formatTimeShort(currentPositionMs) }
     }
+    val currentScrubberTimeText = if (scrubDragging) formatTimeShort(scrubTargetMs + barOffsetMs) else baseScrubberTimeText
     val durationScrubberTimeText by remember(barDurationMs) {
         derivedStateOf { formatTimeShort(barDurationMs) }
     }
@@ -4362,14 +4389,15 @@ fun PlayerScrubberBar(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .height(28.dp),
+                .height(28.dp)
+                .onSizeChanged { barWidthPx = it.width.toFloat() },
             contentAlignment = Alignment.Center
         ) {
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(28.dp)
-                    .pointerInput(barDurationMs, barOffsetMs, isLiveStream) {
+                    .pointerInput(barDurationMs, barOffsetMs, isLiveStream, deferredSeek) {
                         // live TV that cannot be seeked: the bar is display-only (no seek to 0 / no fake position)
                         if (isLiveStream && barDurationMs <= 0L) return@pointerInput
                         // Drag-to-scrub and tap-to-seek combined in one
@@ -4381,9 +4409,26 @@ fun PlayerScrubberBar(
                         kotlinx.coroutines.coroutineScope {
                             launch {
                                 detectHorizontalDragGestures(
-                                    onDragStart = {
+                                    onDragStart = { startOffset ->
                                         AppHaptics.performGestureStart(view, haptic)
+                                        if (deferredSeek) {
+                                            previewBitmap = null
+                                            scrubFraction = (startOffset.x / size.width).coerceIn(0f, 1f)
+                                            scrubDragging = true
+                                            requestPreview((scrubFraction * barDurationMs).toLong())
+                                        }
                                     },
+                                    onDragEnd = {
+                                        if (deferredSeek && scrubDragging) {
+                                            // finger lifted: now (and only now) the video goes there and plays on
+                                            val finalMs = (scrubFraction * barDurationMs).toLong()
+                                            holdMs = finalMs
+                                            scrubDragging = false
+                                            onSeekTo(finalMs + barOffsetMs)
+                                            notifyInteraction()
+                                        }
+                                    },
+                                    onDragCancel = { scrubDragging = false },
                                     onHorizontalDrag = { change, _ ->
                                         change.consume()
                                         val newFraction = (change.position.x / size.width).coerceIn(0f, 1f)
@@ -4394,7 +4439,11 @@ fun PlayerScrubberBar(
                                             lastScrubberHapticSec = currentSec
                                             AppHaptics.performTick(view, haptic)
                                         }
-                                        onSeekTo(targetMs + barOffsetMs)
+                                        if (deferredSeek) {
+                                            scrubFraction = newFraction
+                                        } else {
+                                            onSeekTo(targetMs + barOffsetMs)
+                                        }
                                         notifyInteraction()
                                     }
                                 )
@@ -4665,19 +4714,61 @@ fun PlayerScrubberBar(
                     }
                 }
             }
-        }
 
-        if (thumbFastPreview && previewBitmap != null) {
-            androidx.compose.foundation.Image(
-                bitmap = previewBitmap!!.asImageBitmap(),
-                contentDescription = "Seek preview",
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                modifier = Modifier
-                    .width(150.dp)
-                    .height(84.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.65f), RoundedCornerShape(10.dp))
-            )
+            // Small rounded picture above the slider while sliding ("Seek Slider > Frame preview while sliding")
+            if (scrubDragging && deferredSeek) {
+                val density = androidx.compose.ui.platform.LocalDensity.current
+                val boxSize = 96.dp
+                val boxPx = with(density) { boxSize.roundToPx() }
+                val gapPx = with(density) { 12.dp.roundToPx() }
+                androidx.compose.ui.window.Popup(
+                    alignment = Alignment.TopStart,
+                    offset = androidx.compose.ui.unit.IntOffset(0, -(boxPx + gapPx)),
+                    properties = androidx.compose.ui.window.PopupProperties(focusable = false, clippingEnabled = false)
+                ) {
+                    // this popup is as wide as the slider and stays where it is; only the picture inside moves with the finger
+                    Box(modifier = Modifier.width(with(density) { barWidthPx.toDp() }).height(boxSize)) {
+                        val x = (scrubFraction * barWidthPx - boxPx / 2f)
+                            .coerceIn(0f, (barWidthPx - boxPx).coerceAtLeast(0f))
+                            .toInt()
+                        val shape = RoundedCornerShape(26.dp)
+                        Box(
+                            modifier = Modifier
+                                .offset { androidx.compose.ui.unit.IntOffset(x, 0) }
+                                .size(boxSize)
+                                .shadow(12.dp, shape)
+                                .clip(shape)
+                                .background(Color(0xFF12151B))
+                                .border(1.4.dp, Color.White.copy(alpha = 0.75f), shape)
+                        ) {
+                            val frame = previewBitmap
+                            if (frame != null) {
+                                androidx.compose.foundation.Image(
+                                    bitmap = frame.asImageBitmap(),
+                                    contentDescription = "Seek preview",
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 7.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color.Black.copy(alpha = 0.55f))
+                                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = formatTimeShort(scrubTargetMs + barOffsetMs),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.width(10.dp))

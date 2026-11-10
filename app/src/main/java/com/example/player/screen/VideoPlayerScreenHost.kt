@@ -3788,7 +3788,7 @@ private fun VideoPlayerScreenImpl(
                     else switchOnlineQuality(label)
                 },
                 showBufferedRange = uiState.playerSettings.showBufferedRange || currentVideo?.isOnline == true,
-                thumbFastPreview = uiState.playerSettings.thumbFastPreview,
+                thumbFastPreview = uiState.playerSettings.seekFramePreview, // "Seek Slider > Frame preview while sliding"
                 previewVideoUri = currentVideo?.uri,
                 previewVideoPath = currentVideo?.path,
                 onSeekToChapter = @androidx.compose.runtime.DontMemoize { chap ->
