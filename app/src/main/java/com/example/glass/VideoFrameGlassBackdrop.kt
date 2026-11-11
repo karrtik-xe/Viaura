@@ -93,14 +93,22 @@ fun VideoGlassSampler(
     source: VideoGlassSource?,
     active: Boolean,
     playing: Boolean,
-    capture: ((Bitmap, (Boolean) -> Unit) -> Unit)?
+    capture: ((Bitmap, (Boolean) -> Unit) -> Unit)?,
+    /** true while the controls fade in / out: one picture is taken, then no more until the animation is over (no GPU work during it). */
+    settling: Boolean = false
 ) {
     if (source == null || capture == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    val settlingNow by androidx.compose.runtime.rememberUpdatedState(settling)
     LaunchedEffect(source, active, playing) {
         if (!active) return@LaunchedEffect
         var bitmaps = arrayOfNulls<Bitmap>(2)
         var index = 0
+        var tookFirst = false
         while (isActive) {
+            if (tookFirst && settlingNow) {
+                delay(50L)
+                continue
+            }
             source.refreshBounds()
             val b = source.bounds
             if (b.width > 8f && b.height > 8f) {
@@ -128,11 +136,12 @@ fun VideoGlassSampler(
                     if (ok) {
                         source.frame = target.asImageBitmap()
                         index = 1 - index
+                        tookFirst = true
                     }
                 }
             }
             // ~12 fps while playing; a paused picture does not change, so it is refreshed only rarely
-            delay(if (playing) 140L else 600L)
+            delay(if (playing) 180L else 600L)
         }
     }
 }
