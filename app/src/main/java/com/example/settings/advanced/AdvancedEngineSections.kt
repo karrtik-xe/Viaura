@@ -13,7 +13,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.draw.shadow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -358,18 +357,18 @@ fun AdvancedEngineSections(
     }
 
     if (confirmClearHistory) {
-        ConfirmGlassDialog(
-            title = tr(lang, "Clear playback history?", "Playback history clear karein?", "प्लेबैक हिस्ट्री साफ़ करें?"),
-            message = tr(lang, "Recently played and all resume positions will be removed.", "Recently played aur saari resume positions hat jayengi.", "रीसेंटली प्लेड और सभी रिज़्यूम पोज़िशन हट जाएँगी।"),
-            confirmLabel = tr(lang, "Clear", "Clear", "साफ़ करें"),
-            cancelLabel = tr(lang, "Cancel", "Cancel", "रद्द करें"),
-            isDark = isDark,
-            onConfirm = {
-                confirmClearHistory = false
-                AdvancedEngineSettings.clearPlaybackHistory(context)
-                toast(tr(lang, "Playback history cleared", "Playback history clear ho gayi", "प्लेबैक हिस्ट्री साफ़ हुई"))
+        AlertDialog(
+            onDismissRequest = { confirmClearHistory = false },
+            title = { Text(tr(lang, "Clear playback history?", "Playback history clear karein?", "प्लेबैक हिस्ट्री साफ़ करें?")) },
+            text = { Text(tr(lang, "Recently played and all resume positions will be removed.", "Recently played aur saari resume positions hat jayengi.", "रीसेंटली प्लेड और सभी रिज़्यूम पोज़िशन हट जाएँगी।")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClearHistory = false
+                    AdvancedEngineSettings.clearPlaybackHistory(context)
+                    toast(tr(lang, "Playback history cleared", "Playback history clear ho gayi", "प्लेबैक हिस्ट्री साफ़ हुई"))
+                }) { Text(tr(lang, "Clear", "Clear", "साफ़ करें")) }
             },
-            onDismiss = { confirmClearHistory = false }
+            dismissButton = { TextButton(onClick = { confirmClearHistory = false }) { Text(tr(lang, "Cancel", "Cancel", "रद्द करें")) } }
         )
     }
 }
@@ -377,47 +376,6 @@ fun AdvancedEngineSections(
 // ============================================================================================================
 // dialogs
 // ============================================================================================================
-
-/**
- * The surface of every popup of this page: exactly the background of the Settings dashboard behind it.
- * Liquid Glass ON  = the same frosted liquid-glass panel; OFF = the normal panel colour of the dashboard.
- */
-@Composable
-private fun EngineGlassSurface(isDark: Boolean, modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
-    val shape = RoundedCornerShape(32.dp)
-    val transparency = LocalPanelTransparency.current
-    val border = if (isDark) DarkGlassBorder else LightGlassBorder
-    Box(
-        modifier = modifier.liquidGlassOr(shape, isDark, transparency, elevation = 24.dp) {
-            this
-                .shadow(
-                    elevation = 18.dp,
-                    shape = shape,
-                    ambientColor = Color.Black.copy(alpha = 0.22f),
-                    spotColor = Color.Black.copy(alpha = 0.30f)
-                )
-                .clip(shape)
-                .background(glassPanelColor(isDark, transparency))
-                .border(1.2.dp, border, shape)
-        },
-        content = content
-    )
-}
-
-@Composable
-private fun EngineDialogButton(label: String, filled: Boolean, secondary: Color, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(16.dp)
-    Box(
-        modifier = Modifier
-            .clip(shape)
-            .then(if (filled) Modifier.background(AccentGradient, shape) else Modifier)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(label, fontSize = 13.5.sp, fontWeight = FontWeight.Bold, color = if (filled) Color.White else secondary)
-    }
-}
 
 @Composable
 private fun ConfigEditorDialog(
@@ -427,57 +385,27 @@ private fun ConfigEditorDialog(
     var text by remember { mutableStateOf(initial) }
     val primary = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
-    val border = if (isDark) DarkGlassBorder else LightGlassBorder
-    LiquidGlassDialog(isDark = isDark, onDismissRequest = onDismiss) {
-        EngineGlassSurface(isDark, Modifier.fillMaxWidth().widthIn(max = 460.dp).fillMaxHeight(0.84f)) {
-            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 20.dp)) {
-                Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = primary)
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = if (isDark) Color(0xFF14161C) else Color(0xFFF6F7FA),
+            modifier = Modifier.fillMaxWidth(0.96f).fillMaxHeight(0.88f)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = primary)
                 Spacer(Modifier.height(4.dp))
                 Text(hint, fontSize = 11.5.sp, color = secondary, lineHeight = 16.sp)
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp),
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = primary),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AccentSkyBlue,
-                        unfocusedBorderColor = border,
-                        focusedContainerColor = Color.Black.copy(alpha = if (isDark) 0.20f else 0.04f),
-                        unfocusedContainerColor = Color.Black.copy(alpha = if (isDark) 0.14f else 0.03f),
-                        cursorColor = AccentSkyBlue
-                    )
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(vertical = 10.dp),
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = primary)
                 )
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    EngineDialogButton(tr(lang, "Clear", "Clear", "साफ़ करें"), false, secondary) { text = "" }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { text = "" }) { Text(tr(lang, "Clear", "Clear", "साफ़ करें")) }
                     Spacer(Modifier.weight(1f))
-                    EngineDialogButton(tr(lang, "Cancel", "Cancel", "रद्द करें"), false, secondary, onDismiss)
-                    Spacer(Modifier.width(6.dp))
-                    EngineDialogButton(tr(lang, "Save", "Save", "सहेजें"), true, secondary) { onSave(text) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConfirmGlassDialog(
-    title: String, message: String, confirmLabel: String, cancelLabel: String, isDark: Boolean,
-    onConfirm: () -> Unit, onDismiss: () -> Unit
-) {
-    val primary = if (isDark) DarkTextPrimary else LightTextPrimary
-    val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
-    LiquidGlassDialog(isDark = isDark, onDismissRequest = onDismiss) {
-        EngineGlassSurface(isDark, Modifier.fillMaxWidth().widthIn(max = 380.dp)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 22.dp)) {
-                Text(title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = primary)
-                Spacer(Modifier.height(8.dp))
-                Text(message, fontSize = 13.sp, color = secondary, lineHeight = 18.sp)
-                Spacer(Modifier.height(16.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                    EngineDialogButton(cancelLabel, false, secondary, onDismiss)
-                    Spacer(Modifier.width(6.dp))
-                    EngineDialogButton(confirmLabel, true, secondary, onConfirm)
+                    TextButton(onClick = onDismiss) { Text(tr(lang, "Cancel", "Cancel", "रद्द करें")) }
+                    TextButton(onClick = { onSave(text) }) { Text(tr(lang, "Save", "Save", "सहेजें")) }
                 }
             }
         }
@@ -509,29 +437,25 @@ private fun ScriptsManagerDialog(
             Toast.makeText(context, tr(lang, "Could not add the script", "Script add nahi ho payi", "स्क्रिप्ट जोड़ी नहीं जा सकी"), Toast.LENGTH_LONG).show()
         }
     }
-    LiquidGlassDialog(isDark = isDark, onDismissRequest = onDismiss) {
-        EngineGlassSurface(isDark, Modifier.fillMaxWidth().widthIn(max = 440.dp).fillMaxHeight(0.78f)) {
-            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 20.dp)) {
-                Text(tr(lang, "Scripts", "Scripts", "स्क्रिप्ट्स"), fontSize = 18.sp, fontWeight = FontWeight.Bold, color = primary)
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = if (isDark) Color(0xFF14161C) else Color(0xFFF6F7FA),
+            modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.8f)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(tr(lang, "Scripts", "Scripts", "स्क्रिप्ट्स"), fontSize = 17.sp, fontWeight = FontWeight.Bold, color = primary)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     tr(lang, "Tick the scripts mpv should load (needs \"Enable Lua / JS scripts\").", "Jo scripts mpv ko load karni hain unhe tick karo (\"Lua / JS scripts chalu karo\" zaroori hai).", "जो स्क्रिप्ट्स mpv लोड करे उन्हें टिक करें (\"Lua / JS स्क्रिप्ट्स चालू करें\" ज़रूरी है)।"),
                     fontSize = 11.5.sp, color = secondary, lineHeight = 16.sp
                 )
-                Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 10.dp)) {
+                Column(modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 8.dp)) {
                     if (scripts.isEmpty()) {
                         Text(tr(lang, "No scripts yet. Add a .lua or .js file.", "Abhi koi script nahi. .lua ya .js file add karo.", "अभी कोई स्क्रिप्ट नहीं। .lua या .js फ़ाइल जोड़ें।"), fontSize = 13.sp, color = secondary)
                     }
                     scripts.forEach { name ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(Color.Black.copy(alpha = if (isDark) 0.16f else 0.04f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
                                 checked = name in selected,
                                 onCheckedChange = { on ->
@@ -551,10 +475,14 @@ private fun ScriptsManagerDialog(
                         }
                     }
                 }
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    EngineDialogButton(tr(lang, "+ Add script", "+ Script add karo", "+ स्क्रिप्ट जोड़ें"), false, secondary) { picker.launch(arrayOf("*/*")) }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { picker.launch(arrayOf("*/*")) }) {
+                        Icon(Icons.Outlined.Add, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(tr(lang, "Add script", "Script add karo", "स्क्रिप्ट जोड़ें"))
+                    }
                     Spacer(Modifier.weight(1f))
-                    EngineDialogButton(tr(lang, "Done", "Done", "हो गया"), true, secondary, onDismiss)
+                    TextButton(onClick = onDismiss) { Text(tr(lang, "Done", "Done", "हो गया")) }
                 }
             }
         }
@@ -576,9 +504,9 @@ private fun EngineCard(cardBg: Color, borderColor: Color, content: @Composable C
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(cardBg)
-            .border(1.dp, borderColor, RoundedCornerShape(28.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(20.dp))
             .padding(16.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp), content = content)
@@ -620,7 +548,7 @@ private fun EngineSwitchRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable(enabled = enabled) { onChange(!checked) }
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -641,7 +569,7 @@ private fun EngineActionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -651,7 +579,7 @@ private fun EngineActionRow(
         EngineTexts(title, subtitle, primaryText, secondaryText, Modifier.weight(1f))
         Spacer(Modifier.width(10.dp))
         Surface(
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(12.dp),
             color = AccentSkyBlue.copy(alpha = 0.15f),
             border = androidx.compose.foundation.BorderStroke(1.dp, AccentSkyBlue.copy(alpha = 0.35f)),
             onClick = onClick
