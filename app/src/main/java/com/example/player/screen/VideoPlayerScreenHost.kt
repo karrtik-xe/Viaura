@@ -1547,9 +1547,16 @@ private fun VideoPlayerScreenImpl(
     val controllerIsPlaying by controller.isPlaying.collectAsState()
     // The raw position changes every 100 ms; reading it directly recomposed the whole player screen + overlay 10x per second
     // (the main cause of lag while a video plays). The UI now gets it at ~5 updates per second; a backward jump (seek) is immediate.
+    // Two speeds: the player screen itself (chapters, skip markers, watched mark ...) needs the position about once a second, so the
+    // whole screen is recomposed once a second at most. The overlay gets its own live value (5 per second) that it reads on its own,
+    // so the controls can show a smooth time + seek bar without the rest of the screen recomposing with every update.
+    val overlayLivePosition = remember(controller) { androidx.compose.runtime.mutableLongStateOf(controller.currentPositionMs.value) }
     val controllerPos by androidx.compose.runtime.produceState(controller.currentPositionMs.value, controller) {
         controller.currentPositionMs.collect { v ->
-            if (v < value || v - value >= 200L) value = v
+            val live = overlayLivePosition.longValue
+            if (v < live || v - live >= 200L) overlayLivePosition.longValue = v
+            // the first moments of playback (first picture detection) and every backward jump are passed on at once
+            if (v < value || v - value >= 1000L || (value <= 300L && v > value)) value = v
         }
     }
     val controllerDur by controller.durationMs.collectAsState()
@@ -3251,7 +3258,8 @@ private fun VideoPlayerScreenImpl(
                         persistPlaybackPosition()
                     }
                 },
-                currentPositionMs = currentPositionMs,
+                hostPositionMs = currentPositionMs,
+                livePositionMs = overlayLivePosition,
                 durationMs = durationMs,
                 onSeekTo = @androidx.compose.runtime.DontMemoize { targetMs ->
                     currentPositionMs = targetMs
@@ -3788,7 +3796,7 @@ private fun VideoPlayerScreenImpl(
                     else switchOnlineQuality(label)
                 },
                 showBufferedRange = uiState.playerSettings.showBufferedRange || currentVideo?.isOnline == true,
-                thumbFastPreview = uiState.playerSettings.thumbFastPreview,
+                thumbFastPreview = uiState.playerSettings.seekFramePreview, // "Seek Slider > Frame preview while sliding"
                 previewVideoUri = currentVideo?.uri,
                 previewVideoPath = currentVideo?.path,
                 onSeekToChapter = @androidx.compose.runtime.DontMemoize { chap ->
