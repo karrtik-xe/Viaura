@@ -1494,7 +1494,7 @@ fun VideoPlayerOverlay(
         }
 
         // Brightness below 0%: the hardware is already at its minimum, so the picture is darkened further
-        // with a black layer (up to 60% at -50%). Touches pass straight through it.
+        // with a black layer (up to 30% at -25%). Touches pass straight through it.
         if (brightness < 0f) {
             Box(
                 modifier = Modifier
@@ -3615,8 +3615,8 @@ fun CameraFrameCaptureInlineMorphButton(
  * blended middle stop. With the default Dynamic theme it is exactly the original pink / purple /
  * sky-blue gradient.
  */
-/** Lowest brightness value of the swipe / HUD: -50% (darker than the phone's minimum screen brightness). */
-const val MIN_BRIGHTNESS_VALUE = -0.5f
+/** Lowest brightness value of the swipe / HUD: -25% (darker than the phone's minimum screen brightness). */
+const val MIN_BRIGHTNESS_VALUE = -0.25f
 
 private fun themedHudFillColors(): List<Color> {
     val colors = com.example.ui.theme.AccentGradientColors
@@ -3648,8 +3648,8 @@ fun PlayerBrightnessPillHud(
     var isDirectDragging by remember { mutableStateOf(false) }
     val isActive = isAdjusting || isDirectDragging
 
-    // -50% .. 100%: below 0% the screen is dimmed further than the hardware minimum (see the dim layer).
-    val percent = (brightnessValue * 100).roundToInt().coerceIn(-50, 100)
+    // -25% .. 100%: below 0% the screen is dimmed further than the hardware minimum (see the dim layer).
+    val percent = (brightnessValue * 100).roundToInt().coerceIn(-25, 100)
     // At 0% and below the bar is completely empty: no fill and no dot at all.
     val fillFraction = brightnessValue.coerceIn(0f, 1.0f)
 
@@ -3755,7 +3755,7 @@ fun PlayerBrightnessPillHud(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .fillMaxHeight(fillFraction)
-                                .clip(RoundedCornerShape(trackCorner))
+                                .clip(RoundedCornerShape(topStart = trackCorner, topEnd = trackCorner))
                                 .background(
                                     Brush.verticalGradient(
                                         colors = themedHudFillColors()
@@ -3921,7 +3921,7 @@ fun PlayerVolumePillHud(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .fillMaxHeight(fillFraction)
-                                .clip(RoundedCornerShape(trackCorner))
+                                .clip(RoundedCornerShape(topStart = trackCorner, topEnd = trackCorner))
                                 .background(
                                     Brush.verticalGradient(
                                         colors = fillGradient

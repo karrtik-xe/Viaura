@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
@@ -465,29 +466,29 @@ fun LiquidGlassVerticalBar(
             cornerRadius = corner,
             style = Stroke(width = 1.dp.toPx())
         )
-        // Empty (0%): nothing is drawn, so no leftover dot remains at the bottom of the bar.
+        // Empty (0%): nothing is drawn.
         if (f <= 0.001f) return@Canvas
         val fillH = h * f
         val top = h - fillH
-        val fillCorner = CornerRadius(minOf(tw / 2f, fillH / 2f), minOf(tw / 2f, fillH / 2f))
         val brush = Brush.verticalGradient(colors = colors, startY = 0f, endY = h)
-        drawRoundRect(
-            brush = brush,
-            topLeft = Offset(left - 2.dp.toPx(), top - 2.dp.toPx()),
-            size = Size(tw + 4.dp.toPx(), fillH + 4.dp.toPx()),
-            cornerRadius = CornerRadius(fillCorner.x + 2.dp.toPx(), fillCorner.x + 2.dp.toPx()),
-            alpha = 0.26f
-        )
-        drawRoundRect(brush = brush, topLeft = Offset(left, top), size = Size(tw, fillH), cornerRadius = fillCorner, alpha = 0.85f)
-        drawRoundRect(
-            brush = Brush.horizontalGradient(
-                colors = listOf(Color.White.copy(alpha = 0.50f), Color.White.copy(alpha = 0f)),
-                startX = left,
-                endX = left + tw * 0.6f
-            ),
-            topLeft = Offset(left + tw * 0.14f, top + tw * 0.3f),
-            size = Size(tw * 0.30f, (fillH - tw * 0.6f).coerceAtLeast(0f)),
-            cornerRadius = CornerRadius(tw * 0.15f, tw * 0.15f)
-        )
+        // The fill is clipped to the track's own rounded shape: at low values it follows the curve of the
+        // bottom end, gets thinner and thinner and finally disappears inside the outline.
+        val trackPath = Path().apply {
+            addRoundRect(androidx.compose.ui.geometry.RoundRect(left, 0f, left + tw, h, corner))
+        }
+        clipPath(trackPath) {
+            // Taller than the track (extra tw below) so the fill's own rounded bottom is never visible.
+            drawRoundRect(brush = brush, topLeft = Offset(left, top), size = Size(tw, fillH + tw), cornerRadius = corner, alpha = 0.85f)
+            drawRoundRect(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(Color.White.copy(alpha = 0.50f), Color.White.copy(alpha = 0f)),
+                    startX = left,
+                    endX = left + tw * 0.6f
+                ),
+                topLeft = Offset(left + tw * 0.14f, top + tw * 0.3f),
+                size = Size(tw * 0.30f, (fillH - tw * 0.3f).coerceAtLeast(0f)),
+                cornerRadius = CornerRadius(tw * 0.15f, tw * 0.15f)
+            )
+        }
     }
 }
