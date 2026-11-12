@@ -283,6 +283,8 @@ object SubtitleFontManager {
                 (assContent.contains("[V4+ Styles]", ignoreCase = true) ||
                     assContent.contains("[V4 Styles]", ignoreCase = true))
             ) {
+                // Phone fonts first (accurate: the very same font), Google Fonts only for what is missing.
+                try { linkRequestedPhoneFonts(context, assContent) } catch (_: Throwable) {}
                 try { GoogleFontsManager.ensureForScript(context, assContent, fontsDir) } catch (_: Throwable) {}
             }
 
@@ -529,6 +531,9 @@ object SubtitleFontManager {
     /** Prefix of the symlinks (in sub_fonts) that point at the phone's own font files. */
     private const val SYS_LINK_PREFIX = "sys_"
 
+    /** Prefix of Noto fonts downloaded on demand (real files in sub_fonts; never listed as user fonts). */
+    private const val DL_PREFIX = "sys_dl_"
+
     /** Folder (next to sub_fonts, never scanned by libass) that holds the links to the phone's own fonts. */
     private const val SYS_LINK_DIR_NAME = "sub_fonts_sys"
 
@@ -595,6 +600,7 @@ object SubtitleFontManager {
             systemFallbacks = built
             systemFallbackKey = key
             built.firstOrNull { it.isDefaultSans }?.let { systemDefaultFamily = it.name }
+            try { ensureEssentialScriptsVisible(context, built) } catch (t: Throwable) { Log.w(TAG, "script probe failed", t) }
             return built
         }
     }
@@ -626,12 +632,182 @@ object SubtitleFontManager {
      */
     private fun ensureVisibleToLibass(context: Context, font: SystemFallbackFont) {
         try {
-            val dst = File(getSubFontsDir(context), font.link.name)
-            if (dst.exists()) { onDemandLinked.add(font.link.name); return }
+            val name = if (font.link.name.startsWith(SYS_LINK_PREFIX)) font.link.name else SYS_LINK_PREFIX + font.link.name
+            val dst = File(getSubFontsDir(context), name)
+            if (dst.exists()) { onDemandLinked.add(name); return }
             dst.delete()
             android.system.Os.symlink(font.link.canonicalPath, dst.absolutePath)
-            onDemandLinked.add(font.link.name)
+            onDemandLinked.add(name)
         } catch (_: Throwable) {}
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Script coverage that does NOT depend on /system/etc/fonts.xml language tags:
+    //  1. every face of every font file in the phone's font folders is checked by its real glyph table;
+    //  2. if the phone has no font at all for a script, the matching Google Noto font is downloaded once
+    //     (needs internet, ~100-400 KB) and kept in sub_fonts for every later subtitle.
+    // ---------------------------------------------------------------------------------------------
+
+    @Volatile private var allFacesCache: List<SystemFallbackFont>? = null
+    @Volatile private var downloadedFacesCache: List<SystemFallbackFont>? = null
+    private val downloadsInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val downloadFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun ttcFaceCount(file: File): Int = try {
+        java.io.RandomAccessFile(file, "r").use { raf ->
+            val head = ByteArray(12)
+            raf.readFully(head)
+            if (String(head, 0, 4, Charsets.ISO_8859_1) == "ttcf") java.nio.ByteBuffer.wrap(head).order(java.nio.ByteOrder.BIG_ENDIAN).getInt(8) else 1
+        }
+    } catch (_: Throwable) { 1 }
+
+    private fun faceFont(file: File, index: Int): SystemFallbackFont? {
+        val names = readFaceNames(file, index) ?: return null
+        val family = (names.first ?: names.second)?.takeIf { it.isNotBlank() } ?: return null
+        if (family.any { it == '{' || it == '}' || it == '\\' || it == ',' }) return null
+        return SystemFallbackFont(file, index, family, names.second, false, null)
+    }
+
+    /** Every regular-style face of every font file in the phone's font folders, found by file (not fonts.xml). */
+    private fun scanAllSystemFaces(): List<SystemFallbackFont> {
+        allFacesCache?.let { return it }
+        synchronized(systemFallbackLock) {
+            allFacesCache?.let { return it }
+            val out = ArrayList<SystemFallbackFont>()
+            val skip = listOf("emoji", "italic", "bold", "thin", "light", "black", "medium", "condensed", "semi", "demi", "extra")
+            val exts = setOf("ttf", "otf", "ttc", "otc")
+            for (d in SYSTEM_FONT_DIRS) {
+                val files = try { File(d).listFiles() } catch (_: Throwable) { null } ?: continue
+                for (f in files.sortedBy { it.name }) {
+                    if (!f.isFile || f.extension.lowercase(java.util.Locale.ROOT) !in exts) continue
+                    val lower = f.name.lowercase(java.util.Locale.ROOT)
+                    if (skip.any { lower.contains(it) }) continue
+                    val faces = if (lower.endsWith("c")) ttcFaceCount(f).coerceIn(1, 16) else 1
+                    for (i in 0 until faces) faceFont(f, i)?.let { out.add(it) }
+                }
+            }
+            // Android's own list of installed fonts (the one text editors use): also finds OEM / user-installed
+            // fonts that live outside the folders above or are missing from fonts.xml.
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                try { addAndroidSystemFonts(out) } catch (t: Throwable) { Log.w(TAG, "SystemFonts API unavailable", t) }
+            }
+            allFacesCache = out
+            return out
+        }
+    }
+
+    @android.annotation.TargetApi(29)
+    private fun addAndroidSystemFonts(out: MutableList<SystemFallbackFont>) {
+        val known = HashSet<String>()
+        for (f in out) known.add(f.link.absolutePath + "#" + f.ttcIndex)
+        val skip = listOf("emoji", "italic", "bold", "thin", "light", "black", "medium", "condensed", "semi", "demi", "extra")
+        for (font in android.graphics.fonts.SystemFonts.getAvailableFonts()) {
+            val file = font.file ?: continue
+            val lower = file.name.lowercase(java.util.Locale.ROOT)
+            if (skip.any { lower.contains(it) }) continue
+            if (!known.add(file.absolutePath + "#" + font.ttcIndex)) continue
+            faceFont(file, font.ttcIndex)?.let { out.add(it) }
+        }
+    }
+
+    /** Noto fonts downloaded earlier (files in sub_fonts). */
+    private fun downloadedFaces(context: Context): List<SystemFallbackFont> {
+        downloadedFacesCache?.let { return it }
+        val out = ArrayList<SystemFallbackFont>()
+        try {
+            getSubFontsDir(context).listFiles()?.filter { it.isFile && it.name.startsWith(DL_PREFIX) }?.sortedBy { it.name }?.forEach { f ->
+                faceFont(f, 0)?.let { out.add(it) }
+            }
+        } catch (_: Throwable) {}
+        downloadedFacesCache = out
+        return out
+    }
+
+    /** Google Noto family (notofonts.github.io) for the script of [cp]; null when none is known / needed. */
+    private fun onlineFontFor(cp: Int): String? = when (cp) {
+        in 0x0530..0x058F -> "NotoSansArmenian"
+        in 0x0590..0x05FF, in 0xFB1D..0xFB4F -> "NotoSansHebrew"
+        in 0x0600..0x06FF, in 0x0750..0x077F, in 0x08A0..0x08FF, in 0xFB50..0xFDFF, in 0xFE70..0xFEFF -> "NotoSansArabic"
+        in 0x0900..0x097F, in 0xA8E0..0xA8FF -> "NotoSansDevanagari"
+        in 0x0980..0x09FF -> "NotoSansBengali"
+        in 0x0A00..0x0A7F -> "NotoSansGurmukhi"
+        in 0x0A80..0x0AFF -> "NotoSansGujarati"
+        in 0x0B00..0x0B7F -> "NotoSansOriya"
+        in 0x0B80..0x0BFF -> "NotoSansTamil"
+        in 0x0C00..0x0C7F -> "NotoSansTelugu"
+        in 0x0C80..0x0CFF -> "NotoSansKannada"
+        in 0x0D00..0x0D7F -> "NotoSansMalayalam"
+        in 0x0D80..0x0DFF -> "NotoSansSinhala"
+        in 0x0E00..0x0E7F -> "NotoSansThai"
+        in 0x0E80..0x0EFF -> "NotoSansLao"
+        in 0x1000..0x109F -> "NotoSansMyanmar"
+        in 0x10A0..0x10FF, in 0x2D00..0x2D2F -> "NotoSansGeorgian"
+        in 0x1200..0x139F -> "NotoSansEthiopic"
+        in 0x1780..0x17FF -> "NotoSansKhmer"
+        in 0x2190..0x23FF, in 0x2600..0x27BF -> "NotoSansSymbols"
+        in 0x2200..0x22FF -> "NotoSansMath"
+        else -> null
+    }
+
+    /**
+     * No font of the phone covers [cp]: fetch the Google Noto font of its script in the background. The
+     * download never blocks the subtitle; it is used from the next subtitle load on (and stays cached).
+     */
+    private fun requestOnlineFont(context: Context, cp: Int) {
+        val family = onlineFontFor(cp) ?: return
+        try {
+            val dst = File(getSubFontsDir(context), "$DL_PREFIX$family.ttf")
+            if (dst.exists()) return
+            val failed = downloadFailedAt[family]
+            if (failed != null && System.currentTimeMillis() - failed < 10 * 60 * 1000L) return
+            if (!downloadsInFlight.add(family)) return
+            val cache = context.applicationContext.cacheDir
+            Thread({
+                try {
+                    val url = java.net.URL("https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/$family/hinted/ttf/$family-Regular.ttf")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 20000
+                    conn.instanceFollowRedirects = true
+                    val tmp = File(cache, "$family.font.part")
+                    conn.inputStream.use { input -> tmp.outputStream().use { out -> input.copyTo(out) } }
+                    if (tmp.length() > 2000 && readFaceNames(tmp, 0) != null && coverageOfFace(tmp, 0)?.covers(cp) == true) {
+                        dst.delete()
+                        if (!tmp.renameTo(dst)) { tmp.copyTo(dst, overwrite = true); tmp.delete() }
+                        downloadedFacesCache = null
+                        Log.i(TAG, "Downloaded subtitle font $family for U+${Integer.toHexString(cp)}")
+                    } else {
+                        tmp.delete()
+                        downloadFailedAt[family] = System.currentTimeMillis()
+                    }
+                } catch (t: Throwable) {
+                    downloadFailedAt[family] = System.currentTimeMillis()
+                    Log.w(TAG, "Subtitle font download failed: $family", t)
+                } finally {
+                    downloadsInFlight.remove(family)
+                }
+            }, "subtitle-font-download").apply { isDaemon = true }.start()
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Gives libass (not only fontconfig) a font for every major script, using the phone's glyph tables.
+     * Needed for embedded subtitle tracks, whose text we never rewrite.
+     */
+    private fun ensureEssentialScriptsVisible(context: Context, fallbacks: List<SystemFallbackFont>) {
+        val probes = listOf(
+            0x3042 to "ja", 0x4E00 to "ja", 0xAC00 to "ko", 0x0915 to null, 0x0627 to null, 0x0E01 to null,
+            0x05D0 to null, 0x0995 to null, 0x0B95 to null, 0x0C15 to null, 0x0D15 to null, 0x0C95 to null,
+            0x0A95 to null, 0x0A15 to null, 0x2605 to null, 0x266A to null
+        )
+        val memo = HashMap<Long, SystemFallbackFont?>()
+        val memo2 = HashMap<Long, SystemFallbackFont?>()
+        for ((cp, hint) in probes) {
+            val f = pickSystemFallback(fallbacks, cp, hint, memo)
+                ?: pickSystemFallback(scanAllSystemFaces(), cp, hint, memo2)
+                ?: continue
+            ensureVisibleToLibass(context, f)
+        }
     }
 
     private fun buildSystemFallbacks(fontsDir: File, libassDir: File, locale: java.util.Locale): List<SystemFallbackFont> {
@@ -698,7 +874,7 @@ object SubtitleFontManager {
         }
         // Links of earlier builds (all system fonts) and of an older font set must not stay in the libass folder.
         libassDir.listFiles()?.forEach { f ->
-            if (f.name.startsWith(SYS_LINK_PREFIX) && f.name !in libassWanted) {
+            if (f.name.startsWith(SYS_LINK_PREFIX) && !f.name.startsWith(DL_PREFIX) && f.name !in libassWanted) {
                 try { f.delete() } catch (_: Throwable) {}
             }
         }
@@ -974,10 +1150,19 @@ object SubtitleFontManager {
         if (assContent.isBlank() || !assContent.contains("[Events]", ignoreCase = true)) return assContent
         try {
             val fallbacks = prepareSystemFallbackFonts(context, getSubFontsDir(context))
-            if (fallbacks.isEmpty()) return assContent
+            if (fallbacks.isEmpty() && scanAllSystemFaces().isEmpty()) return assContent
             val pickMemo = HashMap<Long, SystemFallbackFont?>()
+            val scanMemo = HashMap<Long, SystemFallbackFont?>()
+            val dlMemo = HashMap<Long, SystemFallbackFont?>()
             val pickFallback: (Int, String?) -> SystemFallbackFont? = { cp, hint ->
-                pickSystemFallback(fallbacks, cp, hint, pickMemo)?.also { ensureVisibleToLibass(context, it) }
+                val found = pickSystemFallback(fallbacks, cp, hint, pickMemo)
+                    ?: pickSystemFallback(scanAllSystemFaces(), cp, hint, scanMemo)
+                    ?: pickSystemFallback(downloadedFaces(context), cp, hint, dlMemo)
+                if (found == null) {
+                    Log.w(TAG, "No font on this phone covers U+${Integer.toHexString(cp)}; requesting online font")
+                    requestOnlineFont(context, cp)
+                }
+                found?.also { ensureVisibleToLibass(context, it) }
             }
 
             val coverageByFont = HashMap<String, GlyphRanges?>()
@@ -1810,8 +1995,43 @@ object SubtitleFontManager {
             }
         }
 
+        // 3b. The phone's fonts by their real family / full name (the file name often differs, e.g.
+        //     "Noto Sans Tamil" lives in NotoSansTamil-VF.ttf), incl. Android's own installed-font list.
+        if (findSystemFaceByName(cleanName) != null) return true
+
         // 4. PRIORITY 4: Not available in video embedded, sub_fonts, or system fonts -> return false
         return false
+    }
+
+    /** A font of this phone whose family / full name is [fontName] (case and spacing tolerant), or null. */
+    private fun findSystemFaceByName(fontName: String): SystemFallbackFont? {
+        val clean = fontName.trim().removePrefix("@")
+        if (clean.isBlank()) return null
+        val norm = normalizeFontName(clean)
+        fun matches(f: SystemFallbackFont): Boolean =
+            f.name.equals(clean, ignoreCase = true) || f.fullName.equals(clean, ignoreCase = true) ||
+                normalizeFontName(f.name) == norm || (f.fullName != null && normalizeFontName(f.fullName) == norm)
+        systemFallbacks.firstOrNull { matches(it) }?.let { return it }
+        return try { scanAllSystemFaces().firstOrNull { matches(it) } } catch (_: Throwable) { null }
+    }
+
+    /**
+     * ASS/SSA: every font the script names that the video / subtitle folder / imported fonts do not supply is
+     * looked up on the phone first (same font = same look) and handed to libass directly. Only what the
+     * phone does not have is left for Google Fonts, and only what Google does not have uses the default font.
+     */
+    private fun linkRequestedPhoneFonts(context: Context, assContent: String) {
+        val families = try {
+            GoogleFontsManager.collectFontRequests(assContent).map { it.family }.distinct().take(40)
+        } catch (_: Throwable) { return }
+        for (family in families) {
+            try {
+                if (isSuppliedByCurrentVideo(context, family)) continue
+                if (findFontFile(context, family) != null) continue
+                val face = findSystemFaceByName(family) ?: continue
+                ensureVisibleToLibass(context, face)
+            } catch (_: Throwable) {}
+        }
     }
 
     /**

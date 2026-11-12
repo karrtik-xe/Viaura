@@ -35,6 +35,15 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.runtime.mutableStateListOf
+import kotlin.reflect.KProperty
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -54,7 +63,7 @@ import kotlinx.coroutines.launch
  * and [onTriggered] fires once when the swipe is long enough so the screen can show [OnlineQuickActionBar].
  * Vertical scrolling and taps keep working because only horizontal drags are claimed.
  */
-fun Modifier.swipeLeftForActions(enabled: Boolean = true, onTriggered: () -> Unit): Modifier = composed {
+fun Modifier.swipeLeftForActions(enabled: Boolean = true, selected: Boolean = false, onTriggered: () -> Unit): Modifier = composed {
     val density = LocalDensity.current
     val thresholdPx = with(density) { 56.dp.toPx() }
     val maxPx = with(density) { 48.dp.toPx() }
@@ -87,7 +96,52 @@ fun Modifier.swipeLeftForActions(enabled: Boolean = true, onTriggered: () -> Uni
             )
         }
         .graphicsLayer { translationX = offset.value }
+        .drawWithContent {
+            drawContent()
+            // A card that is part of the swipe selection: soft tint, thin outline and a tick in its corner
+            if (selected) {
+                val r = 16.dp.toPx()
+                drawRoundRect(color = AccentSkyBlue.copy(alpha = 0.16f), cornerRadius = CornerRadius(r, r))
+                drawRoundRect(color = AccentSkyBlue.copy(alpha = 0.95f), cornerRadius = CornerRadius(r, r), style = Stroke(width = 2.dp.toPx()))
+                val rad = 11.dp.toPx()
+                val c = Offset(size.width - rad - 8.dp.toPx(), rad + 8.dp.toPx())
+                drawCircle(color = AccentSkyBlue, radius = rad, center = c)
+                val tick = Path().apply {
+                    moveTo(c.x - rad * 0.45f, c.y + rad * 0.02f)
+                    lineTo(c.x - rad * 0.10f, c.y + rad * 0.38f)
+                    lineTo(c.x + rad * 0.48f, c.y - rad * 0.34f)
+                }
+                drawPath(tick, color = Color.White, style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round))
+            }
+        }
 }
+
+/**
+ * Selection behind the swipe toolbar. It behaves like the old single "action target" variable so the screens keep
+ * their code: reading gives the LAST swiped item (null when nothing is selected); assigning an item adds it to the
+ * selection (assigning a selected one again removes it); assigning null clears everything. Swiping more cards while the
+ * toolbar is open therefore builds a multi-selection that the toolbar's Download button downloads in one go.
+ */
+class SwipeActionState<T : Any>(private val keyOf: (T) -> String) {
+    val items = mutableStateListOf<T>()
+    val size: Int get() = items.size
+
+    fun contains(item: T): Boolean { val k = keyOf(item); return items.any { keyOf(it) == k } }
+
+    fun clear() { items.clear() }
+
+    operator fun getValue(thisRef: Any?, property: KProperty<*>): T? = items.lastOrNull()
+
+    operator fun setValue(thisRef: Any?, property: KProperty<*>, value: T?) {
+        if (value == null) { items.clear(); return }
+        val k = keyOf(value)
+        val i = items.indexOfFirst { keyOf(it) == k }
+        if (i >= 0) items.removeAt(i) else items.add(value)
+    }
+}
+
+@Composable
+fun <T : Any> rememberSwipeActionState(keyOf: (T) -> String): SwipeActionState<T> = remember { SwipeActionState(keyOf) }
 
 /**
  * Bottom floating glass toolbar (same look as the selection toolbar of the offline lists):
@@ -108,6 +162,9 @@ fun OnlineQuickActionBar(
     /** Online folders (playlists): heart that adds / removes the item from Favourites. */
     isFavourite: Boolean = false,
     onFavourite: (() -> Unit)? = null,
+    /** More than one card is selected: the bar shows only "N selected", Download all and Clear. */
+    selectedCount: Int = 1,
+    onClearSelection: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val barBg = if (isDark) {
@@ -119,6 +176,10 @@ fun OnlineQuickActionBar(
     }
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val barShape = RoundedCornerShape(20.dp)
+    // while the bar slides out the selection is already empty: keep the layout it had
+    val lastSelectedCount = remember { intArrayOf(selectedCount) }
+    if (selectedCount > 0) lastSelectedCount[0] = selectedCount
+    val shownCount = if (selectedCount > 0) selectedCount else lastSelectedCount[0]
 
     Box(
         modifier = modifier
@@ -140,7 +201,47 @@ fun OnlineQuickActionBar(
         contentAlignment = Alignment.Center
     ) {
         // Items keep a comfortable fixed width and the row scrolls sideways, so more actions can be added later.
-        Row(
+        if (shownCount > 1 && onDownload != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "$shownCount selected",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = primaryText,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (onClearSelection != null) {
+                        Text(
+                            text = "Clear",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryText,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable(onClick = onClearSelection)
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(AccentGradient)
+                            .clickable(onClick = onDownload)
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StyledIcon(R.drawable.viaura_download_minimalistic, null, Modifier.size(18.dp), Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Download all", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                    }
+                }
+            }
+        } else Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
