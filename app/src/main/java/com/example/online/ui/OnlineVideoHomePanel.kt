@@ -106,15 +106,10 @@ fun OnlineVideoPanel(
     val isFeedMode = searchQuery.isBlank()
 
     // ---- swipe (right -> left) quick actions: nothing is selected, the bar just appears at the bottom ----
-    // Swipe toolbar selection: every card swiped while the toolbar is open is added (swiping a selected card again removes it);
-    // the toolbar's Download then downloads all of them in one go with one quality.
-    val actionState = com.example.ui.components.rememberSwipeActionState<OnlineTrackResult> { it.videoUrl }
-    var actionTarget by actionState
-    var batchRequests by remember { mutableStateOf<List<com.example.ui.components.DownloadRequest>?>(null) }
+    var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var downloadRequest by remember { mutableStateOf<com.example.ui.components.DownloadRequest?>(null) }
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, glassBlurTransparency) { downloadRequest = null }
-    com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, glassBlurTransparency) { batchRequests = null }
     if (actionTarget != null) lastActionTarget = actionTarget
     var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     LaunchedEffect(Unit) {
@@ -125,6 +120,9 @@ fun OnlineVideoPanel(
         OnlineMediaLibrary.notInterestedSet(context, OnlineMediaLibrary.KIND_VIDEO)
     }
     BackHandler(enabled = actionTarget != null) { actionTarget = null }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) actionTarget = null
+    }
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -540,7 +538,7 @@ fun OnlineVideoPanel(
                     }
                     items(shown, key = { "ov_g_${st.generation}_${it.videoUrl}" }) { r ->
                         val v = remember(r) { r.toOnlineVideoItem() }
-                        Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
+                        Box(Modifier.swipeLeftForActions { actionTarget = r }) {
                             VideoItemGridCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
                         }
                     }
@@ -567,7 +565,7 @@ fun OnlineVideoPanel(
                     }
                     items(shown, key = { "ov_l_${st.generation}_${it.videoUrl}" }) { r ->
                         val v = remember(r) { r.toOnlineVideoItem() }
-                        Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
+                        Box(Modifier.swipeLeftForActions { actionTarget = r }) {
                             VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
                         }
                     }
@@ -615,16 +613,7 @@ fun OnlineVideoPanel(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
                     isSavedForLater = st.watchLater.any { it.videoUrl == t.videoUrl },
-                    selectedCount = actionState.size,
-                    onClearSelection = { actionTarget = null },
-                    onDownload = {
-                        if (actionState.size > 1) {
-                            batchRequests = actionState.items.map { x -> com.example.ui.components.DownloadRequest(x.videoUrl, x.title, x.artist, x.thumbnailUrl, false) }
-                        } else {
-                            downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, false)
-                        }
-                        actionTarget = null
-                    },
+                    onDownload = { downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, false); actionTarget = null },
                     onPlayNext = {
                         OnlineMediaLibrary.rememberMeta(context, kind, t)
                         OnlineVideoQueue.addNext(t)

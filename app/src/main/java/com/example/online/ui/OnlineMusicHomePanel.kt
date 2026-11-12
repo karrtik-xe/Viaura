@@ -154,15 +154,10 @@ fun OnlineMusicPanel(
     }
 
     // ---- swipe (right -> left) quick actions: nothing is selected, the bar just appears at the bottom ----
-    // Swipe toolbar selection: every card swiped while the toolbar is open is added (swiping a selected card again removes it);
-    // the toolbar's Download then downloads all of them in one go with one quality.
-    val actionState = com.example.ui.components.rememberSwipeActionState<OnlineTrackResult> { it.videoUrl }
-    var actionTarget by actionState
-    var batchRequests by remember { mutableStateOf<List<com.example.ui.components.DownloadRequest>?>(null) }
+    var actionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var downloadRequest by remember { mutableStateOf<com.example.ui.components.DownloadRequest?>(null) }
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, glassBlurTransparency) { downloadRequest = null }
-    com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, glassBlurTransparency) { batchRequests = null }
     if (actionTarget != null) lastActionTarget = actionTarget
     var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var watchLaterTracks by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
@@ -173,6 +168,9 @@ fun OnlineMusicPanel(
     }
     val hiddenUrls = remember(hiddenVersion) { OnlineMediaLibrary.notInterestedSet(context, OnlineMediaLibrary.KIND_AUDIO) }
     BackHandler(enabled = actionTarget != null) { actionTarget = null }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) actionTarget = null
+    }
 
     // Search query tracking with cancellation
     var searchJob by remember { mutableStateOf<Job?>(null) }
@@ -810,7 +808,7 @@ fun OnlineMusicPanel(
                             }
                             val trackItem = if (progress != baseTrackItem.playbackProgress) baseTrackItem.copy(playbackProgress = progress) else baseTrackItem
 
-                            Box(Modifier.swipeLeftForActions(selected = actionState.contains(result)) { actionTarget = result }) {
+                            Box(Modifier.swipeLeftForActions { actionTarget = result }) {
                                 AudioTrackGridCard(
                                     track = trackItem,
                                     isCurrent = isCurrent,
@@ -864,7 +862,7 @@ fun OnlineMusicPanel(
                             }
                             val trackItem = if (progress != baseTrackItem.playbackProgress) baseTrackItem.copy(playbackProgress = progress) else baseTrackItem
 
-                            Box(Modifier.swipeLeftForActions(selected = actionState.contains(result)) { actionTarget = result }) {
+                            Box(Modifier.swipeLeftForActions { actionTarget = result }) {
                                 AudioTrackListCard(
                                     track = trackItem,
                                     isCurrent = isCurrent,
@@ -906,16 +904,7 @@ fun OnlineMusicPanel(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
                     isSavedForLater = watchLaterTracks.any { it.videoUrl == t.videoUrl },
-                    selectedCount = actionState.size,
-                    onClearSelection = { actionTarget = null },
-                    onDownload = {
-                        if (actionState.size > 1) {
-                            batchRequests = actionState.items.map { x -> com.example.ui.components.DownloadRequest(x.videoUrl, x.title, x.artist, x.thumbnailUrl, true) }
-                        } else {
-                            downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, true)
-                        }
-                        actionTarget = null
-                    },
+                    onDownload = { downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, true); actionTarget = null },
                     onPlayNext = {
                         AudioPlaybackManager.playNext(t.toAudioTrackItem())
                         Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()

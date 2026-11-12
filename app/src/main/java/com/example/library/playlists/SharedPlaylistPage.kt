@@ -82,13 +82,9 @@ fun SharedPlaylistScreen(
     var showSortAndViewDialog by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     // Swipe (right -> left) quick-action toolbar target; nothing is selected or highlighted.
-    // Every card swiped while the toolbar is open is added to the selection; Download then downloads all of them in one go.
-    val swipeState = com.example.ui.components.rememberSwipeActionState<AudioTrackItem> { it.path }
-    var swipeActionTrack by swipeState
-    var batchRequests by remember { mutableStateOf<List<com.example.ui.components.DownloadRequest>?>(null) }
+    var swipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     var downloadRequest by remember { mutableStateOf<com.example.ui.components.DownloadRequest?>(null) }
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, uiState.glassBlurTransparency) { downloadRequest = null }
-    com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, uiState.glassBlurTransparency) { batchRequests = null }
     var lastSwipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     if (swipeActionTrack != null) lastSwipeActionTrack = swipeActionTrack
     var playlistSaveTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
@@ -97,6 +93,9 @@ fun SharedPlaylistScreen(
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_AUDIO)
     }
     var swipeLaterVersion by remember { mutableStateOf(0) }
+    LaunchedEffect(listState.isScrollInProgress, gridState.isScrollInProgress) {
+        if (listState.isScrollInProgress || gridState.isScrollInProgress) swipeActionTrack = null
+    }
 
     // Search and Sort State
     var isSearchActive by remember { mutableStateOf(false) }
@@ -417,7 +416,7 @@ fun SharedPlaylistScreen(
                             isPlaying = isCurrent && isPlaying,
                             isDark = isDark,
                             onClick = { swipeActionTrack = null; playPlaylist(startIndex = index, isShuffle = false) },
-                            modifier = Modifier.swipeLeftForActions(selected = swipeState.contains(trackItem)) { swipeActionTrack = trackItem }
+                            modifier = Modifier.swipeLeftForActions { swipeActionTrack = trackItem }
                         )
                     }
                 }
@@ -479,7 +478,7 @@ fun SharedPlaylistScreen(
                             onClick = { swipeActionTrack = null; playPlaylist(startIndex = index, isShuffle = false) },
                             modifier = Modifier
                                 .padding(horizontal = 12.dp, vertical = 3.dp)
-                                .swipeLeftForActions(selected = swipeState.contains(trackItem)) { swipeActionTrack = trackItem }
+                                .swipeLeftForActions { swipeActionTrack = trackItem }
                         )
                     }
                 }
@@ -550,18 +549,7 @@ fun SharedPlaylistScreen(
                     isDark = isDark,
                     alphaRatio = (uiState.glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
                     isSavedForLater = savedLater,
-                    selectedCount = swipeState.size,
-                    onClearSelection = { swipeActionTrack = null },
-                    onDownload = {
-                        if (swipeState.size > 1) {
-                            batchRequests = swipeState.items.map { x ->
-                                com.example.ui.components.DownloadRequest(x.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX), x.title, x.artist, x.thumbnailUrl, true)
-                            }
-                        } else {
-                            downloadRequest = com.example.ui.components.DownloadRequest(trackUrl, t.title, t.artist, t.thumbnailUrl, true)
-                        }
-                        swipeActionTrack = null
-                    },
+                    onDownload = { downloadRequest = com.example.ui.components.DownloadRequest(trackUrl, t.title, t.artist, t.thumbnailUrl, true); swipeActionTrack = null },
                     onPlayNext = {
                         AudioPlaybackManager.playNext(t)
                         Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()

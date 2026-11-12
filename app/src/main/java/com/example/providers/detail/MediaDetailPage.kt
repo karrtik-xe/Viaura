@@ -277,11 +277,7 @@ fun MediaDetailScreen(
     } else allVideos
 
     // ---- swipe toolbar + background work ----
-    // Swipe toolbar selection: every card swiped while the toolbar is open is added to the selection (swiping a selected card
-    // again removes it); the toolbar's Download then downloads all of them in one go with one quality.
-    val actionState = com.example.ui.components.rememberSwipeActionState<DetailVideo> { it.link + "|" + it.title }
-    var actionTarget by actionState
-    var batchTargets by remember { mutableStateOf<List<DetailVideo>?>(null) }
+    var actionTarget by remember { mutableStateOf<DetailVideo?>(null) }
     var lastActionTarget by remember { mutableStateOf<DetailVideo?>(null) }
     var downloadTarget by remember { mutableStateOf<DetailVideo?>(null) }
     if (actionTarget != null) lastActionTarget = actionTarget
@@ -699,7 +695,7 @@ fun MediaDetailScreen(
                                 channelName = listOf(v.meta, v.qualityLabel, plugin.name).filter { it.isNotBlank() }.joinToString(" · ")
                             )
                         }
-                        Box(modifier = Modifier.swipeLeftForActions(selected = actionState.contains(v)) { actionTarget = v }) {
+                        Box(modifier = Modifier.swipeLeftForActions { actionTarget = v }) {
                             VideoItemCard(
                                 video = card,
                                 isDark = isDark,
@@ -733,10 +729,8 @@ fun MediaDetailScreen(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
                     isSavedForLater = saved,
-                    selectedCount = actionState.size,
-                    onClearSelection = { actionTarget = null },
                     onDownload = {
-                        if (actionState.size > 1) batchTargets = actionState.items.toList() else downloadTarget = t
+                        downloadTarget = t
                         actionTarget = null
                     },
                     onSaveToPlaylist = {
@@ -790,38 +784,6 @@ fun MediaDetailScreen(
                 onDismiss = { downloadTarget = null },
                 // a series: its own folder (Downloads + Movies/Viaura/<series>), never mixed with movies
                 group = if (isSeries) title else ""
-            )
-        }
-
-        // ---- several episodes selected with the swipe toolbar: one panel, one quality, same-size files ----
-        batchTargets?.let { picked ->
-            val currentOption = qualityIdx.coerceIn(0, (optionList.size - 1).coerceAtLeast(0))
-            val batchEpisodes = picked.map { v ->
-                com.example.ui.components.BatchEpisode(
-                    name = episodeName(v), matchTitle = v.title, index = allVideos.indexOfFirst { it.link == v.link && it.title == v.title },
-                    link = v.link, type = v.type, poster = v.poster
-                )
-            }
-            val batchVariants = optionList.mapIndexed { i, o ->
-                com.example.ui.components.BatchVariant(label = o.label, isCurrent = i == currentOption) {
-                    val l = o.link
-                    val eps = if (l.episodesLink != null) MediaProviderRepository.loadEpisodes(context, plugin.value, l.episodesLink) else l.directLinks
-                    eps.mapIndexed { n, d ->
-                        com.example.ui.components.BatchEpisode(
-                            name = d.title, matchTitle = d.title, index = n, link = d.link,
-                            type = d.type ?: if (isSeries) "series" else "movie", poster = d.image ?: poster
-                        )
-                    }
-                }
-            }
-            com.example.ui.components.MediaBatchDownloadSheet(
-                isDark = isDark,
-                glassBlurTransparency = glassBlurTransparency,
-                plugin = plugin,
-                group = if (isSeries) title else "",
-                episodes = batchEpisodes,
-                variants = batchVariants,
-                onDismiss = { batchTargets = null }
             )
         }
 
