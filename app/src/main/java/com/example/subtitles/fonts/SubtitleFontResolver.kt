@@ -407,7 +407,7 @@ object SubtitleFontManager {
         }
     }
 
-    private val CONSERVATIVE_LATIN_COVERAGE = GlyphRanges(intArrayOf(0x20), intArrayOf(0x24F))
+    private val CONSERVATIVE_LATIN_COVERAGE = GlyphRanges(intArrayOf(0x20, 0x2000), intArrayOf(0x24F, 0x206F))
 
     private val coverageCache = java.util.concurrent.ConcurrentHashMap<String, GlyphRanges>()
     private val coverageMissing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -537,8 +537,13 @@ object SubtitleFontManager {
         val ttcIndex: Int,
         val name: String,
         val fullName: String?,
-        val isDefaultSans: Boolean
+        val isDefaultSans: Boolean,
+        val lang: String? = null
     ) {
+        /** True when this font's fonts.xml language list names [code] (e.g. "ja", "ko"). */
+        fun hasLang(code: String): Boolean = lang?.split(',', ' ')
+            ?.any { it.isNotBlank() && it.trim().split('-', '_')[0].equals(code, ignoreCase = true) } == true
+
         val coverage: GlyphRanges? by lazy(LazyThreadSafetyMode.PUBLICATION) { coverageOfFace(link, ttcIndex) }
     }
 
@@ -594,6 +599,41 @@ object SubtitleFontManager {
         }
     }
 
+    /**
+     * Scripts whose system font is ALWAYS handed to libass directly (Japanese / Korean / Chinese,
+     * Devanagari, Arabic, Thai, Hebrew, Bengali, Tamil, symbols). Without this only the fonts of the
+     * phone's current language were visible, so every other script came out as boxes unless the
+     * phone language was switched. Other scripts are linked on demand (see [ensureVisibleToLibass]).
+     */
+    private fun isEssentialScript(lang: String?): Boolean {
+        if (lang.isNullOrBlank()) return false
+        val langs = setOf("ja", "ko", "zh")
+        val scripts = setOf("deva", "arab", "thai", "hebr", "zsym", "zmth", "beng", "taml")
+        return lang.split(',', ' ').filter { it.isNotBlank() }.any { tag ->
+            val parts = tag.trim().split('-', '_')
+            parts[0].lowercase(java.util.Locale.ROOT) in langs ||
+                parts.drop(1).any { it.lowercase(java.util.Locale.ROOT) in scripts }
+        }
+    }
+
+    /** sys_ link names that were added to the libass fonts folder because a subtitle really needed them. */
+    private val onDemandLinked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Makes sure libass itself can see this system font (a link inside sub_fonts). libass lists that folder
+     * every time a subtitle track starts, so a font linked here before the subtitle file is written is found
+     * by its own family name no matter what fontconfig does with the system font folders.
+     */
+    private fun ensureVisibleToLibass(context: Context, font: SystemFallbackFont) {
+        try {
+            val dst = File(getSubFontsDir(context), font.link.name)
+            if (dst.exists()) { onDemandLinked.add(font.link.name); return }
+            dst.delete()
+            android.system.Os.symlink(font.link.canonicalPath, dst.absolutePath)
+            onDemandLinked.add(font.link.name)
+        } catch (_: Throwable) {}
+    }
+
     private fun buildSystemFallbacks(fontsDir: File, libassDir: File, locale: java.util.Locale): List<SystemFallbackFont> {
         var entries = parseSystemFontsXml()
         if (entries.isEmpty()) entries = scanSystemFontDirs()
@@ -633,7 +673,7 @@ object SubtitleFontManager {
                 } catch (_: Throwable) { continue }
             }
             wanted.add(linkName)
-            if (e.isDefaultSans || langMatches(e.lang)) {
+            if (e.isDefaultSans || langMatches(e.lang) || isEssentialScript(e.lang) || linkName in onDemandLinked) {
                 // Always visible to libass itself (small set), independent of fontconfig.
                 val direct = File(libassDir, linkName)
                 if (!direct.exists()) {
@@ -647,7 +687,7 @@ object SubtitleFontManager {
             val names = readFaceNames(link, e.ttcIndex) ?: continue
             val family = (names.first ?: names.second)?.takeIf { it.isNotBlank() } ?: continue
             if (family.any { it == '{' || it == '}' || it == '\\' || it == ',' }) continue
-            result.add(SystemFallbackFont(link, e.ttcIndex, family, names.second, e.isDefaultSans))
+            result.add(SystemFallbackFont(link, e.ttcIndex, family, names.second, e.isDefaultSans, e.lang))
         }
 
         // Remove links from an older font set (e.g. after a system update) so libass never scans stale entries.
@@ -820,15 +860,22 @@ object SubtitleFontManager {
         } catch (_: Throwable) { null }
     }
 
-    /** First system fallback font (in priority order) that really has a glyph for [cp]. */
+    /**
+     * First system fallback font (in priority order) that really has a glyph for [cp]. [hint] ("ja" / "ko")
+     * prefers the Japanese / Korean face of a CJK font so kanji / hanja look right next to kana / hangul.
+     */
     private fun pickSystemFallback(
         fallbacks: List<SystemFallbackFont>,
         cp: Int,
-        memo: HashMap<Int, SystemFallbackFont?>
+        hint: String?,
+        memo: HashMap<Long, SystemFallbackFont?>
     ): SystemFallbackFont? {
-        if (memo.containsKey(cp)) return memo[cp]
-        val found = fallbacks.firstOrNull { it.coverage?.covers(cp) == true }
-        memo[cp] = found
+        val key = (cp.toLong() shl 4) or (when (hint) { "ja" -> 1L; "ko" -> 2L; else -> 0L })
+        if (memo.containsKey(key)) return memo[key]
+        var found: SystemFallbackFont? = null
+        if (hint != null) found = fallbacks.firstOrNull { it.coverage?.covers(cp) == true && it.hasLang(hint) }
+        if (found == null) found = fallbacks.firstOrNull { it.coverage?.covers(cp) == true }
+        memo[key] = found
         return found
     }
 
@@ -928,8 +975,10 @@ object SubtitleFontManager {
         try {
             val fallbacks = prepareSystemFallbackFonts(context, getSubFontsDir(context))
             if (fallbacks.isEmpty()) return assContent
-            val pickMemo = HashMap<Int, SystemFallbackFont?>()
-            val pickFallback: (Int) -> SystemFallbackFont? = { cp -> pickSystemFallback(fallbacks, cp, pickMemo) }
+            val pickMemo = HashMap<Long, SystemFallbackFont?>()
+            val pickFallback: (Int, String?) -> SystemFallbackFont? = { cp, hint ->
+                pickSystemFallback(fallbacks, cp, hint, pickMemo)?.also { ensureVisibleToLibass(context, it) }
+            }
 
             val coverageByFont = HashMap<String, GlyphRanges?>()
             fun coverageFor(fontName: String): GlyphRanges? {
@@ -952,7 +1001,9 @@ object SubtitleFontManager {
                     // only basic Latin; the bundled font then draws the rest (it is only used
                     // for characters it really has).
                     val parsed = file?.let { coverageOf(it) }
-                    parsed ?: if (file != null || isSelected) CONSERVATIVE_LATIN_COVERAGE else null
+                    // A font nobody can locate (the phone's own custom font, a font libass would drop)
+                    // is treated the same way: libass would draw its missing glyphs as boxes too.
+                    parsed ?: CONSERVATIVE_LATIN_COVERAGE
                 }
             }
 
@@ -1017,7 +1068,7 @@ object SubtitleFontManager {
         text: String,
         styleFont: String,
         styleFonts: Map<String, String>,
-        pickFallback: (Int) -> SystemFallbackFont?,
+        pickFallback: (Int, String?) -> SystemFallbackFont?,
         coverageFor: (String) -> GlyphRanges?,
         forcedFont: String? = null
     ): String {
@@ -1028,6 +1079,17 @@ object SubtitleFontManager {
         var fallbackName: String? = null
         val sb = StringBuilder(text.length + 16)
         val tagPattern = Regex("\\\\(fn|r|p)([^\\\\}]*)")
+        // Kana / hangul in the line: kanji / hanja of the same line use the Japanese / Korean face.
+        var scriptHint: String? = null
+        run {
+            var k = 0
+            while (k < text.length) {
+                val c = text.codePointAt(k)
+                if (c in 0x3040..0x30FF || c in 0x31F0..0x31FF || c in 0xFF66..0xFF9F) { scriptHint = "ja"; break }
+                if (c in 0xAC00..0xD7AF || c in 0x1100..0x11FF || c in 0x3130..0x318F) scriptHint = "ko"
+                k += Character.charCount(c)
+            }
+        }
 
         fun currentFont() = inlineFont ?: baseFont
         fun closeFallback() {
@@ -1076,7 +1138,7 @@ object SubtitleFontManager {
                 cp == 0x200D || cp == 0xA0 || Character.getType(cp) == Character.FORMAT.toInt()
             val target: SystemFallbackFont? = if (neutral) null else {
                 val cov = coverageFor(currentFont())
-                if (cov != null && !cov.covers(cp)) pickFallback(cp) else null
+                if (cov != null && !cov.covers(cp)) pickFallback(cp, scriptHint) else null
             }
             if (neutral) {
                 // spaces / joiners stay in whatever font the previous character used

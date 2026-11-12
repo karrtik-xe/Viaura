@@ -1195,9 +1195,9 @@ fun VideoPlayerOverlay(
                                                 isAdjustingVolume = false
                                                 val compHeight = h.coerceAtLeast(200f)
                                                 val delta = -totalDragY / (compHeight * 0.70f)
-                                                val newB = (initialBrightness + delta).coerceIn(0.01f, 1.0f)
+                                                val newB = (initialBrightness + delta).coerceIn(MIN_BRIGHTNESS_VALUE, 1.0f)
                                                 hudBrightnessValue = newB
-                                                val bStep = (newB * 20f).toInt()
+                                                val bStep = Math.floor((newB * 20f).toDouble()).toInt()
                                                 if (bStep != lastHapticBrightnessStep) {
                                                     lastHapticBrightnessStep = bStep
                                                     AppHaptics.performTick(view, haptic)
@@ -1411,7 +1411,7 @@ fun VideoPlayerOverlay(
             PlayerBrightnessPillHud(
                 brightnessValue = hudBrightnessValue,
                 onBrightnessDelta = { delta ->
-                    val newB = (hudBrightnessValue + delta).coerceIn(0.01f, 1.0f)
+                    val newB = (hudBrightnessValue + delta).coerceIn(MIN_BRIGHTNESS_VALUE, 1.0f)
                     hudBrightnessValue = newB
                     updatedOnBrightnessChange(newB)
                     hudLastInteractedTime = System.currentTimeMillis()
@@ -1490,6 +1490,16 @@ fun VideoPlayerOverlay(
                         scaleX = (0.90f + (0.10f * a)) * k
                         scaleY = (0.90f + (0.10f * a)) * k
                     }
+            )
+        }
+
+        // Brightness below 0%: the hardware is already at its minimum, so the picture is darkened further
+        // with a black layer (up to 60% at -50%). Touches pass straight through it.
+        if (brightness < 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = (-brightness * 1.2f).coerceIn(0f, 0.6f)))
             )
         }
 
@@ -3605,6 +3615,9 @@ fun CameraFrameCaptureInlineMorphButton(
  * blended middle stop. With the default Dynamic theme it is exactly the original pink / purple /
  * sky-blue gradient.
  */
+/** Lowest brightness value of the swipe / HUD: -50% (darker than the phone's minimum screen brightness). */
+const val MIN_BRIGHTNESS_VALUE = -0.5f
+
 private fun themedHudFillColors(): List<Color> {
     val colors = com.example.ui.theme.AccentGradientColors
     if (colors.size >= 3) return colors.reversed()
@@ -3635,8 +3648,10 @@ fun PlayerBrightnessPillHud(
     var isDirectDragging by remember { mutableStateOf(false) }
     val isActive = isAdjusting || isDirectDragging
 
-    val percent = (brightnessValue * 100).roundToInt().coerceIn(0, 100)
-    val fillFraction = brightnessValue.coerceIn(0.04f, 1.0f)
+    // -50% .. 100%: below 0% the screen is dimmed further than the hardware minimum (see the dim layer).
+    val percent = (brightnessValue * 100).roundToInt().coerceIn(-50, 100)
+    // At 0% and below the bar is completely empty: no fill and no dot at all.
+    val fillFraction = brightnessValue.coerceIn(0f, 1.0f)
 
     val sunIcon = when {
         brightnessValue < 0.25f -> Icons.Filled.BrightnessLow
@@ -3735,17 +3750,19 @@ fun PlayerBrightnessPillHud(
                     contentAlignment = Alignment.BottomCenter
                 ) {
                     // Filled Track with 3-stop gradient that follows the selected App Theme
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .fillMaxHeight(fillFraction)
-                            .clip(RoundedCornerShape(trackCorner))
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = themedHudFillColors()
+                    if (fillFraction > 0.001f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .fillMaxHeight(fillFraction)
+                                .clip(RoundedCornerShape(trackCorner))
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = themedHudFillColors()
+                                    )
                                 )
-                            )
-                    )
+                        )
+                    }
                 }
             }
 
@@ -3781,7 +3798,7 @@ fun PlayerVolumePillHud(
     val percent = (volumePercent * 100).roundToInt().coerceAtLeast(0)
     val isBoosted = volumePercent > 1.0f
     val maxBoostRatio = (volumeBoostCap / 100f).coerceIn(1.0f, 2.0f)
-    val fillFraction = (volumePercent / maxBoostRatio).coerceIn(0.04f, 1.0f)
+    val fillFraction = (volumePercent / maxBoostRatio).coerceIn(0f, 1.0f)
 
     val speakerIcon = when {
         volumePercent <= 0.001f -> Icons.AutoMirrored.Filled.VolumeOff
@@ -3899,17 +3916,19 @@ fun PlayerVolumePillHud(
                     contentAlignment = Alignment.BottomCenter
                 ) {
                     // Filled Track with 3-stop System Gradient
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .fillMaxHeight(fillFraction)
-                            .clip(RoundedCornerShape(trackCorner))
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = fillGradient
+                    if (fillFraction > 0.001f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .fillMaxHeight(fillFraction)
+                                .clip(RoundedCornerShape(trackCorner))
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = fillGradient
+                                    )
                                 )
-                            )
-                    )
+                        )
+                    }
                 }
             }
 

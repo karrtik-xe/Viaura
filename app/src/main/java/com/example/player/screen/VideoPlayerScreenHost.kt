@@ -293,12 +293,9 @@ private fun VideoPlayerScreenImpl(
         }
         // While the fake-landscape entry is running the window stays portrait; the real
         // orientation is applied by the hand-off effect below.
-        // Portrait channel player: a landscape-only setting must not force the channel layout sideways, it follows the sensor.
-        val requestedFinal = if (uiState.playerSettings.portraitChannelPlayer &&
-            (requested == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
-                requested == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
-                requested == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE)
-        ) ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR else requested
+        // Pinned video layout: the selected orientation is applied exactly as chosen (a Landscape mode
+        // opens the video in landscape right away, the pinned layout only exists in portrait).
+        val requestedFinal = requested
         if (!entryFakeLandscape) {
             activity?.requestedOrientation = requestedFinal
         }
