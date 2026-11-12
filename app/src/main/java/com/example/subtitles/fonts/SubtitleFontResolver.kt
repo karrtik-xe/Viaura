@@ -600,25 +600,8 @@ object SubtitleFontManager {
             systemFallbacks = built
             systemFallbackKey = key
             built.firstOrNull { it.isDefaultSans }?.let { systemDefaultFamily = it.name }
-            try { ensureEssentialScriptsVisible(context, built) } catch (t: Throwable) { Log.w(TAG, "script probe failed", t) }
+            scanAllSystemFaces() // starts the one-time background scan; never blocks
             return built
-        }
-    }
-
-    /**
-     * Scripts whose system font is ALWAYS handed to libass directly (Japanese / Korean / Chinese,
-     * Devanagari, Arabic, Thai, Hebrew, Bengali, Tamil, symbols). Without this only the fonts of the
-     * phone's current language were visible, so every other script came out as boxes unless the
-     * phone language was switched. Other scripts are linked on demand (see [ensureVisibleToLibass]).
-     */
-    private fun isEssentialScript(lang: String?): Boolean {
-        if (lang.isNullOrBlank()) return false
-        val langs = setOf("ja", "ko", "zh")
-        val scripts = setOf("deva", "arab", "thai", "hebr", "zsym", "zmth", "beng", "taml")
-        return lang.split(',', ' ').filter { it.isNotBlank() }.any { tag ->
-            val parts = tag.trim().split('-', '_')
-            parts[0].lowercase(java.util.Locale.ROOT) in langs ||
-                parts.drop(1).any { it.lowercase(java.util.Locale.ROOT) in scripts }
         }
     }
 
@@ -668,32 +651,47 @@ object SubtitleFontManager {
         return SystemFallbackFont(file, index, family, names.second, false, null)
     }
 
-    /** Every regular-style face of every font file in the phone's font folders, found by file (not fonts.xml). */
+    private val allFacesScanStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Every regular-style face of every font file of the phone (font folders + Android's installed-font list),
+     * found by file and glyph table, not by fonts.xml. The scan runs ONCE on a background thread: this call
+     * never waits for it, so selecting / switching subtitles stays as smooth as before. Until the scan has
+     * finished it returns an empty list.
+     */
     private fun scanAllSystemFaces(): List<SystemFallbackFont> {
         allFacesCache?.let { return it }
-        synchronized(systemFallbackLock) {
-            allFacesCache?.let { return it }
-            val out = ArrayList<SystemFallbackFont>()
-            val skip = listOf("emoji", "italic", "bold", "thin", "light", "black", "medium", "condensed", "semi", "demi", "extra")
-            val exts = setOf("ttf", "otf", "ttc", "otc")
-            for (d in SYSTEM_FONT_DIRS) {
-                val files = try { File(d).listFiles() } catch (_: Throwable) { null } ?: continue
-                for (f in files.sortedBy { it.name }) {
-                    if (!f.isFile || f.extension.lowercase(java.util.Locale.ROOT) !in exts) continue
-                    val lower = f.name.lowercase(java.util.Locale.ROOT)
-                    if (skip.any { lower.contains(it) }) continue
-                    val faces = if (lower.endsWith("c")) ttcFaceCount(f).coerceIn(1, 16) else 1
-                    for (i in 0 until faces) faceFont(f, i)?.let { out.add(it) }
+        if (allFacesScanStarted.compareAndSet(false, true)) {
+            Thread({
+                try {
+                    val out = ArrayList<SystemFallbackFont>()
+                    val skip = listOf("emoji", "italic", "bold", "thin", "light", "black", "medium", "condensed", "semi", "demi", "extra")
+                    val exts = setOf("ttf", "otf", "ttc", "otc")
+                    for (d in SYSTEM_FONT_DIRS) {
+                        val files = try { File(d).listFiles() } catch (_: Throwable) { null } ?: continue
+                        for (f in files.sortedBy { it.name }) {
+                            if (!f.isFile || f.extension.lowercase(java.util.Locale.ROOT) !in exts) continue
+                            val lower = f.name.lowercase(java.util.Locale.ROOT)
+                            if (skip.any { lower.contains(it) }) continue
+                            val faces = if (lower.endsWith("c")) ttcFaceCount(f).coerceIn(1, 16) else 1
+                            for (i in 0 until faces) faceFont(f, i)?.let { out.add(it) }
+                        }
+                    }
+                    // Android's own list of installed fonts (the one text editors use): also finds OEM / user-installed
+                    // fonts that live outside the folders above or are missing from fonts.xml.
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        try { addAndroidSystemFonts(out) } catch (t: Throwable) { Log.w(TAG, "SystemFonts API unavailable", t) }
+                    }
+                    // Read every glyph table now (background) so later look-ups are plain memory reads.
+                    for (f in out) { try { f.coverage } catch (_: Throwable) {} }
+                    allFacesCache = out
+                } catch (t: Throwable) {
+                    Log.w(TAG, "System font scan failed", t)
+                    allFacesCache = emptyList()
                 }
-            }
-            // Android's own list of installed fonts (the one text editors use): also finds OEM / user-installed
-            // fonts that live outside the folders above or are missing from fonts.xml.
-            if (android.os.Build.VERSION.SDK_INT >= 29) {
-                try { addAndroidSystemFonts(out) } catch (t: Throwable) { Log.w(TAG, "SystemFonts API unavailable", t) }
-            }
-            allFacesCache = out
-            return out
+            }, "subtitle-font-scan").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }.start()
         }
+        return emptyList()
     }
 
     @android.annotation.TargetApi(29)
@@ -790,26 +788,6 @@ object SubtitleFontManager {
         } catch (_: Throwable) {}
     }
 
-    /**
-     * Gives libass (not only fontconfig) a font for every major script, using the phone's glyph tables.
-     * Needed for embedded subtitle tracks, whose text we never rewrite.
-     */
-    private fun ensureEssentialScriptsVisible(context: Context, fallbacks: List<SystemFallbackFont>) {
-        val probes = listOf(
-            0x3042 to "ja", 0x4E00 to "ja", 0xAC00 to "ko", 0x0915 to null, 0x0627 to null, 0x0E01 to null,
-            0x05D0 to null, 0x0995 to null, 0x0B95 to null, 0x0C15 to null, 0x0D15 to null, 0x0C95 to null,
-            0x0A95 to null, 0x0A15 to null, 0x2605 to null, 0x266A to null
-        )
-        val memo = HashMap<Long, SystemFallbackFont?>()
-        val memo2 = HashMap<Long, SystemFallbackFont?>()
-        for ((cp, hint) in probes) {
-            val f = pickSystemFallback(fallbacks, cp, hint, memo)
-                ?: pickSystemFallback(scanAllSystemFaces(), cp, hint, memo2)
-                ?: continue
-            ensureVisibleToLibass(context, f)
-        }
-    }
-
     private fun buildSystemFallbacks(fontsDir: File, libassDir: File, locale: java.util.Locale): List<SystemFallbackFont> {
         var entries = parseSystemFontsXml()
         if (entries.isEmpty()) entries = scanSystemFontDirs()
@@ -849,7 +827,7 @@ object SubtitleFontManager {
                 } catch (_: Throwable) { continue }
             }
             wanted.add(linkName)
-            if (e.isDefaultSans || langMatches(e.lang) || isEssentialScript(e.lang) || linkName in onDemandLinked) {
+            if (e.isDefaultSans || langMatches(e.lang) || linkName in onDemandLinked) {
                 // Always visible to libass itself (small set), independent of fontconfig.
                 val direct = File(libassDir, linkName)
                 if (!direct.exists()) {
@@ -1158,7 +1136,7 @@ object SubtitleFontManager {
                 val found = pickSystemFallback(fallbacks, cp, hint, pickMemo)
                     ?: pickSystemFallback(scanAllSystemFaces(), cp, hint, scanMemo)
                     ?: pickSystemFallback(downloadedFaces(context), cp, hint, dlMemo)
-                if (found == null) {
+                if (found == null && allFacesCache != null) {
                     Log.w(TAG, "No font on this phone covers U+${Integer.toHexString(cp)}; requesting online font")
                     requestOnlineFont(context, cp)
                 }
@@ -2020,7 +1998,11 @@ object SubtitleFontManager {
      * looked up on the phone first (same font = same look) and handed to libass directly. Only what the
      * phone does not have is left for Google Fonts, and only what Google does not have uses the default font.
      */
+    private val linkedScriptKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+
     private fun linkRequestedPhoneFonts(context: Context, assContent: String) {
+        // Same script again (subtitle switched back and forth): nothing new to do, no work on the switch path.
+        if (!linkedScriptKeys.add(assContent.hashCode().toLong() shl 32 or assContent.length.toLong())) return
         val families = try {
             GoogleFontsManager.collectFontRequests(assContent).map { it.family }.distinct().take(40)
         } catch (_: Throwable) { return }
