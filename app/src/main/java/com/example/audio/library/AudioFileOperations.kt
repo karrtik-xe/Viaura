@@ -38,6 +38,7 @@ object AudioFileManager {
         onProgress: ((fraction: Float, completedCount: Int, totalCount: Int, itemName: String) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         var deletedCount = 0
+        val deletedPaths = mutableListOf<String>()
         val targetDir = File(folder.path)
         if (targetDir.exists() && targetDir.isDirectory) {
             val audioFiles = mutableListOf<File>()
@@ -57,6 +58,7 @@ object AudioFileManager {
                 }
                 if (deleted) {
                     deletedCount++
+                    deletedPaths.add(path)
                     cleanMediaStoreRecord(context, path)
                 }
                 onProgress?.invoke((index + 1).toFloat() / total, index + 1, total, file.name)
@@ -67,6 +69,7 @@ object AudioFileManager {
                 }
             } catch (_: Exception) {}
         }
+        forgetDeletedAudios(context, deletedPaths)
         deletedCount
     }
 
@@ -79,6 +82,7 @@ object AudioFileManager {
         onProgress: ((fraction: Float, completedCount: Int, totalCount: Int, itemName: String) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         var count = 0
+        val deletedPaths = mutableListOf<String>()
         val total = tracks.size.coerceAtLeast(1)
         tracks.forEachIndexed { index, track ->
             onProgress?.invoke(index.toFloat() / total, index, total, track.title)
@@ -104,10 +108,12 @@ object AudioFileManager {
 
             if (deleted) {
                 count++
+                deletedPaths.add(track.path)
                 cleanMediaStoreRecord(context, track.path)
             }
             onProgress?.invoke((index + 1).toFloat() / total, index + 1, total, track.title)
         }
+        forgetDeletedAudios(context, deletedPaths)
         count
     }
 
@@ -404,6 +410,18 @@ object AudioFileManager {
         } catch (_: Exception) {
             false
         }
+    }
+
+    /** Deleted audio files disappear from every playlist and from the listening history. */
+    private fun forgetDeletedAudios(context: Context, paths: List<String>) {
+        if (paths.isEmpty()) return
+        try { PlaylistManager.removePathsEverywhere(context, paths, audio = true) } catch (_: Throwable) {}
+        try {
+            val gone = paths.toHashSet()
+            AudioPlaybackHistoryManager.getAllHistory(context).filter { it.path in gone }.forEach {
+                AudioPlaybackHistoryManager.deleteRecord(context, it)
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun cleanMediaStoreRecord(context: Context, path: String) {

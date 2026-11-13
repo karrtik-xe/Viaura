@@ -41,6 +41,7 @@ object VideoFileManager {
         onProgress: ((fraction: Float, completedCount: Int, totalCount: Int, itemName: String) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         var deletedCount = 0
+        val deletedPaths = mutableListOf<String>()
         val targetDir = File(folder.path)
         if (targetDir.exists() && targetDir.isDirectory) {
             val videoFiles = mutableListOf<File>()
@@ -60,6 +61,7 @@ object VideoFileManager {
                 }
                 if (deleted) {
                     deletedCount++
+                    deletedPaths.add(path)
                     cleanMediaStoreRecord(context, path)
                 }
                 onProgress?.invoke((index + 1).toFloat() / total, index + 1, total, file.name)
@@ -78,12 +80,14 @@ object VideoFileManager {
                 if (f.exists() && isVideoFile(f)) {
                     if (f.delete()) {
                         deletedCount++
+                        deletedPaths.add(vid.path)
                         cleanMediaStoreRecord(context, vid.path)
                     }
                 }
                 onProgress?.invoke((index + 1).toFloat() / total, index + 1, total, vid.displayName)
             }
         }
+        forgetDeletedVideos(context, deletedPaths)
         deletedCount
     }
 
@@ -96,6 +100,7 @@ object VideoFileManager {
         onProgress: ((fraction: Float, completedCount: Int, totalCount: Int, itemName: String) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         var count = 0
+        val deletedPaths = mutableListOf<String>()
         val total = videos.size.coerceAtLeast(1)
         videos.forEachIndexed { index, video ->
             onProgress?.invoke(index.toFloat() / total, index, total, video.displayName)
@@ -121,10 +126,12 @@ object VideoFileManager {
 
             if (deleted) {
                 count++
+                deletedPaths.add(video.path)
                 cleanMediaStoreRecord(context, video.path)
             }
             onProgress?.invoke((index + 1).toFloat() / total, index + 1, total, video.displayName)
         }
+        forgetDeletedVideos(context, deletedPaths)
         count
     }
 
@@ -516,6 +523,15 @@ object VideoFileManager {
             true
         } catch (_: Exception) {
             false
+        }
+    }
+
+    /** Deleted videos disappear from every playlist and from the watch history (their resume points). */
+    private fun forgetDeletedVideos(context: Context, paths: List<String>) {
+        if (paths.isEmpty()) return
+        try { PlaylistManager.removePathsEverywhere(context, paths, audio = false) } catch (_: Throwable) {}
+        for (p in paths) {
+            try { PlaybackHistoryManager.clearPosition(context = context, videoId = 0L, path = p) } catch (_: Throwable) {}
         }
     }
 

@@ -177,6 +177,28 @@ object PlaylistManager {
         return addedCount
     }
 
+    /**
+     * Media files were deleted from storage: their paths leave EVERY playlist (and the Favourites marks).
+     * Only the playlist entries go; nothing else is touched. Other playlists / files stay as they are.
+     */
+    @Synchronized
+    fun removePathsEverywhere(context: Context, paths: Collection<String>, audio: Boolean) {
+        if (paths.isEmpty()) return
+        val gone = paths.toHashSet()
+        val current = getPlaylists(context)
+        try {
+            for (p in gone) FavouritesFolder.removeEverywhere(context, current, audio, p)
+        } catch (_: Throwable) {}
+        var changed = false
+        val updated = current.map { pl ->
+            if (pl.videoPaths.any { it in gone }) {
+                changed = true
+                pl.copy(videoPaths = pl.videoPaths.filter { it !in gone })
+            } else pl
+        }
+        if (changed) savePlaylists(context, updated)
+    }
+
     @Synchronized
     fun removeVideoFromPlaylist(context: Context, playlistId: String, videoPath: String) {
         val current = getPlaylists(context).toMutableList()

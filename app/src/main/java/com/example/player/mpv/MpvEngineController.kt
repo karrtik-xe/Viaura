@@ -306,7 +306,8 @@ class MpvPlayerController {
                 // Embedded ASS/SSA tracks are read by libass directly; it only re-scans the fonts
                 // folder when the track is re-initialised.
                 val selected = _subtitleTracks.value.firstOrNull { it.isSelected }
-                val embeddedAss = selected != null && !selected.isExternal && isCurrentSubtitleNativeAssSsa()
+                // Any embedded text track (ASS, SSA, SRT, WebVTT): a font may have just been handed to libass.
+                val embeddedAss = selected != null && !selected.isExternal
                 if (embeddedAss) {
                     withMpvLock(Unit) { v ->
                         try {
@@ -1058,6 +1059,15 @@ class MpvPlayerController {
         private set
     @Volatile
     private var targetResumePositionMs: Long = 0L
+
+    /** True while mpv's "start" option holds a resume position that must be cleared again after the file opened. */
+    private var startOptionActive = false
+
+    private fun clearStartOption() {
+        if (!startOptionActive) return
+        startOptionActive = false
+        try { mpvView?.mpv?.setPropertyString("start", "none") } catch (_: Throwable) {}
+    }
 
     private var currentAudioDelayMs: Long = 0L
     private var currentSubtitleDelayMs: Long = 0L
@@ -2333,6 +2343,14 @@ class MpvPlayerController {
             }
             lastLoadWasDirect = directStreamMode
             val mpvTarget = proxied(filePath)
+            // Resume: mpv opens the file AT the saved position. Without this it opened at 0, showed the very
+            // first frame and only then seeked (long on a 17-18 GB 4K MKV).
+            try {
+                if (initialPos > 500L && !directStreamMode) {
+                    view.mpv.setPropertyString("start", "$startSec")
+                    startOptionActive = true
+                } else clearStartOption()
+            } catch (_: Throwable) {}
             try {
                 view.mpv.command("loadfile", mpvTarget, "replace")
             } catch (_: Throwable) {
@@ -2430,6 +2448,7 @@ class MpvPlayerController {
                         } catch (_: Throwable) {}
                     }
                     isResumeSeekVerified = true
+                    clearStartOption()
                 } else {
                     delay(50L)
                 }

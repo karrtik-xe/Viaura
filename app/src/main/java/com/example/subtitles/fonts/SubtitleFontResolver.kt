@@ -613,15 +613,61 @@ object SubtitleFontManager {
      * every time a subtitle track starts, so a font linked here before the subtitle file is written is found
      * by its own family name no matter what fontconfig does with the system font folders.
      */
-    private fun ensureVisibleToLibass(context: Context, font: SystemFallbackFont) {
+    private fun ensureVisibleToLibass(context: Context, font: SystemFallbackFont): Boolean {
         try {
             val name = if (font.link.name.startsWith(SYS_LINK_PREFIX)) font.link.name else SYS_LINK_PREFIX + font.link.name
             val dst = File(getSubFontsDir(context), name)
-            if (dst.exists()) { onDemandLinked.add(name); return }
+            if (dst.exists()) { onDemandLinked.add(name); return false }
             dst.delete()
             android.system.Os.symlink(font.link.canonicalPath, dst.absolutePath)
             onDemandLinked.add(name)
+            return true
         } catch (_: Throwable) {}
+        return false
+    }
+
+    /**
+     * Embedded (MKV) text subtitles are rendered by libass itself, so their text never passes through
+     * [applyGlyphFallback]. Called in the BACKGROUND with the track's text: every script in it gets a font
+     * (phone first, Google Noto when the phone has none) handed to libass. Returns true when a font was newly
+     * handed over, i.e. the active embedded track has to be re-initialised once to pick it up.
+     */
+    fun linkFontsForEmbeddedText(context: Context, text: String): Boolean {
+        if (text.isBlank()) return false
+        var created = false
+        try {
+            val fallbacks = prepareSystemFallbackFonts(context, getSubFontsDir(context))
+            scanAllSystemFaces()
+            var waited = 0
+            while (allFacesCache == null && waited < 8000) { Thread.sleep(100); waited += 100 }
+            val cps = LinkedHashSet<Int>()
+            var hint: String? = null
+            var i = 0
+            while (i < text.length) {
+                val c = text.codePointAt(i)
+                i += Character.charCount(c)
+                if (c < 0x80) continue
+                if (c in 0x3040..0x30FF || c in 0x31F0..0x31FF || c in 0xFF66..0xFF9F) hint = "ja"
+                else if ((c in 0xAC00..0xD7AF || c in 0x1100..0x11FF || c in 0x3130..0x318F) && hint == null) hint = "ko"
+                if (cps.size < 30000) cps.add(c)
+            }
+            val m1 = HashMap<Long, SystemFallbackFont?>()
+            val m2 = HashMap<Long, SystemFallbackFont?>()
+            val m3 = HashMap<Long, SystemFallbackFont?>()
+            for (cp in cps) {
+                val found = pickSystemFallback(fallbacks, cp, hint, m1)
+                    ?: pickSystemFallback(scanAllSystemFaces(), cp, hint, m2)
+                    ?: pickSystemFallback(downloadedFaces(context), cp, hint, m3)
+                if (found != null) {
+                    if (ensureVisibleToLibass(context, found)) created = true
+                } else if (allFacesCache != null) {
+                    requestOnlineFont(context, cp)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Embedded subtitle font link failed", t)
+        }
+        return created
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -774,6 +820,8 @@ object SubtitleFontManager {
                         if (!tmp.renameTo(dst)) { tmp.copyTo(dst, overwrite = true); tmp.delete() }
                         downloadedFacesCache = null
                         Log.i(TAG, "Downloaded subtitle font $family for U+${Integer.toHexString(cp)}")
+                        // The player rebuilds external subtitles and re-initialises the embedded one.
+                        try { GoogleFontsManager.notifyFontsChanged() } catch (_: Throwable) {}
                     } else {
                         tmp.delete()
                         downloadFailedAt[family] = System.currentTimeMillis()

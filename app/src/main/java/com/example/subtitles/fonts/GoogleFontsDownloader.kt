@@ -85,6 +85,9 @@ object GoogleFontsManager {
         listeners.remove(listener)
     }
 
+    /** A font became available outside the Google-font cache (e.g. Noto downloaded for a script): reload subtitles. */
+    fun notifyFontsChanged() = notifyListeners()
+
     private fun notifyListeners() {
         for (l in listeners) {
             try { l() } catch (_: Throwable) {}
@@ -278,16 +281,27 @@ object GoogleFontsManager {
         val app = context.applicationContext
         scope.launch {
             try {
+                // Playback starts first: reading the subtitle tracks of a huge MKV must never compete with it.
+                kotlinx.coroutines.delay(2500L)
                 val (_, tracks, _) = MkvManagerEngine.parseMkvFile(app, Uri.fromFile(file))
                 val requests = LinkedHashSet<FontRequest>()
+                var linkedScriptFont = false
                 tracks.filter {
                     it.trackType == MkvTrackType.SUBTITLE &&
-                        (it.codecId.contains("ASS", ignoreCase = true) || it.codecId.contains("SSA", ignoreCase = true))
-                }.take(8).forEach { track ->
+                        (it.codecId.startsWith("S_TEXT", ignoreCase = true) ||
+                            it.codecId.contains("ASS", ignoreCase = true) || it.codecId.contains("SSA", ignoreCase = true))
+                }.take(6).forEach { track ->
                     val text = MkvManagerEngine.extractSubtitleTrackToString(app, Uri.fromFile(file), track)
-                    if (text.isNotBlank()) requests.addAll(collectFontRequests(text))
+                    if (text.isNotBlank()) {
+                        if (track.codecId.contains("ASS", ignoreCase = true) || track.codecId.contains("SSA", ignoreCase = true)) {
+                            requests.addAll(collectFontRequests(text))
+                        }
+                        // Any text format (ASS, SSA, SRT, WebVTT ...): a font for every script in it.
+                        if (SubtitleFontManager.linkFontsForEmbeddedText(app, text)) linkedScriptFont = true
+                    }
                 }
                 if (requests.isNotEmpty()) ensureRequests(app, requests, fontsDir, notifyForCached = true)
+                if (linkedScriptFont) notifyListeners()
             } catch (t: Throwable) {
                 Log.w(TAG, "Could not read fonts of embedded subtitles", t)
             }
