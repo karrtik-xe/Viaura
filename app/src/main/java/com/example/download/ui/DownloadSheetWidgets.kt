@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -421,3 +423,66 @@ fun DownloadPickerSheet(
         }
     }
 }
+
+/**
+ * A cover when the website / provider gives none: a soft gradient (its colours come from the title, so every video keeps
+ * the same one) with the first letter.
+ */
+@Composable
+fun GeneratedCover(seed: String, modifier: Modifier = Modifier) {
+    val h = ((seed.hashCode() and 0x7fffffff) % 360).toFloat()
+    Box(
+        modifier = modifier.background(
+            androidx.compose.ui.graphics.Brush.linearGradient(listOf(Color.hsv(h, 0.55f, 0.85f), Color.hsv((h + 55f) % 360f, 0.60f, 0.62f)))
+        ),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            seed.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "▶",
+            fontSize = 34.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.92f)
+        )
+    }
+}
+
+/**
+ * Download sheet header block: a large cover on the left; the Title and Author boxes sit on top of each other on the
+ * right. The cover is exactly as tall as both boxes together (same top and bottom edge). The cover is always attached to
+ * the downloaded file (the picture of the video itself), so there is no switch for it.
+ */
+@Composable
+fun SheetCoverTitleAuthor(
+    thumbnail: String?,
+    title: String,
+    onTitleChange: (String) -> Unit,
+    author: String,
+    onAuthorChange: (String) -> Unit,
+    primary: Color,
+    secondary: Color,
+    modifier: Modifier = Modifier,
+    coverWidth: androidx.compose.ui.unit.Dp = 128.dp
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(coverWidth)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(24.dp))
+        ) {
+            LinkThumbnail(
+                thumbnail = thumbnail?.takeIf { it.isNotBlank() },
+                modifier = Modifier.fillMaxSize(),
+                fallback = { GeneratedCover(title, Modifier.fillMaxSize()) }
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            SheetTextField("Title", title, onTitleChange, primary, secondary)
+            SheetTextField("Author", author, onAuthorChange, primary, secondary, Modifier.padding(top = 12.dp))
+        }
+    }
+}
+

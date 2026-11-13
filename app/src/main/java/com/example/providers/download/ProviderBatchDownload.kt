@@ -68,7 +68,9 @@ internal data class BatchEpisode(
     val index: Int,
     val link: String,
     val type: String,
-    val poster: String
+    val poster: String,
+    /** Shown / edited in the panel; empty = the provider's name. */
+    val author: String = ""
 )
 
 /** One quality variant of the title ("1080p x264", "1080p 10Bit HEVC" ...) and a way to read its episode list. */
@@ -230,7 +232,7 @@ internal object ProviderBatchDownloader {
                         PlanSubtitle(sb.language, sb.title.ifBlank { sb.language.ifBlank { "Subtitle" } }, sb.uri, e, false)
                     }
                     val plan = DownloadPlan(
-                        pageUrl = c.stream.link, title = ep.name.trim().ifBlank { "Download" }, uploader = plugin.name, thumbnailUrl = ep.poster, isAudio = false,
+                        pageUrl = c.stream.link, title = ep.name.trim().ifBlank { "Download" }, uploader = ep.author.trim().ifBlank { plugin.name }, thumbnailUrl = ep.poster, isAudio = false,
                         parts = listOf(part), subtitles = planSubs, attachThumbnail = false,
                         qualityLabel = qualityText, group = group.trim()
                     )
@@ -282,11 +284,15 @@ internal fun MediaBatchDownloadSheet(
     var showPicker by remember { mutableStateOf(false) }
     var preparing by remember { mutableStateOf(false) }
     val chosen = variants.getOrNull(variantIndex)
+    // title / author of every selected episode, editable one by one
+    val names = remember(episodes) { androidx.compose.runtime.mutableStateListOf<String>().apply { addAll(episodes.map { it.name }) } }
+    val authors = remember(episodes) { androidx.compose.runtime.mutableStateListOf<String>().apply { addAll(episodes.map { it.author.ifBlank { plugin.name } }) } }
 
     fun startAll() {
         val v = chosen ?: return
         if (preparing) return
         preparing = true
+        val episodes = episodes.mapIndexed { i, e -> e.copy(name = names.getOrNull(i)?.ifBlank { e.name } ?: e.name, author = authors.getOrNull(i).orEmpty()) }
         scope.launch {
             val list: List<BatchEpisode>? = if (v.isCurrent) episodes else withContext(Dispatchers.IO) {
                 val other = try { v.episodes() } catch (_: Throwable) { null }
@@ -313,20 +319,14 @@ internal fun MediaBatchDownloadSheet(
         Spacer(Modifier.height(10.dp))
 
         SheetSectionLabel("Selected (${episodes.size})", primary)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .background(primary.copy(alpha = 0.07f))
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            val shown = episodes.take(6)
-            shown.forEach { e ->
-                Text(e.name, fontSize = 14.sp, color = primary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 2.dp))
-            }
-            if (episodes.size > shown.size) {
-                Text("+ ${episodes.size - shown.size} more", fontSize = 13.sp, color = secondary, modifier = Modifier.padding(top = 4.dp))
-            }
+        // one below the other: cover (the provider's poster, a generated one when there is none) + title + author, editable
+        episodes.forEachIndexed { i, e ->
+            if (i > 0) Spacer(Modifier.height(14.dp))
+            SheetCoverTitleAuthor(
+                thumbnail = e.poster, title = names.getOrElse(i) { e.name }, onTitleChange = { if (i < names.size) names[i] = it },
+                author = authors.getOrElse(i) { plugin.name }, onAuthorChange = { if (i < authors.size) authors[i] = it },
+                primary = primary, secondary = secondary, coverWidth = 112.dp
+            )
         }
 
         SheetSectionLabel("Quality", primary)

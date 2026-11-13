@@ -29,6 +29,53 @@ object HttpFetch {
     private const val UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private const val STALL_LIMIT_MS = 10 * 60_000L
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Internet loss: a download never gives up and never starts again because the connection dropped. It simply
+    // waits where it is and continues from the same byte / chunk / segment when the internet is back.
+    // ---------------------------------------------------------------------------------------------------------
+    private val internetWaiters = AtomicInteger(0)
+
+    /** True while at least one download waits for the internet (the list shows "Waiting for internet…"). */
+    val isWaitingForInternet: Boolean get() = internetWaiters.get() > 0
+
+    fun isOnline(context: Context): Boolean = try {
+        val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    } catch (_: Throwable) { true }
+
+    /** Returns at once while online; otherwise waits (cancellable by Pause / Stop) until the internet is back. */
+    suspend fun awaitInternet(context: Context, token: CancelToken?) {
+        if (isOnline(context)) return
+        internetWaiters.incrementAndGet()
+        try {
+            while (!isOnline(context)) {
+                token?.check()
+                delay(1000L)
+            }
+        } finally {
+            internetWaiters.decrementAndGet()
+        }
+        delay(600L) // let the new connection settle
+    }
+
+    /** Errors that are not the connection's fault (full storage ...): retrying cannot help. */
+    private fun isFatalIo(e: IOException): Boolean {
+        val m = e.message.orEmpty().lowercase()
+        return m.contains("no space left") || m.contains("enospc") || m.contains("permission denied") || m.contains("read-only file system") || m.contains("quota")
+    }
+
+    /** A dropped / slow / reset connection (anything but a clear answer of the server): waiting is the right reaction. */
+    fun isNetworkError(e: IOException): Boolean =
+        e !is HttpStatusException && e !is LinkExpiredException && e !is RangeIgnored && !isFatalIo(e)
+
+    /** Whether a retry loop has to give up: only for server answers that stay wrong, never for connection loss. */
+    fun shouldGiveUp(e: IOException, lastProgressAt: Long): Boolean {
+        if (isFatalIo(e)) return true
+        if (isNetworkError(e)) return false
+        return System.currentTimeMillis() - lastProgressAt > STALL_LIMIT_MS
+    }
     private val skipHeaders = setOf("host", "range", "if-range", "accept-encoding", "content-length", "connection", "transfer-encoding", "te", "upgrade")
 
     private val direct: OkHttpClient by lazy {
@@ -207,10 +254,21 @@ object HttpFetch {
         }
         withContext(Dispatchers.IO) {
             dest.parentFile?.mkdirs()
-            val h = head(context, part.url, part.headers, token)
+            var h = head(context, part.url, part.headers, token)
+            // no answer because the internet is off: wait for it instead of guessing (a guess could restart the file)
+            while (h == null && !isOnline(context)) {
+                awaitInternet(context, token)
+                h = head(context, part.url, part.headers, token)
+            }
+            // what the first run learned about this file (size + chunk size); used when the server cannot answer now
+            val saved: Pair<Long, Long>? = try {
+                File(dest.path + ".chunks").takeIf { it.exists() && dest.exists() }?.readLines()?.firstOrNull()
+                    ?.split(':')?.takeIf { it.size == 2 }?.let { (a, b) -> (a.toLongOrNull() ?: 0L) to (b.toLongOrNull() ?: 0L) }
+                    ?.takeIf { it.first > 0L && it.second > 0L && dest.length() == it.first }
+            } catch (_: Throwable) { null }
             // the server's own answer for THIS request decides; the size seen earlier in the list is only a fallback
-            val total = if ((h?.size ?: -1L) > 0L) h!!.size else part.sizeBytes
-            val ranges = total > 0L && h?.acceptsRanges == true
+            val total = if ((h?.size ?: -1L) > 0L) h!!.size else saved?.first ?: part.sizeBytes
+            val ranges = total > 0L && (h?.acceptsRanges == true || (h == null && saved != null))
             if (total > 0L) totalOut?.set(total)
             if (!ranges) {
                 downloadSingle(context, part, dest, token, counter, total)
@@ -311,7 +369,10 @@ object HttpFetch {
                                 if (e is LinkExpiredException || e is RangeIgnored) throw e
                                 token.check()
                                 attempt++
-                                if (System.currentTimeMillis() - lastProgress.get() > STALL_LIMIT_MS) throw e
+                                if (shouldGiveUp(e, lastProgress.get())) throw e
+                                // connection lost: wait here (every worker keeps its chunk) and go on from the same place
+                                awaitInternet(context, token)
+                                if (isNetworkError(e)) lastProgress.set(System.currentTimeMillis())
                                 delay(minOf(10_000L, 400L * (1L shl minOf(attempt, 5))))
                             }
                         }
@@ -373,7 +434,10 @@ object HttpFetch {
                 if (e is LinkExpiredException) throw e
                 token.check()
                 attempt++
-                if (System.currentTimeMillis() - lastProgress > STALL_LIMIT_MS) throw e
+                if (shouldGiveUp(e, lastProgress)) throw e
+                // connection lost: wait, then continue from the byte that is already on disk (Range request)
+                awaitInternet(context, token)
+                if (isNetworkError(e)) lastProgress = System.currentTimeMillis()
                 delay(minOf(10_000L, 400L * (1L shl minOf(attempt, 5))))
             }
         }

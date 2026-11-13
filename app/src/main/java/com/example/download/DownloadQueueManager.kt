@@ -391,11 +391,16 @@ object DownloadManager {
                     val allKnown = totals.all { it.get() > 0L }
                     val knownTotal = totals.sumOf { it.get() }
                     val currentSpeed = speed
+                    // the internet is off: the download stands still where it is and continues from there by itself
+                    val waiting = HttpFetch.isWaitingForInternet
                     DownloadStore.update(app, id) {
                         if (it.status != DownloadStatus.DOWNLOADING) it else {
                             val total = if (allKnown) maxOf(knownTotal, done) else maxOf(it.totalBytes, done)
-                            val eta = if (currentSpeed > 1.0 && total > done) ((total - done) / currentSpeed).toLong() else -1L
-                            it.copy(downloadedBytes = done, totalBytes = total, speedBps = currentSpeed.toLong(), etaSec = eta, note = null)
+                            val eta = if (!waiting && currentSpeed > 1.0 && total > done) ((total - done) / currentSpeed).toLong() else -1L
+                            it.copy(
+                                downloadedBytes = done, totalBytes = total, speedBps = if (waiting) 0L else currentSpeed.toLong(), etaSec = eta,
+                                note = if (waiting) "Waiting for internet…" else null
+                            )
                         }
                     }
                 }
@@ -421,6 +426,7 @@ object DownloadManager {
                     } catch (e: LinkExpiredException) {
                         refreshes++
                         if (refreshes > 3) throw IllegalStateException("The website no longer gives this video. Open it again and start a new download.")
+                        HttpFetch.awaitInternet(app, token)
                         val fresh = refreshLinks(app, plan) ?: throw IllegalStateException("The link has expired. Open it again and start a new download.")
                         plan = fresh
                         DownloadStore.update(app, id, persist = true) { it.copy(planJson = fresh.toJson()) }

@@ -260,24 +260,11 @@ private fun ColumnScope.ProviderReady(
     DownloadSheetHeader(subtitle = "Adjust download", primary = primary, secondary = secondary, enabled = chosen != null) { startDownload() }
     Spacer(Modifier.height(16.dp))
 
-    SheetOptionCard(
-        title = "Video Thumbnail",
-        subtitle = when {
-            keepOriginal -> "Not added - the MKV is saved untouched"
-            withThumb -> "Preserved with video file (saved as MKV)"
-            else -> "Not attached"
-        },
-        primary = primary, secondary = secondary, checked = withThumb && !keepOriginal, onCheckedChange = { if (!keepOriginal) withThumb = it },
-        leading = {
-            LinkThumbnail(
-                thumbnail = poster.takeIf { it.isNotBlank() },
-                modifier = Modifier.size(width = 82.dp, height = 58.dp).clip(RoundedCornerShape(14.dp)),
-                fallback = { Box(Modifier.size(width = 82.dp, height = 58.dp).background(secondary.copy(alpha = 0.15f))) }
-            )
-        }
+    // large cover (the provider's poster; a generated one when the provider gives none) with Title and Author beside it
+    SheetCoverTitleAuthor(
+        thumbnail = poster, title = name, onTitleChange = { name = it }, author = author, onAuthorChange = { author = it },
+        primary = primary, secondary = secondary
     )
-    SheetTextField("Title", name, { name = it }, primary, secondary, Modifier.padding(top = 20.dp))
-    SheetTextField("Author", author, { author = it }, primary, secondary, Modifier.padding(top = 14.dp))
 
     SheetSectionLabel("Server", primary)
     if (chosen == null) {

@@ -940,7 +940,11 @@ private fun DownloadingListCard(
 
             // Subtitle & Status
             val statusLabel = when (item.status) {
-                DownloadStatus.DOWNLOADING -> if (item.speedBps > 0) "Downloading · ${DownloadFormat.speed(item.speedBps)}" else "Starting…"
+                DownloadStatus.DOWNLOADING -> when {
+                    !item.note.isNullOrBlank() && item.speedBps <= 0L -> item.note
+                    item.speedBps > 0 -> "Downloading · ${DownloadFormat.speed(item.speedBps)}" + if (item.etaSec > 0L) " · ${DownloadFormat.eta(item.etaSec)} left" else ""
+                    else -> "Starting…"
+                }
                 DownloadStatus.QUEUED -> "Queued…"
                 DownloadStatus.PROCESSING -> "Finishing up…"
                 DownloadStatus.PAUSED -> "Paused"
@@ -1199,7 +1203,11 @@ private fun DownloadingGridCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val statusLabel = when (item.status) {
-                DownloadStatus.DOWNLOADING -> if (item.speedBps > 0) DownloadFormat.speed(item.speedBps) else "Starting…"
+                DownloadStatus.DOWNLOADING -> when {
+                    !item.note.isNullOrBlank() && item.speedBps <= 0L -> item.note
+                    item.speedBps > 0 -> DownloadFormat.speed(item.speedBps) + if (item.etaSec > 0L) " · ${DownloadFormat.eta(item.etaSec)} left" else ""
+                    else -> "Starting…"
+                }
                 DownloadStatus.QUEUED -> "Queued"
                 DownloadStatus.PROCESSING -> "Finishing"
                 DownloadStatus.PAUSED -> "Paused"

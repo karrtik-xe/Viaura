@@ -341,20 +341,11 @@ private fun ColumnScope.ReadyContent(
 
     // ---- thumbnail + name / author ----
     val thumb = info.thumbnailUrl.ifBlank { initialThumbnail.orEmpty() }.takeIf { it.isNotBlank() }
-    SheetOptionCard(
-        title = if (audioMode) "Audio Thumbnail" else "Video Thumbnail",
-        subtitle = if (!withThumb) "Not attached" else if (audioMode) "Embedded as cover art" else "Preserved with video file",
-        primary = primary, secondary = secondary, checked = withThumb, onCheckedChange = { withThumb = it },
-        leading = {
-            LinkThumbnail(
-                thumbnail = thumb,
-                modifier = Modifier.size(width = 82.dp, height = 58.dp).clip(RoundedCornerShape(14.dp)),
-                fallback = { Box(Modifier.size(width = 82.dp, height = 58.dp).background(secondary.copy(alpha = 0.15f))) }
-            )
-        }
+    // large cover (always the video's own picture, attached to the file) with Title and Author stacked beside it
+    SheetCoverTitleAuthor(
+        thumbnail = thumb, title = title, onTitleChange = { title = it }, author = author, onAuthorChange = { author = it },
+        primary = primary, secondary = secondary
     )
-    SheetTextField("Title", title, { title = it }, primary, secondary, Modifier.padding(top = 20.dp))
-    SheetTextField("Author", author, { author = it }, primary, secondary, Modifier.padding(top = 14.dp))
 
     if (!audioMode) {
         // ---- video quality ----

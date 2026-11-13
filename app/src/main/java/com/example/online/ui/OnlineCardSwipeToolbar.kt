@@ -39,6 +39,8 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -98,18 +100,31 @@ fun Modifier.swipeLeftForActions(enabled: Boolean = true, selected: Boolean = fa
         .graphicsLayer { translationX = offset.value }
         .drawWithContent {
             drawContent()
-            // A card that is part of the swipe selection: soft tint, thin outline and a tick in its corner
+            // A card that is part of the swipe selection: its top-right corner (about 7 % of the card) glows in the
+            // accent gradient, with a small tick - the card itself stays as it is
             if (selected) {
                 val r = 16.dp.toPx()
-                drawRoundRect(color = AccentSkyBlue.copy(alpha = 0.16f), cornerRadius = CornerRadius(r, r))
-                drawRoundRect(color = AccentSkyBlue.copy(alpha = 0.95f), cornerRadius = CornerRadius(r, r), style = Stroke(width = 2.dp.toPx()))
-                val rad = 11.dp.toPx()
-                val c = Offset(size.width - rad - 8.dp.toPx(), rad + 8.dp.toPx())
-                drawCircle(color = AccentSkyBlue, radius = rad, center = c)
+                val rad = kotlin.math.sqrt(size.width * size.height * 0.07f * 4f / Math.PI.toFloat())
+                    .coerceAtMost(minOf(size.width, size.height) * 0.95f)
+                val corner = Offset(size.width, 0f)
+                val cardShape = Path().apply {
+                    addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, size.width, size.height, CornerRadius(r, r)))
+                }
+                clipPath(cardShape) {
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(AccentSkyBlue.copy(alpha = 0.95f), AccentPink.copy(alpha = 0.60f), Color.Transparent),
+                            center = corner, radius = rad
+                        ),
+                        radius = rad, center = corner
+                    )
+                }
+                val c = Offset(size.width - rad * 0.30f, rad * 0.30f)
+                val t = rad * 0.11f
                 val tick = Path().apply {
-                    moveTo(c.x - rad * 0.45f, c.y + rad * 0.02f)
-                    lineTo(c.x - rad * 0.10f, c.y + rad * 0.38f)
-                    lineTo(c.x + rad * 0.48f, c.y - rad * 0.34f)
+                    moveTo(c.x - t * 1.0f, c.y + t * 0.05f)
+                    lineTo(c.x - t * 0.25f, c.y + t * 0.85f)
+                    lineTo(c.x + t * 1.1f, c.y - t * 0.75f)
                 }
                 drawPath(tick, color = Color.White, style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round))
             }

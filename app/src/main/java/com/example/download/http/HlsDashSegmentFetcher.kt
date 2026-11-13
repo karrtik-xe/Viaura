@@ -170,9 +170,27 @@ object SegmentFetch {
             val segments: List<Segment>
             val init: Segment?
             if (part.protocol == "hls") {
-                val pl = parseHls(context, part.url, headers, token)
-                segments = pl.segments
-                init = pl.initSegment
+                // the playlist is read again on every start: with no internet it is awaited, never counted as a failure
+                var pl: Playlist? = null
+                var tries = 0
+                while (pl == null) {
+                    token.check()
+                    try {
+                        pl = parseHls(context, part.url, headers, token)
+                    } catch (e: FetchCancelled) {
+                        throw e
+                    } catch (e: LinkExpiredException) {
+                        throw e
+                    } catch (e: IOException) {
+                        tries++
+                        if (HttpFetch.isOnline(context) && tries >= 6 && !HttpFetch.isNetworkError(e)) throw e
+                        HttpFetch.awaitInternet(context, token)
+                        delay(minOf(10_000L, 600L * tries))
+                    }
+                }
+                val ready = pl!!
+                segments = ready.segments
+                init = ready.initSegment
             } else {
                 // DASH: the first fragment is normally the initialisation segment
                 segments = part.fragments.map { Segment(it) }
@@ -224,7 +242,10 @@ object SegmentFetch {
                                 } catch (e: IOException) {
                                     token.check()
                                     attempt++
-                                    if (System.currentTimeMillis() - lastProgress.get() > 10 * 60_000L) throw e
+                                    if (HttpFetch.shouldGiveUp(e, lastProgress.get())) throw e
+                                    // connection lost: wait, then fetch this same segment again (finished segments are kept)
+                                    HttpFetch.awaitInternet(context, token)
+                                    if (HttpFetch.isNetworkError(e)) lastProgress.set(System.currentTimeMillis())
                                     delay(minOf(10_000L, 400L * (1L shl minOf(attempt, 5))))
                                 }
                             }
