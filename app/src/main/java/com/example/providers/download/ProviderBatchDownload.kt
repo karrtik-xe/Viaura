@@ -119,7 +119,19 @@ private fun matchEpisode(sel: BatchEpisode, list: List<BatchEpisode>): BatchEpis
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** What the first episode chose: every other episode is matched to it (same picture size, same server, close file size). */
-private class BatchReference(val server: String, val height: Int, val sizeBytes: Long)
+internal class BatchReference(val server: String, val height: Int, val sizeBytes: Long)
+
+/**
+ * One thing an episode can be downloaded as: a working server / storage link, and for an HLS playlist one of its renditions.
+ * The panel lists these per episode; what is chosen here is exactly what gets downloaded.
+ */
+internal class QOption(val c: ServerCandidate, val variant: HlsVariant?) {
+    val label: String get() = variant?.label?.takeIf { it.isNotBlank() } ?: c.quality.ifBlank { c.stream.quality.orEmpty() }
+    val height: Int get() = if (variant != null && variant.height > 0) variant.height else MediaPreferences.heightOf(label)
+    /** Size of the file; -1 when it is not known (a rendition of a playlist has no fixed size). */
+    val sizeBytes: Long get() = if (variant != null) -1L else c.sizeBytes
+    val key: String get() = c.stream.link + "|" + (variant?.uri.orEmpty())
+}
 
 internal object ProviderBatchDownloader {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -172,6 +184,55 @@ internal object ProviderBatchDownloader {
         return sameServer.firstOrNull() ?: list.first()
     }
 
+    /**
+     * The same rule as [choose], over the options of the panel: the first episode takes the best fit for the settings
+     * (download quality, language, server), every next one the same picture size as the first, the nearest size to it.
+     */
+    fun chooseOption(
+        app: Context, options: List<QOption>, ref: BatchReference?,
+        sticky: com.example.util.media.ServerReputationStore.Choice?, wantQuality: Int
+    ): QOption? {
+        if (options.isEmpty()) return null
+        if (ref == null) {
+            // the download quality of the settings: exact, else the nearest lower, else the nearest higher one
+            if (wantQuality > 0) {
+                val known = options.filter { it.height > 0 }
+                val pool = known.filter { it.height == wantQuality }.ifEmpty {
+                    known.filter { it.height < wantQuality }.let { lower ->
+                        if (lower.isEmpty()) emptyList() else { val h = lower.maxOf { it.height }; lower.filter { it.height == h } }
+                    }
+                }.ifEmpty {
+                    if (known.isEmpty()) emptyList() else { val h = known.minOf { it.height }; known.filter { it.height == h } }
+                }
+                if (pool.isNotEmpty()) {
+                    return pool.maxByOrNull { MediaPreferences.score(app, it.c.stream, sticky, wantQuality, it.label) } ?: pool.first()
+                }
+            }
+            return options.maxByOrNull { MediaPreferences.score(app, it.c.stream, sticky, wantQuality, it.label) } ?: options.first()
+        }
+        var list = options
+        if (ref.height > 0) {
+            val same = list.filter { it.height == ref.height }
+            if (same.isNotEmpty()) list = same else {
+                val known = list.filter { it.height > 0 }
+                if (known.isNotEmpty()) {
+                    val d = known.minOf { abs(it.height - ref.height) }
+                    list = known.filter { abs(it.height - ref.height) == d }
+                }
+            }
+        }
+        val sameServer = list.filter { it.c.stream.server.trim().equals(ref.server.trim(), ignoreCase = true) }
+        if (ref.sizeBytes > 0L) {
+            val sized = list.filter { it.sizeBytes > 0L }
+            if (sized.isNotEmpty()) {
+                val best = sized.minOf { abs(it.sizeBytes - ref.sizeBytes) }
+                val closest = sized.filter { abs(it.sizeBytes - ref.sizeBytes) == best }
+                return closest.firstOrNull { o -> sameServer.any { it.key == o.key } } ?: closest.first()
+            }
+        }
+        return sameServer.firstOrNull() ?: list.first()
+    }
+
     /** The rendition of an HLS master playlist: the exact height, else the best one below it, else the lowest above. */
     private fun variantFor(list: List<HlsVariant>, target: Int): HlsVariant? {
         val l = list.filter { it.height > 0 }
@@ -181,7 +242,7 @@ internal object ProviderBatchDownloader {
             ?: l.filter { it.height > target }.minWithOrNull(compareBy<HlsVariant>({ it.height }, { it.bandwidth }))
     }
 
-    fun start(context: Context, plugin: MediaPluginInfo, group: String, episodes: List<BatchEpisode>) {
+    fun start(context: Context, plugin: MediaPluginInfo, group: String, episodes: List<BatchEpisode>, picks: Map<String, QOption> = emptyMap()) {
         val app = context.applicationContext
         if (episodes.isEmpty()) return
         toast(app, "Preparing ${episodes.size} downloads…")
@@ -194,27 +255,38 @@ internal object ProviderBatchDownloader {
             val gate = Semaphore(8)
             for (ep in episodes) {
                 try {
-                    val streams = MediaProviderRepository.loadStreams(app, plugin.value, ep.link, ep.type)
-                        .flatMap { listOf(it) + it.alternatives }.distinctBy { it.link }
-                    val tried: List<ServerCandidate> = coroutineScope {
-                        streams.map { s -> async(Dispatchers.IO) { gate.withPermit { tryServer(app, s) } } }.awaitAll()
-                    }
-                    val working = tried.filter { it.working }
-                    if (working.isEmpty()) { failed++; continue }
-                    val c = choose(app, working, ref, if (ref == null) sticky else null, wantQuality)
-
-                    // HLS: the rendition of the same height as the first episode (or of the chosen download quality)
-                    val variant: HlsVariant? = if (c.isHls) {
-                        val list = try { HlsVariants.fetch(c.stream.link, c.stream.headers) } catch (_: Throwable) { emptyList() }
-                        val stickyHeight = if (ref == null) sticky?.takeIf { it.server.trim().equals(c.stream.server.trim(), true) }
-                            ?.let { MediaPreferences.heightOf(it.quality) } ?: 0 else 0
-                        val target = when {
-                            ref != null && ref.height > 0 -> ref.height
-                            stickyHeight > 0 -> stickyHeight
-                            else -> wantQuality
+                    // what the panel showed for this episode is exactly what is downloaded
+                    val pick = picks[ep.link]
+                    val c: ServerCandidate
+                    val variant: HlsVariant?
+                    if (pick != null) {
+                        c = pick.c
+                        variant = pick.variant
+                    } else {
+                        val streams = MediaProviderRepository.loadStreams(app, plugin.value, ep.link, ep.type)
+                            .flatMap { listOf(it) + it.alternatives }.distinctBy { it.link }
+                        val tried: List<ServerCandidate> = coroutineScope {
+                            streams.map { s -> async(Dispatchers.IO) { gate.withPermit { tryServer(app, s) } } }.awaitAll()
                         }
-                        variantFor(list, target)
-                    } else null
+                        val working = tried.filter { it.working }
+                        if (working.isEmpty()) { failed++; continue }
+                        val chosenCandidate = choose(app, working, ref, if (ref == null) sticky else null, wantQuality)
+
+                        // HLS: the rendition of the same height as the first episode (or of the chosen download quality)
+                        val chosenVariant: HlsVariant? = if (chosenCandidate.isHls) {
+                            val list = try { HlsVariants.fetch(chosenCandidate.stream.link, chosenCandidate.stream.headers) } catch (_: Throwable) { emptyList() }
+                            val stickyHeight = if (ref == null) sticky?.takeIf { it.server.trim().equals(chosenCandidate.stream.server.trim(), true) }
+                                ?.let { MediaPreferences.heightOf(it.quality) } ?: 0 else 0
+                            val target = when {
+                                ref != null && ref.height > 0 -> ref.height
+                                stickyHeight > 0 -> stickyHeight
+                                else -> wantQuality
+                            }
+                            variantFor(list, target)
+                        } else null
+                        c = chosenCandidate
+                        variant = chosenVariant
+                    }
                     val qualityText = variant?.label ?: c.quality.ifBlank { c.stream.quality.orEmpty() }
 
                     if (ref == null) {
@@ -287,6 +359,64 @@ internal fun MediaBatchDownloadSheet(
     // title / author of every selected episode, editable one by one
     val names = remember(episodes) { androidx.compose.runtime.mutableStateListOf<String>().apply { addAll(episodes.map { it.name }) } }
     val authors = remember(episodes) { androidx.compose.runtime.mutableStateListOf<String>().apply { addAll(episodes.map { it.author.ifBlank { plugin.name } }) } }
+    // the servers / qualities of every episode (searched in the background) and the one the person picked for it
+    val options = remember(episodes) { androidx.compose.runtime.mutableStateListOf<List<QOption>?>().apply { addAll(episodes.map { null }) } }
+    val failedRows = remember(episodes) { androidx.compose.runtime.mutableStateListOf<Boolean>().apply { addAll(episodes.map { false }) } }
+    val pickedKeys = remember(episodes) { androidx.compose.runtime.mutableStateListOf<String?>().apply { addAll(episodes.map { null }) } }
+    var pickerIndex by remember { mutableStateOf<Int?>(null) }
+    val wantQuality = remember { com.example.util.NetworkSettings.effectiveDownloadQuality(context.applicationContext) }
+    val sticky = remember { MediaPreferences.stickyFor(context.applicationContext, plugin.value, group) }
+
+    androidx.compose.runtime.LaunchedEffect(episodes) {
+        val app = context.applicationContext
+        val gate = Semaphore(8)
+        val episodeGate = Semaphore(2)
+        coroutineScope {
+            episodes.mapIndexed { i, ep ->
+                async(Dispatchers.IO) {
+                    episodeGate.withPermit {
+                        try {
+                            val streams = MediaProviderRepository.loadStreams(app, plugin.value, ep.link, ep.type)
+                                .flatMap { listOf(it) + it.alternatives }.distinctBy { it.link }
+                            val working = coroutineScope {
+                                streams.map { st -> async { gate.withPermit { tryServer(app, st) } } }.awaitAll()
+                            }.filter { it.working }
+                            val list = ArrayList<QOption>()
+                            for (c in working) {
+                                if (c.isHls) {
+                                    val renditions = try { HlsVariants.fetch(c.stream.link, c.stream.headers) } catch (_: Throwable) { emptyList() }
+                                        .filter { it.height > 0 }
+                                        .groupBy { it.height }.map { (_, g) -> g.maxByOrNull { it.bandwidth }!! }
+                                    if (renditions.isEmpty()) list.add(QOption(c, null)) else renditions.forEach { list.add(QOption(c, it)) }
+                                } else list.add(QOption(c, null))
+                            }
+                            list.sortWith(compareByDescending<QOption> { it.height }.thenByDescending { it.sizeBytes })
+                            if (list.isEmpty()) { failedRows[i] = true } else { options[i] = list }
+                            Unit
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            failedRows[i] = true
+                        }
+                        Unit
+                    }
+                }
+            }.awaitAll()
+        }
+    }
+
+    // what every episode gets right now: its own pick, else the automatic one (first episode by the settings, the others
+    // matched to it by picture size, server and file size)
+    val chosenOptions: List<QOption?> = run {
+        var ref: BatchReference? = null
+        episodes.indices.map { i ->
+            val list = options[i]
+            val o = if (list == null) null
+                else list.firstOrNull { it.key == pickedKeys[i] } ?: ProviderBatchDownloader.chooseOption(context.applicationContext, list, ref, if (ref == null) sticky else null, wantQuality)
+            if (ref == null && o != null) ref = BatchReference(o.c.stream.server, o.height, o.sizeBytes)
+            o
+        }
+    }
 
     fun startAll() {
         val v = chosen ?: return
@@ -306,7 +436,12 @@ internal fun MediaBatchDownloadSheet(
             if (list.size < episodes.size) {
                 Toast.makeText(context, "${episodes.size - list.size} episodes are not in this quality and are skipped", Toast.LENGTH_SHORT).show()
             }
-            ProviderBatchDownloader.start(context, plugin, group, list)
+            val picks = if (v.isCurrent) {
+                val map = HashMap<String, QOption>()
+                episodes.forEachIndexed { i, e -> chosenOptions.getOrNull(i)?.let { map[e.link] = it } }
+                map
+            } else emptyMap()
+            ProviderBatchDownloader.start(context, plugin, group, list, picks)
             onDismiss()
         }
     }
@@ -327,9 +462,34 @@ internal fun MediaBatchDownloadSheet(
                 author = authors.getOrElse(i) { plugin.name }, onAuthorChange = { if (i < authors.size) authors[i] = it },
                 primary = primary, secondary = secondary, coverWidth = 112.dp
             )
+            // this episode's own server / quality (searched for each episode); tap to pick another one
+            val o = chosenOptions.getOrNull(i)
+            val opts = options.getOrNull(i)
+            if (failedRows.getOrElse(i) { false }) {
+                Text("No working server found for this episode", fontSize = 13.sp, color = androidx.compose.ui.graphics.Color(0xFFEF4444), modifier = Modifier.padding(start = 6.dp, top = 8.dp))
+            } else if (o == null || opts == null) {
+                Row(modifier = Modifier.padding(start = 6.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = AccentSkyBlue)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Searching qualities…", fontSize = 13.sp, color = secondary)
+                }
+            } else {
+                SelectorRow(
+                    badge = o.c.ext.ifBlank { if (o.c.isHls) "HLS" else "VIDEO" }.uppercase(),
+                    title = o.label.ifBlank { "Quality not named" },
+                    chips = listOfNotNull(
+                        o.c.stream.server.takeIf { it.isNotBlank() }?.let { SheetChip(it) },
+                        SheetChip(if (o.sizeBytes > 0L) com.example.util.DownloadFormat.bytes(o.sizeBytes) else "size not provided", accent = true),
+                        if (pickedKeys[i] != null) SheetChip("your choice") else SheetChip("automatic")
+                    ),
+                    selected = true, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
+                    onClick = if (opts.size > 1) { { pickerIndex = i } } else null,
+                    trailing = SheetTrailing.Tick
+                )
+            }
         }
 
-        SheetSectionLabel("Quality", primary)
+        SheetSectionLabel(if (variants.size > 1) "Quality variant" else "Quality", primary)
         if (chosen != null) {
             SelectorRow(
                 badge = "ALL", title = chosen.label.ifBlank { "Default" },
@@ -339,8 +499,8 @@ internal fun MediaBatchDownloadSheet(
                 trailing = SheetTrailing.Tick
             )
             SheetCaption(
-                "Every episode uses this quality. For each one the server of the first episode and a file of about the same size is picked, so no episode is much bigger or smaller." +
-                    if (variants.size > 1) " Tap above to change the quality." else "",
+                "Under every episode you see its own quality and size. Tap it to pick another one for that episode. Without a choice the download quality of Settings › Network is used for the first episode, and each next one gets the same picture size, the same server and a file of about the same size." +
+                    if (variants.size > 1) " Choosing another variant here replaces these picks (each episode is matched automatically)." else "",
                 secondary
             )
         }
@@ -356,6 +516,30 @@ internal fun MediaBatchDownloadSheet(
             primary, secondary
         )
         Spacer(Modifier.height(4.dp))
+    }
+
+    pickerIndex?.let { pi ->
+        val opts = options.getOrNull(pi)
+        val currentKey = chosenOptions.getOrNull(pi)?.key
+        if (opts != null) {
+            DownloadPickerSheet("Quality · " + (names.getOrNull(pi) ?: "").take(28), isDark, glassBlurTransparency, primary, onDismiss = { pickerIndex = null }) {
+                opts.forEach { o ->
+                    val on = o.key == currentKey
+                    SelectorRow(
+                        badge = o.c.ext.ifBlank { if (o.c.isHls) "HLS" else "VIDEO" }.uppercase(),
+                        title = o.label.ifBlank { "Quality not named" },
+                        chips = listOfNotNull(
+                            o.c.stream.server.takeIf { it.isNotBlank() }?.let { SheetChip(it) },
+                            o.c.format.takeIf { it.isNotBlank() && o.variant == null }?.let { SheetChip(it) },
+                            SheetChip(if (o.sizeBytes > 0L) com.example.util.DownloadFormat.bytes(o.sizeBytes) else "size not provided", accent = true)
+                        ),
+                        selected = on, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
+                        onClick = { pickedKeys[pi] = o.key; pickerIndex = null },
+                        trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
+                    )
+                }
+            }
+        }
     }
 
     if (showPicker) {

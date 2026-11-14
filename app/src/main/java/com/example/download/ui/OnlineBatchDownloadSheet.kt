@@ -60,6 +60,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * else the nearest lower one, else the nearest higher one), so the files are about the same size. Runs on its own scope:
  * closing the panel does not stop it.
  */
+/** What the person set for one item in the panel (a null key = the quality chosen automatically from the settings). */
+internal class BatchEdit(val title: String, val author: String, val videoKey: String? = null, val audioKey: String? = null)
+
 internal object OnlineBatchDownloader {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val main = Handler(Looper.getMainLooper())
@@ -112,7 +115,7 @@ internal object OnlineBatchDownloader {
     fun start(
         context: Context, requests: List<DownloadRequest>, audio: Boolean, target: Int,
         /** url -> (title, author) as the person edited them in the panel */
-        edited: Map<String, Pair<String, String>> = emptyMap()
+        edited: Map<String, BatchEdit> = emptyMap()
     ) {
         val app = context.applicationContext
         if (requests.isEmpty()) return
@@ -130,12 +133,13 @@ internal object OnlineBatchDownloader {
                                 if (info == null) { failed.incrementAndGet(); return@withPermit }
                                 val asAudio = audio || info.videos.isEmpty() || info.isAudioOnlySource
                                 if (asAudio) {
-                                    val a = pickAudio(audioQualities(info), target)
+                                    val a = edited[r.url]?.audioKey?.let { k -> audioQualities(info).firstOrNull { it.key == k } }
+                                        ?: pickAudio(audioQualities(info), target)
                                     if (a == null) { failed.incrementAndGet(); return@withPermit }
                                     val plan = withCoverFallback(
                                         MediaProbe.planForAudio(info, a, true, true).copy(
-                                            title = edited[r.url]?.first?.takeIf { it.isNotBlank() } ?: info.title,
-                                            uploader = edited[r.url]?.second?.takeIf { it.isNotBlank() } ?: info.uploader.ifBlank { r.author.orEmpty() }
+                                            title = edited[r.url]?.title?.takeIf { it.isNotBlank() } ?: info.title,
+                                            uploader = edited[r.url]?.author?.takeIf { it.isNotBlank() } ?: info.uploader.ifBlank { r.author.orEmpty() }
                                         ),
                                         info.thumbnailUrl, r.thumbnail
                                     )
@@ -143,7 +147,8 @@ internal object OnlineBatchDownloader {
                                     val detail = listOf(plan.qualityLabel, outputExt).filter { it.isNotBlank() }.joinToString(" · ")
                                     DownloadManager.enqueuePlan(app, plan, DownloadSourceType.ONLINE_AUDIO, detail, a.sizeBytes.coerceAtLeast(0L))
                                 } else {
-                                    val video = pickVideo(info.videos, target)
+                                    val video = edited[r.url]?.videoKey?.let { k -> info.videos.firstOrNull { it.key == k } }
+                                        ?: pickVideo(info.videos, target)
                                     if (video == null) { failed.incrementAndGet(); return@withPermit }
                                     // the audio track of the preferred language when the video has one, else the original track
                                     val lang = NetworkSettings.mediaLanguage(app)
@@ -157,8 +162,8 @@ internal object OnlineBatchDownloader {
                                     val plan = withCoverFallback(
                                         MediaProbe.planForVideo(info, video, attached, subs, info.chapters.isNotEmpty(), true)
                                             .copy(
-                                                title = edited[r.url]?.first?.takeIf { it.isNotBlank() } ?: info.title,
-                                                uploader = edited[r.url]?.second?.takeIf { it.isNotBlank() } ?: info.uploader.ifBlank { r.author.orEmpty() }
+                                                title = edited[r.url]?.title?.takeIf { it.isNotBlank() } ?: info.title,
+                                                uploader = edited[r.url]?.author?.takeIf { it.isNotBlank() } ?: info.uploader.ifBlank { r.author.orEmpty() }
                                             ),
                                         info.thumbnailUrl, r.thumbnail
                                     )
@@ -202,6 +207,9 @@ private class BatchRow(val req: DownloadRequest) {
     var author by mutableStateOf(req.author.orEmpty())
     var info by mutableStateOf<LinkInfo?>(null)
     var failed by mutableStateOf(false)
+    /** The quality picked for THIS item (null = automatic from the settings / the quality for all). */
+    var videoKey by mutableStateOf<String?>(null)
+    var audioKey by mutableStateOf<String?>(null)
 }
 
 @Composable
@@ -219,6 +227,7 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
     val target = picked ?: want
     var audioIndex by remember { mutableIntStateOf(0) }
     var showPicker by remember { mutableStateOf(false) }
+    var pickerRow by remember { mutableStateOf<BatchRow?>(null) }
 
     // every item is searched for the qualities it really has (all in the background, three at a time)
     LaunchedEffect(rows) {
@@ -263,15 +272,22 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
     val heights = rows.mapNotNull { it.info }.flatMap { i -> i.videos.map { v -> v.height } }.filter { it > 0 }.distinct().sortedDescending()
     val audioTarget = AUDIO_TARGETS[audioIndex].first
 
-    // what every row would download right now: (label, bytes, approx, fellBack)
+    // the quality every row downloads right now: its own pick, else the quality for all / the setting (nearest lower, else higher)
+    fun videoOf(row: BatchRow, info: LinkInfo): VideoChoice? =
+        row.videoKey?.let { k -> info.videos.firstOrNull { it.key == k } } ?: OnlineBatchDownloader.pickVideo(info.videos, target)
+    fun audioOf(row: BatchRow, info: LinkInfo): AudioChoice? {
+        val list = OnlineBatchDownloader.audioQualities(info)
+        return row.audioKey?.let { k -> list.firstOrNull { it.key == k } } ?: OnlineBatchDownloader.pickAudio(list, audioTarget)
+    }
+    fun asAudio(info: LinkInfo) = audio || info.videos.isEmpty() || info.isAudioOnlySource
+    // (label, bytes, approx)
     fun summaryOf(row: BatchRow): Triple<String, Long, Boolean>? {
         val info = row.info ?: return null
-        val asAudio = audio || info.videos.isEmpty() || info.isAudioOnlySource
-        return if (asAudio) {
-            val a = OnlineBatchDownloader.pickAudio(OnlineBatchDownloader.audioQualities(info), audioTarget) ?: return null
+        return if (asAudio(info)) {
+            val a = audioOf(row, info) ?: return null
             Triple(listOf(if (a.bitrateKbps > 0) "${a.bitrateKbps} kbps" else "", a.ext.uppercase()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Audio" }, a.sizeBytes, a.sizeApprox || a.sizeBytes <= 0L)
         } else {
-            val v = OnlineBatchDownloader.pickVideo(info.videos, target) ?: return null
+            val v = videoOf(row, info) ?: return null
             val extra = if (!v.muxed && info.audioTracks.isNotEmpty()) info.audioTracks.first().sizeBytes.coerceAtLeast(0L) else 0L
             val bytes = if (v.sizeBytes > 0L) v.sizeBytes + extra else -1L
             Triple(listOf(v.label, v.codecName).filter { it.isNotBlank() }.joinToString(" · "), bytes, v.sizeApprox)
@@ -283,17 +299,17 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
 
     DownloadGlassSheet(isDark, glassBlurTransparency, onDismiss) {
         DownloadSheetHeader(
-            title = if (audio) "Download audio" else "Download", subtitle = "${requests.size} selected · same quality for all",
+            title = if (audio) "Download audio" else "Download", subtitle = "${requests.size} selected",
             primary = primary, secondary = secondary, enabled = true
         ) {
-            val edited = rows.associate { it.req.url to (it.title.trim() to it.author.trim()) }
+            val edited = rows.associate { it.req.url to BatchEdit(it.title.trim(), it.author.trim(), it.videoKey, it.audioKey) }
             OnlineBatchDownloader.start(context, requests, audio, if (audio) audioTarget else target, edited)
             onDismiss()
         }
         Spacer(Modifier.height(10.dp))
 
         // ---- quality for all ----
-        SheetSectionLabel(if (audio) "Audio quality" else "Video quality", primary)
+        SheetSectionLabel(if (audio) "Audio quality for all" else "Video quality for all", primary)
         val qualityTitle = if (audio) AUDIO_TARGETS[audioIndex].second else if (target <= 0) "Best available" else "${target}p"
         SelectorRow(
             badge = if (audio) "AUDIO" else "VIDEO", title = qualityTitle,
@@ -306,7 +322,7 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
         )
         SheetCaption(
             (if (!audio && picked == null && want > 0) "Taken from Settings › Network › download quality. " else "") +
-                "Every video is downloaded in this quality. When one does not have it exactly, the nearest lower quality is used (else the nearest higher one), so the files stay about the same size. Tap above to change it.",
+                "This is the quality for all videos. When a video does not have it exactly, the nearest lower one is used (else the nearest higher one). Under every video you can pick its own quality instead - what is shown there is exactly what gets downloaded.",
             secondary
         )
         if (!allProbed) {
@@ -327,13 +343,35 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
                 author = row.author, onAuthorChange = { row.author = it },
                 primary = primary, secondary = secondary, coverWidth = 112.dp
             )
-            val sm = summaries[i]
-            val line = when {
-                row.failed -> "Could not read this link"
-                sm == null -> "Checking…"
-                else -> sm.first + (if (sm.second > 0L) " · " + (if (sm.third) "~" else "") + DownloadFormat.bytes(sm.second) else " · size unknown")
+            val info = row.info
+            if (row.failed) {
+                Text("Could not read this link", fontSize = 13.sp, color = androidx.compose.ui.graphics.Color(0xFFEF4444), modifier = Modifier.padding(start = 6.dp, top = 8.dp))
+            } else if (info == null) {
+                Row(modifier = Modifier.padding(start = 6.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = AccentSkyBlue)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Searching qualities…", fontSize = 13.sp, color = secondary)
+                }
+            } else {
+                // this item's own quality: tap to choose another one (size shown for each)
+                val sm = summaries[i]
+                val isAudio = asAudio(info)
+                val optionCount = if (isAudio) OnlineBatchDownloader.audioQualities(info).size else info.videos.size
+                val own = if (isAudio) row.audioKey != null else row.videoKey != null
+                SelectorRow(
+                    badge = if (isAudio) "AUDIO" else (videoOf(row, info)?.ext?.uppercase().orEmpty().ifBlank { "VIDEO" }),
+                    title = sm?.first?.substringBefore(" · ").orEmpty().ifBlank { "Quality" },
+                    chips = listOfNotNull(
+                        sm?.first?.substringAfter(" · ", "")?.takeIf { it.isNotBlank() }?.let { SheetChip(it) },
+                        SheetChip(if (sm != null && sm.second > 0L) (if (sm.third) "~" else "") + DownloadFormat.bytes(sm.second) else "size not provided", accent = true),
+                        if (own) SheetChip("your choice") else SheetChip("automatic")
+                    ),
+                    selected = true, primary = primary, secondary = secondary,
+                    modifier = Modifier.padding(top = 10.dp),
+                    onClick = if (optionCount > 1) { { pickerRow = row } } else null,
+                    trailing = SheetTrailing.Tick
+                )
             }
-            Text(line, fontSize = 13.sp, color = if (row.failed) androidx.compose.ui.graphics.Color(0xFFEF4444) else secondary, modifier = Modifier.padding(start = 6.dp, top = 6.dp))
         }
         SheetSaveToCard(if (audio) "Music/Viaura" else "Movies/Viaura", primary, secondary)
         Spacer(Modifier.height(4.dp))
@@ -347,7 +385,7 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
                     SelectorRow(
                         badge = "AUDIO", title = o.second, chips = emptyList(), selected = on, primary = primary, secondary = secondary,
                         modifier = Modifier.padding(top = 10.dp),
-                        onClick = { audioIndex = i; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
+                        onClick = { audioIndex = i; rows.forEach { it.audioKey = null }; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
                     )
                 }
             } else {
@@ -359,11 +397,51 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
                         badge = "VIDEO", title = if (h == 0) "Best available" else "${h}p",
                         chips = if (allProbed || count > 0) listOf(SheetChip(if (h == 0) "every video's best" else "in $count of ${rows.size} videos", accent = count == rows.size)) else emptyList(),
                         selected = on, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
-                        onClick = { picked = h; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
+                        onClick = { picked = h; rows.forEach { it.videoKey = null }; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
                     )
                 }
                 if (heights.isEmpty()) {
                     Text("The qualities are still being read…", fontSize = 13.sp, color = secondary, modifier = Modifier.padding(top = 12.dp))
+                }
+            }
+        }
+    }
+
+    pickerRow?.let { row ->
+        val info = row.info
+        if (info != null) {
+            val isAudio = asAudio(info)
+            DownloadPickerSheet(
+                (if (isAudio) "Audio quality" else "Video quality") + " · " + row.title.take(28),
+                isDark, glassBlurTransparency, primary, onDismiss = { pickerRow = null }
+            ) {
+                if (isAudio) {
+                    val current = audioOf(row, info)?.key
+                    OnlineBatchDownloader.audioQualities(info).forEach { a ->
+                        val on = a.key == current
+                        SelectorRow(
+                            badge = a.ext.uppercase().ifBlank { "AUDIO" }, title = if (a.bitrateKbps > 0) "${a.bitrateKbps} kbps" else a.label.ifBlank { "Audio" },
+                            chips = listOf(SheetChip(if (a.sizeBytes > 0L) (if (a.sizeApprox) "~" else "") + DownloadFormat.bytes(a.sizeBytes) else "size not provided", accent = true)),
+                            selected = on, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
+                            onClick = { row.audioKey = a.key; pickerRow = null }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
+                        )
+                    }
+                } else {
+                    val current = videoOf(row, info)?.key
+                    info.videos.forEach { v ->
+                        val on = v.key == current
+                        val extra = if (!v.muxed && info.audioTracks.isNotEmpty()) info.audioTracks.first().sizeBytes.coerceAtLeast(0L) else 0L
+                        val bytes = if (v.sizeBytes > 0L) v.sizeBytes + extra else -1L
+                        SelectorRow(
+                            badge = v.ext.uppercase().ifBlank { "VIDEO" }, title = v.label,
+                            chips = listOfNotNull(
+                                v.codecName.takeIf { it.isNotBlank() }?.let { SheetChip(it) },
+                                SheetChip(if (bytes > 0L) (if (v.sizeApprox) "~" else "") + DownloadFormat.bytes(bytes) else "size not provided", accent = true)
+                            ),
+                            selected = on, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
+                            onClick = { row.videoKey = v.key; pickerRow = null }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
+                        )
+                    }
                 }
             }
         }
