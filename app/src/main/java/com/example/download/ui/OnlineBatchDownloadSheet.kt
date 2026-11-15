@@ -299,7 +299,7 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
 
     DownloadGlassSheet(isDark, glassBlurTransparency, onDismiss) {
         DownloadSheetHeader(
-            title = if (audio) "Download audio" else "Download", subtitle = "${requests.size} selected",
+            title = if (audio) "Download audio" else "Download", subtitle = "${requests.size} ${if (audio) "audio" else "video"}${if (requests.size == 1) "" else "s"} selected" + (if (totalBytes > 0L) " · " + (if (totalApprox) "~" else "") + DownloadFormat.bytes(totalBytes) else ""),
             primary = primary, secondary = secondary, enabled = true
         ) {
             val edited = rows.associate { it.req.url to BatchEdit(it.title.trim(), it.author.trim(), it.videoKey, it.audioKey) }
@@ -308,23 +308,6 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
         }
         Spacer(Modifier.height(10.dp))
 
-        // ---- quality for all ----
-        SheetSectionLabel(if (audio) "Audio quality for all" else "Video quality for all", primary)
-        val qualityTitle = if (audio) AUDIO_TARGETS[audioIndex].second else if (target <= 0) "Best available" else "${target}p"
-        SelectorRow(
-            badge = if (audio) "AUDIO" else "VIDEO", title = qualityTitle,
-            chips = listOfNotNull(
-                SheetChip("${requests.size} ${if (audio) "songs" else "videos"}", accent = true),
-                if (totalBytes > 0L) SheetChip("Total " + (if (totalApprox) "~" else "") + DownloadFormat.bytes(totalBytes)) else null
-            ),
-            selected = true, primary = primary, secondary = secondary,
-            onClick = { showPicker = true }, trailing = SheetTrailing.Tick
-        )
-        SheetCaption(
-            (if (!audio && picked == null && want > 0) "Taken from Settings › Network › download quality. " else "") +
-                "This is the quality for all videos. When a video does not have it exactly, the nearest lower one is used (else the nearest higher one). Under every video you can pick its own quality instead - what is shown there is exactly what gets downloaded.",
-            secondary
-        )
         if (!allProbed) {
             Row(modifier = Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = AccentSkyBlue)
@@ -334,15 +317,15 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
         }
 
         // ---- the selected items, one below the other: cover + title + author (editable) and what will be downloaded ----
-        SheetSectionLabel("Selected (${requests.size})", primary)
+        Spacer(Modifier.height(6.dp))
         rows.forEachIndexed { i, row ->
-            if (i > 0) Spacer(Modifier.height(14.dp))
-            SheetCoverTitleAuthor(
+            if (i > 0) Spacer(Modifier.height(26.dp))
+            // thumbnail in its own ratio, the title below it (the author is taken from the link)
+            SheetThumbnailBanner(
                 thumbnail = row.info?.thumbnailUrl?.takeIf { it.isNotBlank() } ?: row.req.thumbnail,
-                title = row.title, onTitleChange = { row.title = it },
-                author = row.author, onAuthorChange = { row.author = it },
-                primary = primary, secondary = secondary, coverWidth = 112.dp
+                seed = row.title, defaultRatio = if (audio) 1f else 16f / 9f
             )
+            SheetTextField("Title", row.title, { row.title = it }, primary, secondary, Modifier.padding(top = 12.dp))
             val info = row.info
             if (row.failed) {
                 Text("Could not read this link", fontSize = 13.sp, color = androidx.compose.ui.graphics.Color(0xFFEF4444), modifier = Modifier.padding(start = 6.dp, top = 8.dp))
@@ -374,37 +357,9 @@ private fun OnlineBatchDownloadSheet(requests: List<DownloadRequest>, isDark: Bo
             }
         }
         SheetSaveToCard(if (audio) "Music/Viaura" else "Movies/Viaura", primary, secondary)
+        // the links, one below the other (tap = that link is copied)
+        requests.forEachIndexed { i, r -> SheetLinkRow(r.url, number = i + 1) }
         Spacer(Modifier.height(4.dp))
-    }
-
-    if (showPicker) {
-        DownloadPickerSheet(if (audio) "Audio quality" else "Video quality", isDark, glassBlurTransparency, primary, onDismiss = { showPicker = false }) {
-            if (audio) {
-                AUDIO_TARGETS.forEachIndexed { i, o ->
-                    val on = i == audioIndex
-                    SelectorRow(
-                        badge = "AUDIO", title = o.second, chips = emptyList(), selected = on, primary = primary, secondary = secondary,
-                        modifier = Modifier.padding(top = 10.dp),
-                        onClick = { audioIndex = i; rows.forEach { it.audioKey = null }; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
-                    )
-                }
-            } else {
-                val options = listOf(0) + heights
-                options.forEach { h ->
-                    val on = target == h
-                    val count = if (h == 0) rows.count { it.info != null } else rows.count { r -> r.info?.videos?.any { it.height == h } == true }
-                    SelectorRow(
-                        badge = "VIDEO", title = if (h == 0) "Best available" else "${h}p",
-                        chips = if (allProbed || count > 0) listOf(SheetChip(if (h == 0) "every video's best" else "in $count of ${rows.size} videos", accent = count == rows.size)) else emptyList(),
-                        selected = on, primary = primary, secondary = secondary, modifier = Modifier.padding(top = 10.dp),
-                        onClick = { picked = h; rows.forEach { it.videoKey = null }; showPicker = false }, trailing = if (on) SheetTrailing.Tick else SheetTrailing.None
-                    )
-                }
-                if (heights.isEmpty()) {
-                    Text("The qualities are still being read…", fontSize = 13.sp, color = secondary, modifier = Modifier.padding(top = 12.dp))
-                }
-            }
-        }
     }
 
     pickerRow?.let { row ->

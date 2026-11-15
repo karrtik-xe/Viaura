@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -376,12 +377,29 @@ fun SheetSaveToCard(folder: String, primary: Color, secondary: Color) {
     }
 }
 
-/** The link the download comes from. */
+/** The link the download comes from. Tap = the link is copied. [number] is shown in front when several links are listed. */
 @Composable
-fun SheetLinkRow(url: String) {
-    Row(modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        StyledIcon(R.drawable.viaura_link, null, Modifier.size(20.dp), AccentSkyBlue)
-        Spacer(Modifier.width(10.dp))
+fun SheetLinkRow(url: String, number: Int? = null) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                try {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("link", url))
+                    android.widget.Toast.makeText(context, "Link copied", android.widget.Toast.LENGTH_SHORT).show()
+                } catch (_: Throwable) {}
+            }
+            .padding(start = 4.dp, top = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (number != null) {
+            Text("$number.", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AccentSkyBlue, modifier = Modifier.width(28.dp))
+        } else {
+            StyledIcon(R.drawable.viaura_link, null, Modifier.size(20.dp), AccentSkyBlue)
+            Spacer(Modifier.width(10.dp))
+        }
         Text(url, fontSize = 14.sp, color = AccentSkyBlue, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
@@ -486,3 +504,55 @@ fun SheetCoverTitleAuthor(
     }
 }
 
+
+
+/**
+ * The real width / height of a picture on the web: only the header of the image is read (a few KB), so the thumbnail can
+ * be shown in its own ratio. [default] is used until it is known (or when it cannot be read).
+ */
+@Composable
+fun rememberThumbnailRatio(url: String?, default: Float): Float {
+    var ratio by androidx.compose.runtime.remember(url) { androidx.compose.runtime.mutableStateOf(default) }
+    androidx.compose.runtime.LaunchedEffect(url) {
+        if (url.isNullOrBlank() || !url.startsWith("http")) return@LaunchedEffect
+        val r: Float? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                c.connectTimeout = 6000
+                c.readTimeout = 6000
+                c.setRequestProperty("User-Agent", "Mozilla/5.0")
+                c.inputStream.use { input ->
+                    val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    android.graphics.BitmapFactory.decodeStream(input, null, o)
+                    if (o.outWidth > 0 && o.outHeight > 0) o.outWidth.toFloat() / o.outHeight.toFloat() else null
+                }
+            } catch (_: Throwable) { null }
+        }
+        if (r != null) ratio = r.coerceIn(0.5f, 2.4f)
+    }
+    return ratio
+}
+
+/** The thumbnail in its own (accurate) ratio. Wide pictures use the full width, tall / square ones a fixed height. */
+@Composable
+fun SheetThumbnailBanner(
+    thumbnail: String?,
+    seed: String,
+    defaultRatio: Float,
+    modifier: Modifier = Modifier
+) {
+    val url = thumbnail?.takeIf { it.isNotBlank() }
+    val ratio = rememberThumbnailRatio(url, defaultRatio)
+    Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val shape = RoundedCornerShape(24.dp)
+        val sizeMod = if (ratio >= 1.4f) Modifier.fillMaxWidth().aspectRatio(ratio)
+        else Modifier.height(if (ratio >= 1f) 190.dp else 240.dp).aspectRatio(ratio)
+        Box(modifier = sizeMod.clip(shape)) {
+            LinkThumbnail(
+                thumbnail = url,
+                modifier = Modifier.fillMaxSize(),
+                fallback = { GeneratedCover(seed, Modifier.fillMaxSize()) }
+            )
+        }
+    }
+}

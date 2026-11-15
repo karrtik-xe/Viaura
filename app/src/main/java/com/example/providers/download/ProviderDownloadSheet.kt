@@ -63,11 +63,16 @@ private enum class ProviderPicker { SERVER, SUBTITLES }
 private fun serverName(c: ServerCandidate, index: Int): String =
     c.stream.server.takeIf { it.isNotBlank() } ?: "Server ${index + 1}"
 
-private fun serverChips(c: ServerCandidate, quality: String = c.quality): List<SheetChip> = listOfNotNull(
-    c.format.takeIf { it.isNotBlank() }?.let { SheetChip(it) },
-    quality.takeIf { it.isNotBlank() }?.let { SheetChip(it, accent = true) },
-    SheetChip(if (c.sizeBytes > 0L) DownloadFormat.bytes(c.sizeBytes) else "size not provided", accent = true)
-)
+private fun serverChips(c: ServerCandidate, quality: String = c.quality): List<SheetChip> {
+    // the format is the badge in front of the row: below the name only the quality information and the size
+    val base = qualityInfoOf(QOption(c, null))
+    val rest = base.replace(Regex("^\\d{3,4}p\\s*"), "")
+    val info = (quality.takeIf { it.isNotBlank() } ?: base.substringBefore(' ')).trim().let { q -> if (rest.isNotBlank()) "$q $rest".trim() else q }
+    return listOfNotNull(
+        info.takeIf { it.isNotBlank() }?.let { SheetChip(it, accent = true) },
+        SheetChip(if (c.sizeBytes > 0L) DownloadFormat.bytes(c.sizeBytes) else "size not provided")
+    )
+}
 
 /**
  * Download panel of a movie / episode inside a provider: it first looks up which servers / storage links the provider
@@ -260,11 +265,8 @@ private fun ColumnScope.ProviderReady(
     DownloadSheetHeader(subtitle = "Adjust download", primary = primary, secondary = secondary, enabled = chosen != null) { startDownload() }
     Spacer(Modifier.height(16.dp))
 
-    // large cover (the provider's poster; a generated one when the provider gives none) with Title and Author beside it
-    SheetCoverTitleAuthor(
-        thumbnail = poster, title = name, onTitleChange = { name = it }, author = author, onAuthorChange = { author = it },
-        primary = primary, secondary = secondary
-    )
+    // the provider's poster in its own ratio (a generated cover when it gives none); title and author are not shown
+    SheetThumbnailBanner(thumbnail = poster, seed = name, defaultRatio = 16f / 9f)
 
     SheetSectionLabel("Server", primary)
     if (chosen == null) {

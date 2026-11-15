@@ -15,6 +15,7 @@ object NetworkSettings {
     private const val KEY_MEDIA_AUTO_SUBTITLE = "media_auto_select_subtitle"
     private const val KEY_MEDIA_PLAY_QUALITY = "media_play_quality"
     private const val KEY_MEDIA_DOWNLOAD_QUALITY = "media_download_quality"
+    private const val KEY_MEDIA_DOWNLOAD_VARIANT = "media_download_variant"
 
     /** Quality value meaning "no fixed quality": best available (play: Auto). */
     const val QUALITY_AUTO = 0
@@ -49,6 +50,13 @@ object NetworkSettings {
     /** Video height that is pre-selected in the download sheet: [QUALITY_SAME_AS_PLAY] (default), [QUALITY_AUTO] (best) or a height. */
     fun mediaDownloadQuality(c: Context): Int = prefs(c).getInt(KEY_MEDIA_DOWNLOAD_QUALITY, QUALITY_SAME_AS_PLAY)
     fun setMediaDownloadQuality(c: Context, v: Int) = prefs(c).edit().putInt(KEY_MEDIA_DOWNLOAD_QUALITY, v).apply()
+
+    /**
+     * Preferred variant of the download quality when a title offers several files of the same height:
+     * "" (any), "x264", "HEVC", "10Bit" or "10Bit HEVC". Used by the multiple-download panel of the providers.
+     */
+    fun mediaDownloadVariant(c: Context): String = prefs(c).getString(KEY_MEDIA_DOWNLOAD_VARIANT, "") ?: ""
+    fun setMediaDownloadVariant(c: Context, v: String) = prefs(c).edit().putString(KEY_MEDIA_DOWNLOAD_VARIANT, v).apply()
 
     /** The height the download sheet should pre-select (0 = best available). */
     fun effectiveDownloadQuality(c: Context): Int {

@@ -341,11 +341,9 @@ private fun ColumnScope.ReadyContent(
 
     // ---- thumbnail + name / author ----
     val thumb = info.thumbnailUrl.ifBlank { initialThumbnail.orEmpty() }.takeIf { it.isNotBlank() }
-    // large cover (always the video's own picture, attached to the file) with Title and Author stacked beside it
-    SheetCoverTitleAuthor(
-        thumbnail = thumb, title = title, onTitleChange = { title = it }, author = author, onAuthorChange = { author = it },
-        primary = primary, secondary = secondary
-    )
+    // the thumbnail in its own ratio, the title below it (the author is taken from the link, it is not shown)
+    SheetThumbnailBanner(thumbnail = thumb, seed = title, defaultRatio = if (audioMode) 1f else 16f / 9f)
+    SheetTextField("Title", title, { title = it }, primary, secondary, Modifier.padding(top = 16.dp))
 
     if (!audioMode) {
         // ---- video quality ----

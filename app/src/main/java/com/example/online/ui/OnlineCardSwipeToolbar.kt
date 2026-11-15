@@ -100,33 +100,18 @@ fun Modifier.swipeLeftForActions(enabled: Boolean = true, selected: Boolean = fa
         .graphicsLayer { translationX = offset.value }
         .drawWithContent {
             drawContent()
-            // A card that is part of the swipe selection: its top-right corner (about 7 % of the card) glows in the
-            // accent gradient, with a small tick - the card itself stays as it is
+            // A card that is part of the swipe selection gets the same gradient line around all four sides as a
+            // selected folder in the library
             if (selected) {
                 val r = 16.dp.toPx()
-                val rad = kotlin.math.sqrt(size.width * size.height * 0.07f * 4f / Math.PI.toFloat())
-                    .coerceAtMost(minOf(size.width, size.height) * 0.95f)
-                val corner = Offset(size.width, 0f)
-                val cardShape = Path().apply {
-                    addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, size.width, size.height, CornerRadius(r, r)))
-                }
-                clipPath(cardShape) {
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(AccentSkyBlue.copy(alpha = 0.95f), AccentPink.copy(alpha = 0.60f), Color.Transparent),
-                            center = corner, radius = rad
-                        ),
-                        radius = rad, center = corner
-                    )
-                }
-                val c = Offset(size.width - rad * 0.30f, rad * 0.30f)
-                val t = rad * 0.11f
-                val tick = Path().apply {
-                    moveTo(c.x - t * 1.0f, c.y + t * 0.05f)
-                    lineTo(c.x - t * 0.25f, c.y + t * 0.85f)
-                    lineTo(c.x + t * 1.1f, c.y - t * 0.75f)
-                }
-                drawPath(tick, color = Color.White, style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round))
+                val w = 3.dp.toPx()
+                drawRoundRect(
+                    brush = AccentGradient,
+                    topLeft = Offset(w / 2f, w / 2f),
+                    size = Size(size.width - w, size.height - w),
+                    cornerRadius = CornerRadius(r, r),
+                    style = Stroke(width = w)
+                )
             }
         }
 }

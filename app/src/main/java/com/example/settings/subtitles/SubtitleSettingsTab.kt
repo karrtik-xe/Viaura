@@ -2951,6 +2951,7 @@ internal fun NetworkSettingsPanel(
     var mediaAutoSubtitle by remember { mutableStateOf(com.example.util.NetworkSettings.mediaAutoSubtitle(context)) }
     var mediaPlayQuality by remember { mutableStateOf(com.example.util.NetworkSettings.mediaPlayQuality(context)) }
     var mediaDownloadQuality by remember { mutableStateOf(com.example.util.NetworkSettings.mediaDownloadQuality(context)) }
+    var mediaDownloadVariant by remember { mutableStateOf(com.example.util.NetworkSettings.mediaDownloadVariant(context)) }
     val languageOptions = remember {
         listOf("" to "Off (provider default)") +
             com.example.player.AudioLanguageMatcher.POPULAR_LANGUAGES.map { it.first to it.second }
@@ -3126,6 +3127,29 @@ internal fun NetworkSettingsPanel(
                 mediaDownloadQuality = q
                 com.example.util.NetworkSettings.setMediaDownloadQuality(context, q)
                 com.example.util.media.ServerReputationStore.clearChoices(context)
+            }
+
+            HorizontalDivider(color = borderColor)
+
+            PlayerChoiceRow(
+                title = "Download quality variant",
+                description = "When a title has several files of the same quality (for example 1080p x264, 1080p HEVC, 1080p 10Bit HEVC), this variant is selected first. You can still change every episode in the download sheet.",
+                value = mediaDownloadVariant,
+                options = listOf(
+                    "" to "Any (no preference)",
+                    "x264" to "x264",
+                    "HEVC" to "HEVC (x265)",
+                    "10Bit" to "10Bit",
+                    "10Bit HEVC" to "10Bit HEVC"
+                ),
+                isDark = isDark,
+                primaryText = primaryText,
+                secondaryText = secondaryText,
+                borderColor = borderColor,
+                alphaFactor = alphaFactor
+            ) {
+                mediaDownloadVariant = it
+                com.example.util.NetworkSettings.setMediaDownloadVariant(context, it)
             }
         }
 
