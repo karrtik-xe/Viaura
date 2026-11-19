@@ -77,6 +77,7 @@ import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.search.SearchExtractor
 import java.util.Locale
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
@@ -844,7 +845,7 @@ fun OnlineVideoPanel(
 private suspend fun loadSubsGroups(context: android.content.Context): List<SubsChannelGroup> = kotlinx.coroutines.coroutineScope {
     val gate = kotlinx.coroutines.sync.Semaphore(6)
     SubscribedChannelsManager.getAll(context).take(40).map { ch ->
-        kotlinx.coroutines.async(Dispatchers.IO) {
+        async(Dispatchers.IO) {
             gate.acquire()
             try {
                 val videos = try {
