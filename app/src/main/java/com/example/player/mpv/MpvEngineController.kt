@@ -4366,6 +4366,11 @@ class MpvPlayerController {
                         syncAdvancedAssNow(ctx)
                     } catch (t: Throwable) {
                         Log.w("MpvPlayerController", "Advanced ASS sync failed", t)
+                    }
+                    try {
+                        syncSecondaryAdvancedAssNow(ctx)
+                    } catch (t: Throwable) {
+                        Log.w("MpvPlayerController", "Secondary Advanced ASS sync failed", t)
                     } finally {
                         advancedAssSyncing = false
                     }
@@ -4851,6 +4856,146 @@ class MpvPlayerController {
             removeOrphanedAdvancedAssTracks(view, binding.key, keepPath = file.absolutePath)
             refreshTracksAndChapters()
 
+        }
+    }
+
+    private class SecondaryAdvancedAssPlan(val info: AdvancedAssTrackInfo, val originalId: Int)
+
+    /**
+     * The same "edited copy" hand-off as [syncAdvancedAssNow], for the subtitle shown as SECONDARY. That sync only looks at the
+     * primary track (sid), so after an app start the secondary subtitle showed the untouched original until the user made it
+     * primary and opened the editor. Here the edited copy is attached WITHOUT selecting it (sub-add ... auto), then put on
+     * secondary-sid; the primary subtitle is never touched.
+     */
+    private suspend fun syncSecondaryAdvancedAssNow(context: Context) {
+        val selGen = subtitleSelectionGeneration.get()
+        if (!advancedAssEnabled) return   // the primary sync already removed every edited copy
+        val json = advancedAssOverridesJson
+
+        // ---- Phase A (locked): is there an editable secondary subtitle? ----
+        val plan = withMpvLock<SecondaryAdvancedAssPlan?>(null) { view ->
+            val logical = _secondarySubtitleTrackId.value
+            if (logical <= 0) return@withMpvLock null
+            if (rawBindings.values.any { it.originalTrackId == logical && it.derivedTrackId > 0 }) return@withMpvLock null
+            val info = readAdvancedAssTrackInfo(view, logical) ?: return@withMpvLock null
+            if (!isAdvancedAssEligible(context, info)) return@withMpvLock null
+            if (advancedAssBindings[logical]?.unsupported == true) return@withMpvLock null
+            SecondaryAdvancedAssPlan(info, logical)
+        } ?: return
+
+        // ---- Phase B (no native calls): the edited script, exactly like the primary pipeline builds it ----
+        val binding = advancedAssBindings[plan.originalId]?.takeIf { !it.unsupported }
+            ?: resolveAdvancedAssBinding(context, plan.info)
+            ?: return
+        val text = ensureAdvancedAssSourceText(context, binding) ?: return
+        val overrides = AssOverridesStore.get(json, binding.key)
+        if (!binding.fontsPrepared) {
+            try { SubtitleFontManager.syncFonts(context, currentFilePath, text) } catch (_: Throwable) {}
+            binding.fontsPrepared = true
+        }
+        val cleanText = SubtitleFontManager.stripGlyphFallback(context, text)
+        val base = if (overrides.isEmpty) cleanText else AdvancedAssStyleEngine.apply(cleanText, overrides)
+        val fontFixed = try { SubtitleFontManager.replaceMissingFontsKeepingLayout(context, base) } catch (_: Throwable) { null }
+        val fontsReady = fontFixed ?: base
+        val withFallback = try { SubtitleFontManager.applyGlyphFallback(context, fontsReady) } catch (_: Throwable) { fontsReady }
+        val needsDerived = !overrides.isEmpty || fontFixed != null || withFallback != text
+        var signature = ""
+        var builtFile: File? = null
+        var isNewFile = false
+        if (needsDerived) {
+            signature = "${withFallback.length}:${withFallback.hashCode()}"
+            val existingFile = binding.derivedPath?.let { File(it) }
+                ?.takeIf { it.parentFile?.absolutePath == File(context.cacheDir, ADVANCED_ASS_CACHE_DIR).absolutePath }
+            if (binding.derivedTrackId > 0 && binding.appliedSignature == signature && existingFile?.isFile == true) {
+                builtFile = existingFile
+            } else {
+                val dir = File(context.cacheDir, ADVANCED_ASS_CACHE_DIR).apply { mkdirs() }
+                val revision = synchronized(this@MpvPlayerController) {
+                    advancedAssFileCounter += 1
+                    advancedAssFileCounter
+                }
+                val nextFile = File(dir, if (existingFile == null) "adv_${binding.key}.ass" else "adv_${binding.key}_$revision.ass")
+                nextFile.writeText(withFallback, Charsets.UTF_8)
+                builtFile = nextFile
+                isNewFile = true
+            }
+        }
+
+        // ---- Phase C (locked): attach the copy (not selected) and show it as secondary ----
+        withMpvLock(Unit) { view ->
+            // a newer selection wins; the sync is repeated for the new state
+            if (selGen != subtitleSelectionGeneration.get() || _secondarySubtitleTrackId.value != plan.originalId) {
+                if (isNewFile) builtFile?.let { try { it.delete() } catch (_: Throwable) {} }
+                scheduleAdvancedAssSync(0L)
+                return@withMpvLock
+            }
+            val currentSecondary = (try { view.mpv.getPropertyInt("secondary-sid") } catch (_: Throwable) { null }) ?: 0
+            if (!needsDerived) {
+                if (binding.derivedTrackId > 0) {
+                    val showingCopy = currentSecondary == binding.derivedTrackId
+                    removeAdvancedAssDerived(view, binding, reselectOriginal = false)
+                    if (showingCopy) {
+                        try { view.mpv.setPropertyInt("secondary-sid", binding.originalTrackId) } catch (_: Throwable) {}
+                    }
+                    refreshTracksAndChapters()
+                }
+                return@withMpvLock
+            }
+            val derivedAlive = binding.derivedTrackId > 0 &&
+                readAdvancedAssTrackInfo(view, binding.derivedTrackId) != null
+            val file = builtFile ?: return@withMpvLock
+
+            setMpvStringIfChanged(view, "sub-fonts-dir", SubtitleFontManager.syncFonts(context, currentFilePath).absolutePath)
+            if ((try { view.mpv.getPropertyBoolean("embeddedfonts") } catch (_: Throwable) { null }) != true) {
+                view.mpv.setPropertyBoolean("embeddedfonts", true)
+            }
+            externalSubtitlesMap[file.absolutePath] = binding.title
+            externalSubtitlesMap[file.name] = binding.title
+
+            if (derivedAlive && binding.appliedSignature == signature && binding.derivedPath == file.absolutePath) {
+                if (currentSecondary != binding.derivedTrackId) {
+                    try { view.mpv.setPropertyInt("secondary-sid", binding.derivedTrackId) } catch (_: Throwable) {}
+                }
+                try { view.mpv.setPropertyString("secondary-sub-ass-override", "no") } catch (_: Throwable) {}
+                return@withMpvLock
+            }
+
+            val oldId = if (derivedAlive) binding.derivedTrackId else 0
+            val oldPath = binding.derivedPath
+            val sidBefore = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
+            try {
+                markSubtitleOp()
+                // "auto" = do NOT select: the primary subtitle must stay exactly as it is
+                view.mpv.command("sub-add", file.absolutePath, "auto", binding.title)
+            } catch (_: Throwable) {
+                if (isNewFile) try { file.delete() } catch (_: Throwable) {}
+                return@withMpvLock
+            }
+            val newId = findAdvancedAssTrackIdByPath(view, file.absolutePath) ?: 0
+            // mpv may still pick the new track as primary in odd situations: give the primary back what it had
+            val sidAfter = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
+            if (sidAfter != sidBefore) {
+                try {
+                    if (sidBefore > 0) view.mpv.setPropertyInt("sid", sidBefore) else view.mpv.setPropertyString("sid", "no")
+                } catch (_: Throwable) {}
+            }
+            if (newId <= 0) {
+                try { file.delete() } catch (_: Throwable) {}
+                return@withMpvLock
+            }
+            try { view.mpv.setPropertyInt("secondary-sid", newId) } catch (_: Throwable) {}
+            try { view.mpv.setPropertyString("secondary-sub-ass-override", "no") } catch (_: Throwable) {}
+            if (oldId > 0 && oldId != newId) {
+                try { view.mpv.command("sub-remove", oldId.toString()) } catch (_: Throwable) {}
+            }
+            if (oldPath != null && oldPath != file.absolutePath) {
+                try { File(oldPath).delete() } catch (_: Throwable) {}
+            }
+            binding.derivedTrackId = newId
+            binding.derivedPath = file.absolutePath
+            binding.appliedSignature = signature
+            removeOrphanedAdvancedAssTracks(view, binding.key, keepPath = file.absolutePath)
+            refreshTracksAndChapters()
         }
     }
 
