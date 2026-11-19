@@ -1107,6 +1107,22 @@ class MpvPlayerController {
 
     private val trackDelayMap = mutableMapOf<Int, Long>()
 
+    /** The delays the user set (read by the player screen so the panels and mpv always show the same values). */
+    val userAudioDelayMs: Long get() = currentAudioDelayMs
+    val userSubtitleDelayMs: Long get() = currentSubtitleDelayMs
+
+    /** Writes the user's audio / subtitle delay to mpv again whenever mpv's own value differs (checked on every poll). */
+    private fun enforceUserDelays(view: VideoPlayerMpvView) {
+        val liveAudio = view.mpv.getPropertyDouble("audio-delay")
+        if (liveAudio != null && kotlin.math.abs(liveAudio * 1000.0 - currentAudioDelayMs) > 0.5) {
+            view.mpv.setPropertyDouble("audio-delay", currentAudioDelayMs / 1000.0)
+        }
+        val liveSub = view.mpv.getPropertyDouble("sub-delay")
+        if (liveSub != null && kotlin.math.abs(liveSub * 1000.0 - currentSubtitleDelayMs) > 0.5) {
+            view.mpv.setPropertyDouble("sub-delay", currentSubtitleDelayMs / 1000.0)
+        }
+    }
+
     /**
      * Shifts subtitle timing relative to the video timeline.
      * Positive [delayMs] delays subtitles; negative advances them.
@@ -2136,6 +2152,10 @@ class MpvPlayerController {
                         }
                         try { smartPlaybackTick(view, paused) } catch (_: Throwable) {}
                         }
+
+                        // The delays dialled in by the user always win: mpv can fall back to 0 on its own (file / stream reload,
+                        // retry, subtitle track swap), while the panel keeps showing the user's value.
+                        try { enforceUserDelays(view) } catch (_: Throwable) {}
 
                         // Update tracks/chapters: immediately whenever mpv's track list changes
                         // (embedded tracks discovered, external subtitle/audio added), every 400 ms
@@ -5119,11 +5139,18 @@ class MpvPlayerController {
                         view.mpv.setPropertyString("secondary-sid", "no")
                     }
                 } else {
-                    if ((try { view.mpv.getPropertyInt("secondary-sid") } catch (_: Throwable) { null }) != secondaryTrackId) {
-                        view.mpv.setPropertyInt("secondary-sid", secondaryTrackId)
+                    // The secondary subtitle must show the user's edited copy (style edits / raw text edit) when the
+                    // subtitle has one, exactly like the primary does: the UI id is the original track, mpv plays the derived one.
+                    val playbackSecondaryTrackId = resolveAdvancedAssPlaybackId(secondaryTrackId)
+                    val secondaryIsEditedCopy = playbackSecondaryTrackId != secondaryTrackId
+                    if ((try { view.mpv.getPropertyInt("secondary-sid") } catch (_: Throwable) { null }) != playbackSecondaryTrackId) {
+                        view.mpv.setPropertyInt("secondary-sid", playbackSecondaryTrackId)
                     }
                     subGuard.setPropertyBoolean("secondary-sub-visibility", true)
-                    subGuard.setPropertyString("secondary-sub-ass-override", if (effectiveOverrideForTrack(secondaryTrackId)) "force" else "no")
+                    // An edited ASS/SSA copy has its styles baked in: libass must use them, not the global override
+                    val secondaryOverride = if (secondaryIsEditedCopy && advancedAssEnabled && isTrackNativeAssSsa(secondaryTrackId)) false
+                        else effectiveOverrideForTrack(secondaryTrackId)
+                    subGuard.setPropertyString("secondary-sub-ass-override", if (secondaryOverride) "force" else "no")
                     try {
                         subGuard.setPropertyDouble("secondary-sub-pos", 10.0)
                     } catch (_: Throwable) {}

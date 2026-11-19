@@ -594,6 +594,11 @@ private fun VideoPlayerScreenImpl(
 
     // MPV Controller integration
     val controller = remember { miniAdopted?.controller ?: MpvPlayerController() }
+    // A controller taken over from the mini player already has the user's delays: the panels start from those values
+    androidx.compose.runtime.LaunchedEffect(controller) {
+        subtitleOffsetMs = controller.userSubtitleDelayMs
+        audioDelayMs = controller.userAudioDelayMs
+    }
 
     fun onlineChaptersOf(pb: OnlineVideoPlayback): List<PlayerVideoChapter> =
         pb.chapters.mapIndexed { i, c ->

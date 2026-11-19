@@ -165,7 +165,7 @@ fun DownloadModeTabs(
 }
 
 @Composable
-private fun SheetChipView(chip: SheetChip, secondary: Color) {
+internal fun SheetChipView(chip: SheetChip, secondary: Color) {
     val color = when {
         chip.warn -> WarnColor
         chip.accent -> AccentSkyBlue

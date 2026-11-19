@@ -261,6 +261,9 @@ fun SubtitleDelayPanel(
     // Step configuration in milliseconds (Default to 100ms / 0.1m)
     val stepVariants = remember {
         listOf(
+            10L to "0.01m",
+            30L to "0.03m",
+            50L to "0.05m",
             100L to "0.1m",
             300L to "0.3m",
             500L to "0.5m",

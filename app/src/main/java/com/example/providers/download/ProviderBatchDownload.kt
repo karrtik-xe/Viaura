@@ -360,6 +360,34 @@ internal object ProviderBatchDownloader {
     }
 }
 
+/** One line of the final check list: "1. Title" with the quality information and the size below it. */
+@Composable
+private fun BatchSummaryItem(
+    number: Int, title: String, chips: List<SheetChip>, status: String?,
+    primary: androidx.compose.ui.graphics.Color, secondary: androidx.compose.ui.graphics.Color
+) {
+    Row(
+        modifier = Modifier
+            .padding(bottom = 8.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(primary.copy(alpha = 0.07f))
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Text("$number.", fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, color = AccentSkyBlue, modifier = Modifier.width(28.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 14.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, color = primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (status != null) {
+                Text(status, fontSize = 13.sp, color = secondary, modifier = Modifier.padding(top = 5.dp))
+            } else if (chips.isNotEmpty()) {
+                Row(modifier = Modifier.padding(top = 5.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+                    for (c in chips) SheetChipView(c, secondary)
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The panel
 // ---------------------------------------------------------------------------------------------------------------------
@@ -522,20 +550,43 @@ internal fun MediaBatchDownloadSheet(
             }
         }
 
-        SheetSectionLabel(if (variants.size > 1) "Quality variant" else "Quality", primary)
-        if (chosen != null) {
+        // The variant picker only exists when the title really offers more than one quality variant
+        if (variants.size > 1 && chosen != null) {
+            SheetSectionLabel("Quality variant", primary)
             SelectorRow(
                 badge = "ALL", title = chosen.label.ifBlank { "Default" },
                 chips = listOf(SheetChip("${episodes.size} episodes", accent = true)),
                 selected = true, primary = primary, secondary = secondary,
-                onClick = if (variants.size > 1) { { showPicker = true } } else null,
+                onClick = { showPicker = true },
                 trailing = SheetTrailing.Tick
             )
-            SheetCaption(
-                "Under every episode you see its link and below it the quality and the size the provider gives. Tap it to pick another one. When you pick one, the same quality variant (for example 1080p x264) is selected for the other episodes too - you can still change each one. Without a pick the download quality of Settings › Network is used. File sizes differ from episode to episode, that is normal." +
-                    if (variants.size > 1) " Choosing another variant here replaces these picks (each episode is matched automatically)." else "",
-                secondary
-            )
+            if (!chosen.isCurrent) {
+                SheetCaption("Every episode is matched to this variant automatically when the download starts, so the picks above are not used.", secondary)
+            }
+        }
+
+        // Final check before downloading: every selected video with its title, the quality and the size that will be downloaded
+        val showSummary = chosen?.isCurrent != false
+        if (showSummary) {
+            SheetSectionLabel("Selected videos", primary)
+            episodes.forEachIndexed { i, e ->
+                val o = chosenOptions.getOrNull(i)
+                val chips = if (o == null) emptyList() else listOfNotNull(
+                    o.info.ifBlank { o.label }.takeIf { it.isNotBlank() }?.let { SheetChip(it, accent = true) },
+                    SheetChip(if (o.sizeBytes > 0L) com.example.util.DownloadFormat.bytes(o.sizeBytes) else "size unknown")
+                )
+                BatchSummaryItem(
+                    number = i + 1,
+                    title = names.getOrNull(i)?.ifBlank { e.name } ?: e.name,
+                    chips = chips,
+                    status = when {
+                        failedRows.getOrElse(i) { false } -> "No working server found"
+                        o == null -> "Searching qualities…"
+                        else -> null
+                    },
+                    primary = primary, secondary = secondary
+                )
+            }
         }
         if (preparing) {
             Row(modifier = Modifier.padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -548,6 +599,14 @@ internal fun MediaBatchDownloadSheet(
             "Movies/Viaura" + (if (group.isNotBlank()) "/" + com.example.util.DownloadFileSaver.safeName(group) else ""),
             primary, secondary
         )
+        // The direct link each video is downloaded from (the playlist rendition for HLS): tap = copied, to paste into a browser / player
+        if (showSummary && chosenOptions.any { it != null }) {
+            SheetSectionLabel("Direct links", primary)
+            SheetCaption("Tap a link to copy it.", secondary)
+            chosenOptions.forEachIndexed { i, o ->
+                if (o != null) SheetLinkRow(o.variant?.uri ?: o.c.stream.link, number = i + 1)
+            }
+        }
         Spacer(Modifier.height(4.dp))
     }
 
