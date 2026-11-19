@@ -119,6 +119,15 @@ object OnlineVideoRecommender {
 
     fun isCompleted(c: Context, videoUrl: String): Boolean = videoUrl in completedSet(c)
 
+    /** True when the video was opened (played) at least once or watched to the end: the Subs tab then stops listing it. */
+    fun isWatched(c: Context, videoUrl: String): Boolean {
+        if (videoUrl.isBlank()) return false
+        if (isCompleted(c, videoUrl)) return true
+        val opened = readArr(c, KEY_OPENED)
+        for (i in 0 until opened.length()) if (opened.optString(i) == videoUrl) return true
+        return false
+    }
+
     // In-memory copy of "already counted as watched half or more", so the playback ticks stay cheap.
     @Volatile private var creditedCache: MutableSet<String>? = null
 

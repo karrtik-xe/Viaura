@@ -186,7 +186,9 @@ object OnlineMusicService {
                     thumbnailUrl = extractBestThumbnailUrl(item.thumbnails, item.url),
                     uploadDateText = item.textualUploadDate,
                     uploadDateEpochMs = uploadEpoch,
-                    viewCount = item.viewCount.coerceAtLeast(0L)
+                    viewCount = item.viewCount.coerceAtLeast(0L),
+                    channelUrl = item.channelUrlOrNull(),
+                    channelAvatarUrl = item.channelAvatarOrNull()
                 )
             }
         val channelResults = OnlineSearchRanker.relevantChannels(
@@ -245,7 +247,9 @@ object OnlineMusicService {
                         thumbnailUrl = extractBestThumbnailUrl(item.thumbnails, item.url),
                         uploadDateText = item.textualUploadDate,
                         uploadDateEpochMs = uploadEpoch,
-                        viewCount = item.viewCount.coerceAtLeast(0L)
+                        viewCount = item.viewCount.coerceAtLeast(0L),
+                        channelUrl = item.channelUrlOrNull(),
+                        channelAvatarUrl = item.channelAvatarOrNull()
                     )
                 }
             OnlineMusicPage(
@@ -284,7 +288,9 @@ object OnlineMusicService {
                         thumbnailUrl = extractBestThumbnailUrl(item.thumbnails, item.url),
                         uploadDateText = item.textualUploadDate,
                         uploadDateEpochMs = uploadEpoch,
-                        viewCount = item.viewCount.coerceAtLeast(0L)
+                        viewCount = item.viewCount.coerceAtLeast(0L),
+                        channelUrl = item.channelUrlOrNull(),
+                        channelAvatarUrl = item.channelAvatarOrNull()
                     )
                 }
         } catch (e: Exception) {
@@ -541,8 +547,46 @@ object OnlineMusicService {
             thumbnailUrl = extractBestThumbnailUrl(this.thumbnails, this.url),
             uploadDateText = this.textualUploadDate,
             uploadDateEpochMs = uploadEpoch,
-            viewCount = this.viewCount.coerceAtLeast(0L)
+            viewCount = this.viewCount.coerceAtLeast(0L),
+            channelUrl = this.channelUrlOrNull(),
+            channelAvatarUrl = this.channelAvatarOrNull(),
+            isLive = this.streamType == org.schabi.newpipe.extractor.stream.StreamType.LIVE_STREAM
         )
+    }
+
+    private fun StreamInfoItem.channelUrlOrNull(): String? =
+        try { this.uploaderUrl?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null }
+
+    private fun StreamInfoItem.channelAvatarOrNull(): String? =
+        try { extractBestThumbnailUrl(this.uploaderAvatars, null) } catch (_: Throwable) { null }
+
+    /**
+     * Streams that are live right now (the "Live" tab of the Online Video home). The website has no "live" list of its own,
+     * so a few "live" searches are read and only the items that are really live streams are kept.
+     */
+    suspend fun fetchLiveStreams(limit: Int = 24): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val service = ServiceList.YouTube
+            val out = LinkedHashMap<String, OnlineTrackResult>()
+            for (q in listOf("live now", "live stream", "live")) {
+                if (out.size >= limit) break
+                try {
+                    val extractor = service.getSearchExtractor(service.searchQHFactory.fromQuery(q))
+                    extractor.fetchPage()
+                    extractor.initialPage.items.filterIsInstance<StreamInfoItem>()
+                        .filter { it.streamType == org.schabi.newpipe.extractor.stream.StreamType.LIVE_STREAM }
+                        .forEach { out.putIfAbsent(it.url, it.toOnlineTrackResult()) }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
+            }
+            out.values.take(limit)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.e(TAG, "fetchLiveStreams failed: ${e.message}", e)
+            emptyList()
+        }
     }
 
     suspend fun fetchChannelDetail(channelUrl: String): OnlineChannelDetail? = withContext(Dispatchers.IO) {

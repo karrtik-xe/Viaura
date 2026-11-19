@@ -114,14 +114,35 @@ object OnlineVideoFeedState {
     var listOffset = 0
     var gridIndex = 0
     var gridOffset = 0
+
+    /** Home | Subs | Live strip at the top of the feed (the selected one stays while a video is open). */
+    var tab by mutableStateOf("home")
+    /** Subs tab: every subscribed channel with its newest uploads; loaded when the tab is opened / the feed is refreshed. */
+    var subsGroups by mutableStateOf<List<SubsChannelGroup>>(emptyList())
+    var subsLoading by mutableStateOf(false)
+    var subsLoaded = false
+    var subsLoadedRefresh = -1
+    /** Bumped when a video is opened so the Subs list drops it at once. */
+    var watchedTick by mutableIntStateOf(0)
+    /** Live tab: streams that are live right now. */
+    var liveResults by mutableStateOf<List<OnlineTrackResult>>(emptyList())
+    var liveLoading by mutableStateOf(false)
+    var liveLoaded = false
+    var liveLoadedRefresh = -1
 }
+
+/** One subscribed channel of the Subs tab with its newest videos (at most 3). */
+data class SubsChannelGroup(
+    val channel: com.example.util.SubscribedChannel,
+    val videos: List<OnlineTrackResult>
+)
 
 /** Outlives the panel: the "after watching" recommendations keep loading while the player is on screen. */
 internal val feedPrefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 internal var afterWatchJob: Job? = null
 
-private fun formatViews(count: Long): String {
+internal fun formatViews(count: Long): String {
     if (count <= 0L) return ""
     val t = when {
         count >= 1_000_000_000 -> String.format(Locale.US, "%.1fB", count / 1_000_000_000.0)

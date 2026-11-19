@@ -1114,7 +1114,7 @@ private fun ChannelProfileCard(
  * left/right (animated) to the selected tab.
  */
 @Composable
-private fun ChannelTabsRow(
+internal fun ChannelTabsRow(
     tabs: List<Pair<String, String>>,
     selectedId: String,
     onSelect: (String) -> Unit,

@@ -46,7 +46,12 @@ data class OnlineTrackResult(
     val detectedFormat: String? = null,
     val detectedAudioType: String? = null,
     /** A fresh upload of a subscribed channel that the user has not opened yet (shows the NEW tag). */
-    val isNew: Boolean = false
+    val isNew: Boolean = false,
+    /** Channel page and logo of the uploader (when the source gave them): the YouTube-style card opens the channel from them. */
+    val channelUrl: String? = null,
+    val channelAvatarUrl: String? = null,
+    /** A live stream (no duration): shown with a LIVE tag. */
+    val isLive: Boolean = false
 )
 
 /**

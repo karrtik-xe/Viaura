@@ -1180,6 +1180,7 @@ class MpvPlayerController {
         if (isReleased) return
         mpvView = view
         controllerScope = scope
+        if (advancedAssSyncPending) scheduleAdvancedAssSync(0L)
         // mpv gets its own surface that outlives every screen (API 29+): moving the picture between the full player,
         // the mini player and PiP then never touches mpv, so the sound never cuts and the picture never jumps.
         if (view.enablePersistentOutput()) {
@@ -2323,6 +2324,7 @@ class MpvPlayerController {
         userSubtitleIdentity = null
         subtitleReloadUntilMs = 0L
         isSubtitleExplicitlyDisabled = false
+        primarySubtitleDeselected = false
         trackDiscoveryStartedAt = System.currentTimeMillis()
         lastTrackListCount = -1
         lastTrackRefreshAt = 0L
@@ -3147,6 +3149,9 @@ class MpvPlayerController {
     }
 
     private var isSubtitleExplicitlyDisabled: Boolean = false
+    /** The user switched the PRIMARY subtitle off (the secondary may still be on): nothing may silently put it back. */
+    @Volatile private var primarySubtitleDeselected: Boolean = false
+    private val primarySubtitleOff: Boolean get() = isSubtitleExplicitlyDisabled || primarySubtitleDeselected
 
     fun refreshTracksAndChapters() {
         // Whole track/chapter scan runs inside the native lock: release() destroys the mpv handle under the same
@@ -3317,7 +3322,7 @@ class MpvPlayerController {
                     // Remember which track the user has selected in THIS video (id may change later).
                     preservedSubList.firstOrNull { it.isSelected }?.let { userSubtitleIdentity = subtitleIdentity(it) }
                     val reloading = System.currentTimeMillis() < subtitleReloadUntilMs
-                    val ownSelection = if (isNoneSelected && !isSubtitleExplicitlyDisabled) findUserSelectedSubtitle(preservedSubList) else null
+                    val ownSelection = if (isNoneSelected && !primarySubtitleOff) findUserSelectedSubtitle(preservedSubList) else null
                     if (isNoneSelected && reloading && lastActiveSubtitleTrackId > 0) {
                         // Mid sub-reload: do nothing, the next refresh sees the re-added track.
                     } else if (ownSelection != null && ownSelection.id > 0) {
@@ -3335,7 +3340,7 @@ class MpvPlayerController {
                                 )
                             }
                         } catch (_: Throwable) {}
-                    } else if (isNoneSelected && !isSubtitleExplicitlyDisabled && !holdSubtitleAutoSelect && lastActiveSubtitleTrackId <= 0) {
+                    } else if (isNoneSelected && !primarySubtitleOff && !holdSubtitleAutoSelect && lastActiveSubtitleTrackId <= 0) {
                         val matched = SubtitleSessionMemory.findMatchingTrackForNextEpisode(preservedSubList)
                         if (matched != null && matched.id > 0) {
                             val chosenSubId = matched.id
@@ -4032,6 +4037,7 @@ class MpvPlayerController {
     }
 
     private suspend fun syncRawSubtitleNow(context: Context) {
+        val selGen = subtitleSelectionGeneration.get()
         val enabled = rawEditorEnabled
         val preview = rawPreview
         val json = advancedAssOverridesJson
@@ -4046,7 +4052,7 @@ class MpvPlayerController {
             if (!enabled || sid <= 0) {
                 var removed = false
                 for (b in rawBindings.values) {
-                    if (b.derivedTrackId > 0) {
+                    if (b.derivedTrackId > 0 && (!enabled || b.originalTrackId != _secondarySubtitleTrackId.value)) {
                         removeRawDerived(view, b, reselectOriginal = (enabled.not() && sid == b.derivedTrackId))
                         removed = true
                     }
@@ -4159,6 +4165,13 @@ class MpvPlayerController {
         val addPath: String? = pathToAdd
         val addedFiles: List<File> = writtenFiles
         withMpvLock(Unit) { view ->
+            // The user changed / switched off the subtitle while this edit was being prepared: never select the edited
+            // copy over that decision (this is what made text reappear after "unselect"); redo it for the new state.
+            if (selGen != subtitleSelectionGeneration.get() || primarySubtitleOff) {
+                if (!alreadyApplied && addPath != null) addedFiles.forEach { try { it.delete() } catch (_: Throwable) {} }
+                if (!primarySubtitleOff) scheduleAdvancedAssSync(0L)
+                return@withMpvLock
+            }
             val sid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
             if (alreadyApplied || addPath == null) {
                 if (binding.derivedTrackId > 0 && sid != binding.derivedTrackId) {
@@ -4187,6 +4200,7 @@ class MpvPlayerController {
             externalSubtitlesMap[File(newPath).name] = binding.title
             externalSubtitlesMap[File(newPath).nameWithoutExtension] = binding.title
             isSubtitleExplicitlyDisabled = false
+            primarySubtitleDeselected = false
 
             val oldId = binding.derivedTrackId
             val oldFiles = binding.derivedFiles
@@ -4330,9 +4344,18 @@ class MpvPlayerController {
             }
         }
 
+    @Volatile private var advancedAssSyncPending = false
+
     private fun scheduleAdvancedAssSync(delayMs: Long = ADVANCED_ASS_DEBOUNCE_MS) {
         if (isReleased) return
-        val ctx = mpvView?.context?.applicationContext ?: return
+        val ctx = mpvView?.context?.applicationContext
+        if (ctx == null) {
+            // Restart / screen re-creation: the settings arrive before the player view exists. Remember it, so the edits are
+            // applied the moment the view is attached instead of waiting for a later touch / selection.
+            advancedAssSyncPending = true
+            return
+        }
+        advancedAssSyncPending = false
         advancedAssJob?.cancel()
         advancedAssJob = playerScope.launch(Dispatchers.IO) {
             delay(delayMs)
@@ -4589,6 +4612,7 @@ class MpvPlayerController {
     }
 
     private suspend fun syncAdvancedAssNow(context: Context) {
+        val selGen = subtitleSelectionGeneration.get()
         // The raw text editor runs first; when it owns the current track this pipeline skips it.
         try {
             syncRawSubtitleNow(context)
@@ -4619,7 +4643,8 @@ class MpvPlayerController {
                 // path capable of seeing both the old generated track and a newly attached one.
                 var removed = false
                 for (b in advancedAssBindings.values) {
-                    if (b.derivedTrackId > 0) {
+                    // the subtitle still shown as SECONDARY keeps its edited copy
+                    if (b.derivedTrackId > 0 && b.originalTrackId != _secondarySubtitleTrackId.value) {
                         removeAdvancedAssDerived(view, b, reselectOriginal = false)
                         removed = true
                     }
@@ -4722,6 +4747,13 @@ class MpvPlayerController {
 
         // ---- Phase C (native, locked): swap the subtitle track ----
         withMpvLock(Unit) { view ->
+            // See the raw pipeline: a newer selection / "unselect" wins over this (older) edit hand-off.
+            if (selGen != subtitleSelectionGeneration.get() || primarySubtitleOff) {
+                val stale = builtFile
+                if (stale != null && stale.absolutePath != binding.derivedPath) { try { stale.delete() } catch (_: Throwable) {} }
+                if (!primarySubtitleOff) scheduleAdvancedAssSync(0L)
+                return@withMpvLock
+            }
             val sid = (try { view.mpv.getPropertyInt("sid") } catch (_: Throwable) { null }) ?: 0
             if (!needsDerived) {
                 if (binding.derivedTrackId > 0) {
@@ -4758,6 +4790,7 @@ class MpvPlayerController {
             externalSubtitlesMap[file.absolutePath] = binding.title
             externalSubtitlesMap[file.name] = binding.title
             isSubtitleExplicitlyDisabled = false
+            primarySubtitleDeselected = false
 
             if (derivedAlive && binding.appliedSignature == signature && binding.derivedPath == file.absolutePath) {
                 // Nothing changed. Keep the existing rendering track untouched. In particular,
@@ -4947,6 +4980,7 @@ class MpvPlayerController {
                 lastActiveSubtitleTrackId = 0
             } else {
                 isSubtitleExplicitlyDisabled = false
+                primarySubtitleDeselected = false
                 lastActiveSubtitleTrackId = trackId
                 val playbackTrackId = resolveAdvancedAssPlaybackId(trackId)
                 // Detect whether the selected subtitle points at one of Viaura's
@@ -4993,7 +5027,7 @@ class MpvPlayerController {
                     scheduleNativeAssSelectionRecovery(trackId, selectionGeneration)
                 }
             }
-            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync(0L)
             nudgeRedrawIfPaused()
         } catch (_: Throwable) {}
     }
@@ -5074,6 +5108,7 @@ class MpvPlayerController {
         // font work follows on the background thread below.
         try {
             isSubtitleExplicitlyDisabled = (primaryTrackId <= 0 && secondaryTrackId <= 0)
+            primarySubtitleDeselected = (primaryTrackId <= 0)
             lastActiveSubtitleTrackId = if (primaryTrackId > 0) primaryTrackId else 0
             _secondarySubtitleTrackId.value = if (secondaryTrackId > 0) secondaryTrackId else 0
             _subtitleTracks.value = _subtitleTracks.value.map {
@@ -5171,7 +5206,7 @@ class MpvPlayerController {
 
             }
 
-            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync()
+            if (advancedAssEnabled || rawEditorEnabled || advancedAssBindings.isNotEmpty() || rawBindings.isNotEmpty()) scheduleAdvancedAssSync(0L)
 
             if (selectionGeneration == subtitleSelectionGeneration.get()) {
                 _subtitleTracks.value = _subtitleTracks.value.map { track ->
@@ -5459,6 +5494,7 @@ class MpvPlayerController {
                 _subtitleTracks.value = _subtitleTracks.value.map { it.copy(isSelected = false) }
             } else {
                 isSubtitleExplicitlyDisabled = false
+                primarySubtitleDeselected = false
                 if (targetSid > 0) {
                     _subtitleTracks.value = _subtitleTracks.value.map { it.copy(isSelected = (it.id == targetSid)) }
                 }
@@ -5643,6 +5679,7 @@ class MpvPlayerController {
                     loadedExternalSubtitles.add(filePath)
                 }
                 isSubtitleExplicitlyDisabled = false
+                primarySubtitleDeselected = false
                 val streamGuard = SubtitlePropGuard(view)
                 streamGuard.setPropertyBoolean("sub-visibility", true)
                 streamGuard.setPropertyString("sub-ass", "yes")
@@ -5700,6 +5737,8 @@ class MpvPlayerController {
             }
 
             isSubtitleExplicitlyDisabled = false
+
+            primarySubtitleDeselected = false
             // Same-value subtitle option writes make libass rebuild its renderer/fonts on mpv's core thread
             // (audio cut / silence while a subtitle is added), so only changed values are written.
             val addGuard = SubtitlePropGuard(view)

@@ -98,7 +98,9 @@ enum class ViewMode {
 }
 
 enum class LayoutMode {
-    LIST, GRID
+    LIST, GRID,
+    /** Online videos only: full-width YouTube-style cards (thumbnail, channel logo, title, views, age). */
+    YOUTUBE
 }
 
 data class VisibleFields(

@@ -77,6 +77,23 @@ import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.search.SearchExtractor
 import java.util.Locale
+import kotlinx.coroutines.awaitAll
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import com.example.ui.screens.ChannelTabsRow
+import com.example.ui.theme.DarkGlassSurface
+import com.example.ui.theme.DarkTextPrimary
+import com.example.ui.theme.LightGlassSurface
+import com.example.ui.theme.LightTextPrimary
+import com.example.ui.theme.Neutral
+import com.example.util.SubscribedChannelsManager
 
 /**
  * Online Video browsing panel (inside the "Online Video" folder): recommendation feed when the search box is empty,
@@ -351,6 +368,33 @@ fun OnlineVideoPanel(
         }
     }
 
+    // ---- Home | Subs | Live strip (only while the feed is shown; a search always shows its results) ----
+    val activeTab = if (isFeedMode) st.tab else "home"
+    LaunchedEffect(activeTab, st.refreshRequest) {
+        if (activeTab == "subs" && (!st.subsLoaded || st.subsLoadedRefresh != st.refreshRequest)) {
+            st.subsLoading = true
+            try {
+                val groups = withContext(Dispatchers.IO) { loadSubsGroups(context) }
+                st.subsGroups = groups
+                st.subsLoaded = true
+                st.subsLoadedRefresh = st.refreshRequest
+            } finally {
+                st.subsLoading = false
+            }
+        }
+        if (activeTab == "live" && (!st.liveLoaded || st.liveLoadedRefresh != st.refreshRequest)) {
+            st.liveLoading = true
+            try {
+                val live = withContext(Dispatchers.IO) { OnlineMusicService.fetchLiveStreams() }
+                st.liveResults = live
+                st.liveLoaded = true
+                st.liveLoadedRefresh = st.refreshRequest
+            } finally {
+                st.liveLoading = false
+            }
+        }
+    }
+
     // Unlimited scrolling
     val nearEnd by remember(layoutMode) {
         derivedStateOf {
@@ -460,6 +504,7 @@ fun OnlineVideoPanel(
     fun play(r: OnlineTrackResult) {
         if (r.isNew) st.results = st.results.map { if (it.videoUrl == r.videoUrl) it.copy(isNew = false) else it }
         OnlineVideoRecommender.recordOpened(context, r.videoUrl, r.artist, r.title)
+        st.watchedTick++
         feedPrefetchScope.launch { try { OnlineMediaLibrary.rememberMeta(context.applicationContext, OnlineMediaLibrary.KIND_VIDEO, r) } catch (_: Throwable) {} }
         prepareAfterWatch(r)
         val tappedPath = "${OnlineVideoService.ONLINE_VIDEO_PATH_PREFIX}${r.videoUrl}"
@@ -498,6 +543,12 @@ fun OnlineVideoPanel(
         onPlayVideo(list.first(), list)
     }
 
+    // Opens the channel of a video (tap on the channel logo / name of a YouTube-style card)
+    fun openChannelOf(r: OnlineTrackResult) {
+        val url = r.channelUrl
+        if (!url.isNullOrBlank()) onOpenChannel(OnlineChannelResult(url, r.artist, r.channelAvatarUrl, null, null))
+    }
+
     Column(modifier = modifier.fillMaxSize()) {
         // Suggestions (5 popular searches for the typed text); the results start below them
         OnlineSearchSuggestions(
@@ -506,8 +557,88 @@ fun OnlineVideoPanel(
             glassBlurTransparency = glassBlurTransparency,
             fetch = { OnlineMusicService.getSearchSuggestions(it) }
         )
+        if (isFeedMode) {
+            ChannelTabsRow(
+                tabs = listOf("home" to "Home", "subs" to "Subs", "live" to "Live"),
+                selectedId = st.tab,
+                onSelect = { st.tab = it },
+                isDark = isDark
+            )
+        }
     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         when {
+            activeTab == "subs" -> {
+                // reading watchedTick makes a watched video leave the list as soon as the user comes back
+                val watchedVersion = st.watchedTick
+                val visibleGroups = remember(st.subsGroups, watchedVersion, st.hiddenVersion) {
+                    st.subsGroups.mapNotNull { g ->
+                        val left = g.videos.filter { !OnlineVideoRecommender.isWatched(context, it.videoUrl) && it.videoUrl !in hidden }
+                        if (left.isEmpty()) null else g.copy(videos = left)
+                    }
+                }
+                when {
+                    st.subsLoading && st.subsGroups.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
+                    }
+                    visibleGroups.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            if (SubscribedChannelsManager.getAll(context).isEmpty()) "You have not subscribed to any channel yet. Subscribe to a channel and its newest videos show up here."
+                            else "No new videos from your subscriptions. Pull down to refresh.",
+                            color = secondaryText, modifier = Modifier.padding(32.dp), textAlign = TextAlign.Center
+                        )
+                    }
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        visibleGroups.forEach { g ->
+                            item(key = "subs_h_${g.channel.channelUrl}") {
+                                SubsChannelHeader(
+                                    name = g.channel.name, avatarUrl = g.channel.avatarUrl, isDark = isDark,
+                                    onClick = { onOpenChannel(OnlineChannelResult(g.channel.channelUrl, g.channel.name, g.channel.avatarUrl, null, null)) }
+                                )
+                            }
+                            items(g.videos, key = { "subs_v_${it.videoUrl}" }) { r ->
+                                Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
+                                    if (layoutMode == LayoutMode.YOUTUBE) {
+                                        OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                                    } else {
+                                        val v = remember(r) { r.toOnlineVideoItem() }
+                                        VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            activeTab == "live" -> {
+                when {
+                    st.liveLoading && st.liveResults.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
+                    }
+                    st.liveResults.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No live streams found right now. Pull down to refresh.", color = secondaryText, modifier = Modifier.padding(32.dp), textAlign = TextAlign.Center)
+                    }
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(st.liveResults.filter { it.videoUrl !in hidden }, key = { "live_${it.videoUrl}" }) { r ->
+                            Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
+                                if (layoutMode == LayoutMode.YOUTUBE) {
+                                    OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                                } else {
+                                    val v = remember(r) { r.toOnlineVideoItem() }
+                                    VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             st.isSearching && st.results.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
@@ -522,6 +653,32 @@ fun OnlineVideoPanel(
                         modifier = Modifier.padding(32.dp),
                         textAlign = TextAlign.Center
                     )
+                }
+            }
+            layoutMode == LayoutMode.YOUTUBE -> {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(st.channelResults, key = { "ov_channel_${it.channelUrl}" }) { ch ->
+                        OnlineChannelResultCard(channel = ch, isDark = isDark, onClick = {
+                            onOpenChannel(ch)
+                        })
+                    }
+                    items(shown, key = { "ov_y_${st.generation}_${it.videoUrl}" }) { r ->
+                        Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
+                            OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                        }
+                    }
+                    if (st.isLoadingMore) {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                                ViauraExpressiveLoadingIndicator(size = 36.dp, isDark = isDark)
+                            }
+                        }
+                    }
                 }
             }
             layoutMode == LayoutMode.GRID -> {
@@ -675,5 +832,225 @@ fun OnlineVideoPanel(
             )
         }
     }
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// YouTube-style layout (Sort & View > Layout > YouTube) and the Subs tab
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Subs tab data: every subscribed channel with its newest uploads (max 3), the channel that uploaded last first. */
+private suspend fun loadSubsGroups(context: android.content.Context): List<SubsChannelGroup> = kotlinx.coroutines.coroutineScope {
+    val gate = kotlinx.coroutines.sync.Semaphore(6)
+    SubscribedChannelsManager.getAll(context).take(40).map { ch ->
+        kotlinx.coroutines.async(Dispatchers.IO) {
+            gate.acquire()
+            try {
+                val videos = try {
+                    OnlineMusicService.fetchChannelLatestVideos(ch.channelUrl, 3)
+                } catch (t: kotlinx.coroutines.CancellationException) {
+                    throw t
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+                SubsChannelGroup(
+                    ch,
+                    videos.filter { it.videoUrl.isNotBlank() && it.title.isNotBlank() }.map {
+                        it.copy(
+                            artist = it.artist.ifBlank { ch.name },
+                            channelUrl = ch.channelUrl,
+                            channelAvatarUrl = it.channelAvatarUrl ?: ch.avatarUrl
+                        )
+                    }
+                )
+            } finally {
+                gate.release()
+            }
+        }
+    }.awaitAll()
+        .filter { it.videos.isNotEmpty() }
+        .sortedByDescending { g -> g.videos.maxOf { it.uploadDateEpochMs ?: 0L } }
+}
+
+/** "3 days ago": the website's own text when there is one, otherwise worked out from the upload time. */
+private fun youtubeAgeText(r: OnlineTrackResult): String {
+    r.uploadDateText?.takeIf { it.isNotBlank() }?.let { return it }
+    val at = r.uploadDateEpochMs ?: return ""
+    if (at <= 0L) return ""
+    val mins = ((System.currentTimeMillis() - at) / 60_000L).coerceAtLeast(0L)
+    return when {
+        mins < 1L -> "just now"
+        mins < 60L -> "$mins minute${if (mins == 1L) "" else "s"} ago"
+        mins < 60L * 24L -> "${mins / 60L} hour${if (mins / 60L == 1L) "" else "s"} ago"
+        mins < 60L * 24L * 30L -> "${mins / (60L * 24L)} day${if (mins / (60L * 24L) == 1L) "" else "s"} ago"
+        mins < 60L * 24L * 365L -> "${mins / (60L * 24L * 30L)} month${if (mins / (60L * 24L * 30L) == 1L) "" else "s"} ago"
+        else -> "${mins / (60L * 24L * 365L)} year${if (mins / (60L * 24L * 365L) == 1L) "" else "s"} ago"
+    }
+}
+
+private fun youtubeDurationText(sec: Long): String {
+    val h = sec / 3600L
+    val m = (sec % 3600L) / 60L
+    val s = sec % 60L
+    return if (h > 0L) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
+}
+
+/** Round channel logo; the first letter on the app gradient while the logo is missing / loading. */
+@Composable
+private fun YouTubeChannelLogo(name: String, avatarUrl: String?, size: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier) {
+    var bmp by remember(avatarUrl) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(avatarUrl) {
+        if (!avatarUrl.isNullOrBlank()) bmp = loadRemoteAudioThumbnail(avatarUrl, targetSizePx = 160)
+    }
+    Box(
+        modifier = modifier.size(size).clip(CircleShape).background(AccentGradient),
+        contentAlignment = Alignment.Center
+    ) {
+        val b = bmp
+        if (b != null) {
+            Image(bitmap = b.asImageBitmap(), contentDescription = name, contentScale = ContentScale.Crop, modifier = Modifier.size(size).clip(CircleShape))
+        } else {
+            Text(name.take(1).uppercase(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.42f).sp)
+        }
+    }
+}
+
+/**
+ * One video in the YouTube-style layout: the same glass card as the channel card (gradient border, rounded top corners),
+ * the whole thumbnail on top, and below it the channel logo, the video title, "channel - views - age" and a Subscribe pill.
+ * Tap the video = play; tap the channel logo = open the channel.
+ */
+@Composable
+internal fun OnlineYouTubeVideoCard(
+    video: OnlineTrackResult,
+    isDark: Boolean,
+    onClick: () -> Unit,
+    onChannelClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    val shape = RoundedCornerShape(16.dp)
+
+    var thumb by remember(video.thumbnailUrl) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(video.thumbnailUrl) {
+        if (!video.thumbnailUrl.isNullOrBlank()) thumb = loadRemoteAudioThumbnail(video.thumbnailUrl, targetSizePx = 900)
+    }
+    val channelUrl = video.channelUrl
+    var subscribed by remember(channelUrl) {
+        mutableStateOf(!channelUrl.isNullOrBlank() && SubscribedChannelsManager.isSubscribed(context, channelUrl))
+    }
+    val meta = listOf(video.artist, formatViews(video.viewCount), youtubeAgeText(video)).filter { it.isNotBlank() }.joinToString(" \u2022 ")
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .cardSurface {
+                this.liquidGlassOr(shape, isDark, LocalPanelTransparency.current, elevation = 4.dp, backdropBlur = false) {
+                    this
+                        .clip(shape)
+                        .background(cardTone(surfaceColor))
+                        .border(1.5.dp, AccentGradient, shape)
+                }
+            }
+            .padding(1.5.dp)
+    ) {
+        // Whole thumbnail, top corners rounded like the channel banner
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(topStart = 14.5.dp, topEnd = 14.5.dp))
+                .background(if (isDark) Neutral.D1E293B else Neutral.E2E8F0)
+                .clickable { onClick() }
+        ) {
+            val t = thumb
+            if (t != null) {
+                Image(bitmap = t.asImageBitmap(), contentDescription = video.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            }
+            if (video.isNew) {
+                Text(
+                    "NEW", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(AccentGradient).padding(horizontal = 7.dp, vertical = 2.dp)
+                )
+            }
+            if (video.isLive) {
+                Text(
+                    "LIVE", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xFFE02424)).padding(horizontal = 7.dp, vertical = 2.dp)
+                )
+            } else if (video.durationSec > 0L) {
+                Text(
+                    youtubeDurationText(video.durationSec), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.75f)).padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(10.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            YouTubeChannelLogo(
+                name = video.artist.ifBlank { "?" }, avatarUrl = video.channelAvatarUrl, size = 40.dp,
+                modifier = Modifier.clip(CircleShape).clickable(enabled = !channelUrl.isNullOrBlank()) { onChannelClick() }
+            )
+            Column(modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp)).clickable { onClick() }) {
+                Text(video.title, color = primaryText, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (meta.isNotBlank()) {
+                    Text(meta, color = secondaryText, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                }
+            }
+            if (!channelUrl.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .height(32.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(if (subscribed) SolidColor(if (isDark) Neutral.D334155 else Neutral.E2E8F0) else AccentGradient)
+                        .clickable {
+                            subscribed = !subscribed
+                            SubscribedChannelsManager.setSubscribed(context, channelUrl, video.artist, video.channelAvatarUrl, subscribed)
+                        }
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(if (subscribed) "Subscribed" else "Subscribe", color = if (subscribed) primaryText else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+/** Channel line of the Subs tab (logo + name); the newest videos of that channel follow below it. Tap = open the channel. */
+@Composable
+private fun SubsChannelHeader(name: String, avatarUrl: String?, isDark: Boolean, onClick: () -> Unit) {
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .cardSurface {
+                this.liquidGlassOr(shape, isDark, LocalPanelTransparency.current, elevation = 4.dp, backdropBlur = false) {
+                    this.clip(shape).background(cardTone(surfaceColor)).border(1.5.dp, AccentGradient, shape)
+                }
+            }
+            .clip(shape)
+            .clickable { onClick() }
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        YouTubeChannelLogo(name = name.ifBlank { "?" }, avatarUrl = avatarUrl, size = 48.dp)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(name, color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Subscribed \u2022 latest videos", color = secondaryText, fontSize = 12.sp, maxLines = 1)
+        }
     }
 }

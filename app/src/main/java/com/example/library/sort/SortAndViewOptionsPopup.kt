@@ -408,7 +408,8 @@ fun SortAndViewOptionsPopup(
                         activeBg = activeTintBg,
                         borderColor = pillBorderColor,
                         primaryText = primaryText,
-                        onSelectLayout = onLayoutModeChange
+                        onSelectLayout = onLayoutModeChange,
+                        showYoutube = isOnlineVideoFolder
                     )
 
                     HorizontalDivider(
