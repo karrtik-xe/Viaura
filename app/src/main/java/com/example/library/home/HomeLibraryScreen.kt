@@ -1787,8 +1787,8 @@ fun HomeScreen(
                     )
                 } else {
                     val headerTitle = when (effectiveSelectedTab) {
-                        NavigationTab.HOME -> if (isOnlineVideoOpen) "Online" else (currentFolder?.name ?: AppStrings.getTitle(lang))
-                        NavigationTab.MUSIC -> selectedMusicFolder?.name ?: "Music & Audio"
+                        NavigationTab.HOME -> if (isOnlineVideoOpen) "Vitube" else (currentFolder?.name ?: AppStrings.getTitle(lang))
+                        NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Me Otube" else (selectedMusicFolder?.name ?: "Music & Audio")
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
                         NavigationTab.NETWORK, NavigationTab.DOWNLOADS -> if (showDownloads) "Downloads" else (MediaDetailState.provider?.name ?: "Network")
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
@@ -1837,12 +1837,10 @@ fun HomeScreen(
                         titleSuffix = if (effectiveSelectedTab == NavigationTab.HOME && !isOnlineVideoOpen && currentFolder == null &&
                             com.example.BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) "(Beta)" else null,
                         onBackClick = when (effectiveSelectedTab) {
+                            // Vitube (online video) and Me Otube (online audio): no back arrow, the shining app logo stays like on the
+                            // Home screen; the phone's back gesture / button still leaves the folder (BackHandler above)
                             NavigationTab.HOME -> if (isOnlineVideoOpen) {
-                                {
-                                    searchQuery = ""
-                                    isSearchActive = false
-                                    com.example.ui.components.OnlineVideoFeedState.isOpen = false
-                                }
+                                null
                             } else if (currentFolder != null) {
                                 {
                                     searchQuery = ""
@@ -1850,7 +1848,7 @@ fun HomeScreen(
                                     popFolder()
                                 }
                             } else null
-                            NavigationTab.MUSIC -> if (selectedMusicFolder != null) {
+                            NavigationTab.MUSIC -> if (selectedMusicFolder != null && selectedMusicFolder?.path != com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) {
                                 {
                                     searchQuery = ""
                                     isSearchActive = false
@@ -2609,7 +2607,7 @@ fun HomeScreen(
                                             item(contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
-                                                    title = "Online Video",
+                                                    title = "Vitube",
                                                     subtitle = "Search & stream any video online",
                                                     onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )
@@ -2688,7 +2686,7 @@ fun HomeScreen(
                                             item(span = { GridItemSpan(2) }, contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
-                                                    title = "Online Video",
+                                                    title = "Vitube",
                                                     subtitle = "Search & stream any video online",
                                                     onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )
@@ -2735,7 +2733,7 @@ fun HomeScreen(
                                             item(contentType = "online_video_folder") {
                                                 OnlineFolderCard(
                                                     isDark = isDark,
-                                                    title = "Online Video",
+                                                    title = "Vitube",
                                                     subtitle = "Search & stream any video online",
                                                     onClick = { com.example.ui.components.OnlineVideoFeedState.isOpen = true }
                                                 )

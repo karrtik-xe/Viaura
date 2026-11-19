@@ -246,7 +246,7 @@ data class AudioFolderItem(
 const val ONLINE_FOLDER_SENTINEL_PATH = "\u0000ONLINE_MUSIC\u0000"
 
 val ONLINE_FOLDER_ITEM = AudioFolderItem(
-    name = "Online",
+    name = "Me Otube",
     path = ONLINE_FOLDER_SENTINEL_PATH,
     trackCount = 0,
     totalDurationMs = 0L,

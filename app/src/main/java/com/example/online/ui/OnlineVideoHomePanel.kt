@@ -84,7 +84,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
@@ -838,7 +837,7 @@ fun OnlineVideoPanel(
 
 
 // ---------------------------------------------------------------------------------------------------------------------
-// YouTube-style layout (Sort & View > Layout > YouTube) and the Subs tab
+// Feed layout (Sort & View > Layout > Feed) and the Subs tab
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** Subs tab data: every subscribed channel with its newest uploads (max 3), the channel that uploaded last first. */
@@ -919,8 +918,8 @@ private fun YouTubeChannelLogo(name: String, avatarUrl: String?, size: androidx.
 
 /**
  * One video in the YouTube-style layout: the same glass card as the channel card (gradient border, rounded top corners),
- * the whole thumbnail on top, and below it the channel logo, the video title, "channel - views - age" and a Subscribe pill.
- * Tap the video = play; tap the channel logo = open the channel.
+ * the whole thumbnail on top, and below it the channel logo, the video title (up to 2 lines), the channel name and "views - age".
+ * No Subscribe button here: tap the video = play; tap the channel logo = open the channel (subscribe from there).
  */
 @Composable
 internal fun OnlineYouTubeVideoCard(
@@ -929,7 +928,6 @@ internal fun OnlineYouTubeVideoCard(
     onClick: () -> Unit,
     onChannelClick: () -> Unit
 ) {
-    val context = LocalContext.current
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -940,10 +938,8 @@ internal fun OnlineYouTubeVideoCard(
         if (!video.thumbnailUrl.isNullOrBlank()) thumb = loadRemoteAudioThumbnail(video.thumbnailUrl, targetSizePx = 900)
     }
     val channelUrl = video.channelUrl
-    var subscribed by remember(channelUrl) {
-        mutableStateOf(!channelUrl.isNullOrBlank() && SubscribedChannelsManager.isSubscribed(context, channelUrl))
-    }
-    val meta = listOf(video.artist, formatViews(video.viewCount), youtubeAgeText(video)).filter { it.isNotBlank() }.joinToString(" \u2022 ")
+    // line 2: channel name on its own line; line 3: "views \u2022 age"
+    val stats = listOf(formatViews(video.viewCount), youtubeAgeText(video)).filter { it.isNotBlank() }.joinToString(" \u2022 ")
 
     Column(
         modifier = Modifier
@@ -1001,25 +997,18 @@ internal fun OnlineYouTubeVideoCard(
                 modifier = Modifier.clip(CircleShape).clickable(enabled = !channelUrl.isNullOrBlank()) { onChannelClick() }
             )
             Column(modifier = Modifier.weight(1f).clip(RoundedCornerShape(6.dp)).clickable { onClick() }) {
-                Text(video.title, color = primaryText, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (meta.isNotBlank()) {
-                    Text(meta, color = secondaryText, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                Text(
+                    video.title, color = primaryText, fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+                if (video.artist.isNotBlank()) {
+                    Text(
+                        video.artist, color = secondaryText, fontSize = 12.5.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp)
+                    )
                 }
-            }
-            if (!channelUrl.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .height(32.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(if (subscribed) SolidColor(if (isDark) Neutral.D334155 else Neutral.E2E8F0) else AccentGradient)
-                        .clickable {
-                            subscribed = !subscribed
-                            SubscribedChannelsManager.setSubscribed(context, channelUrl, video.artist, video.channelAvatarUrl, subscribed)
-                        }
-                        .padding(horizontal = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(if (subscribed) "Subscribed" else "Subscribe", color = if (subscribed) primaryText else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                if (stats.isNotBlank()) {
+                    Text(stats, color = secondaryText.copy(alpha = 0.85f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
                 }
             }
         }

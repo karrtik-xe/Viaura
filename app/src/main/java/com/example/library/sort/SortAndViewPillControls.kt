@@ -44,7 +44,6 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.Title
-import androidx.compose.material.icons.outlined.ViewAgenda
 import androidx.compose.material.icons.outlined.ViewList
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -378,7 +377,7 @@ internal fun LayoutPillToggle(
     borderColor: Color,
     primaryText: Color,
     onSelectLayout: (LayoutMode) -> Unit,
-    /** Third option (Online Video folder only): the YouTube-style card layout. */
+    /** Third option (Online Video folder only): the Feed (big thumbnail card) layout. */
     showYoutube: Boolean = false
 ) {
     val shape = RoundedCornerShape(22.dp)
@@ -469,7 +468,7 @@ internal fun LayoutPillToggle(
                 thickness = 1.2.dp
             )
 
-            // YouTube style
+            // Feed style
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -486,14 +485,14 @@ internal fun LayoutPillToggle(
                     horizontalArrangement = Arrangement.Center
                 ) {
                     StyledIcon(
-                        imageVector = Icons.Outlined.ViewAgenda,
-                        contentDescription = "YouTube",
+                        drawableRes = R.drawable.viaura_feed_layout,
+                        contentDescription = "Feed",
                         tint = if (selectedLayout == LayoutMode.YOUTUBE) Color.White else primaryText,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "YouTube",
+                        text = "Feed",
                         fontSize = 13.sp,
                         fontWeight = if (selectedLayout == LayoutMode.YOUTUBE) FontWeight.Bold else FontWeight.SemiBold,
                         color = if (selectedLayout == LayoutMode.YOUTUBE) Color.White else primaryText
