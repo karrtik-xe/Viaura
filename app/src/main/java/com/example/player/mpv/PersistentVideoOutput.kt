@@ -64,6 +64,8 @@ class PersistentVideoOutput private constructor(
     fun setFlip(mirrorHorizontal: Boolean, flipVertical: Boolean): Boolean {
         mirrorH = mirrorHorizontal
         flipV = flipVertical
+        // below Android 12 there is no public compositor mirror: the caller keeps the old hflip / vflip filter
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return !(mirrorHorizontal || flipVertical)
         if (released) return false
         if (host == null) return true // applied as soon as a host binds
         return try {
@@ -78,10 +80,11 @@ class PersistentVideoOutput private constructor(
     }
 
     private fun applyFlip(t: SurfaceControl.Transaction, w: Int, h: Int) {
-        val sx = if (mirrorH) -1f else 1f
-        val sy = if (flipV) -1f else 1f
-        t.setMatrix(control, sx, 0f, 0f, sy)
-        t.setPosition(control, if (mirrorH) w.toFloat() else 0f, if (flipV) h.toFloat() else 0f)
+        // public API 31+: the compositor mirrors the layer (setMatrix is a hidden API and does not compile)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val transform = (if (mirrorH) SurfaceControl.BUFFER_TRANSFORM_MIRROR_HORIZONTAL else 0) or
+            (if (flipV) SurfaceControl.BUFFER_TRANSFORM_MIRROR_VERTICAL else 0)
+        t.setBufferTransform(control, transform)
     }
 
     fun unbind(from: SurfaceView) {
