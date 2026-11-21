@@ -2974,15 +2974,8 @@ class MpvPlayerController {
             // All video filters are combined into ONE lavfi graph because `vf` is set as a whole:
             // setting it for flips alone would wipe the colour-balance filter and vice versa.
             val vfParts = mutableListOf<String>()
-            // Mirror / flip are done by the compositor on the player-owned surface layer (no mpv filter chain rebuild, no decoder
-            // change, no re-seek: picture and sound never stop). Only without that surface (API < 29) the old hflip / vflip filter is used.
-            val compositorFlip = try {
-                view.output?.setFlip(videoMirrorHorizontal, videoFlipVertical) == true
-            } catch (_: Throwable) { false }
-            if (!compositorFlip) {
-                if (videoMirrorHorizontal) vfParts.add("hflip")
-                if (videoFlipVertical) vfParts.add("vflip")
-            }
+            if (videoMirrorHorizontal) vfParts.add("hflip")
+            if (videoFlipVertical) vfParts.add("vflip")
             if (totalTemperature != 0 || totalTint != 0) {
                 val rs = (totalTemperature * 0.003 + totalTint * 0.0015).coerceIn(-1.0, 1.0)
                 val gs = (-totalTint * 0.003).coerceIn(-1.0, 1.0)
