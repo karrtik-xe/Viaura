@@ -2058,7 +2058,7 @@ object AudioPlaybackManager {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 // A short sound over the music: keep playing, only lower the volume (no pause / resume gap).
                 duckedForFocus = true
-                rampOutputVolume(120L)
+                applyOutputVolume()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 audioFocusHeld = false
@@ -2070,21 +2070,10 @@ object AudioPlaybackManager {
                 if (wasPlaying && !userExplicitlyPaused) {
                     resumeOnFocusGain = true
                     mediaPlayer?.let { player ->
-                        // The sound is faded out for a moment before it stops: a cut in the middle of a wave is the click / glitch
-                        // heard when a call or another app takes over.
-                        focusPauseJob?.cancel()
-                        volumeRampJob?.cancel()
-                        focusPauseJob = scope.launch {
-                            val from = if (player === volumeAppliedTo && volumeApplied >= 0f) volumeApplied else 1f
-                            for (i in 1..6) {
-                                try { val v = from * (1f - i / 6f); player.setVolume(v, v); volumeAppliedTo = player; volumeApplied = v } catch (_: Exception) {}
-                                delay(16L)
-                            }
-                            try { player.pause() } catch (_: Exception) {}
-                            _isPlaying.value = false
-                            stopProgressTracker()
-                            applicationContext?.let { updateNotification(it, _currentTrack.value, false) }
-                        }
+                        player.pause()
+                        _isPlaying.value = false
+                        stopProgressTracker()
+                        applicationContext?.let { updateNotification(it, _currentTrack.value, false) }
                     }
                 } else {
                     resumeOnFocusGain = false
@@ -2092,28 +2081,21 @@ object AudioPlaybackManager {
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 audioFocusHeld = true
-                focusPauseJob?.cancel()
                 if (duckedForFocus) {
                     duckedForFocus = false
-                    rampOutputVolume(400L)
+                    applyOutputVolume()
                 }
                 // NEVER resume if user explicitly paused the music!
                 if (resumeOnFocusGain && !userExplicitlyPaused) {
                     resumeOnFocusGain = false
                     mediaPlayer?.let { player ->
                         if (!player.isPlaying) {
-                            // starts silent and eases in, so there is no pop when the sound comes back
-                            try { player.setVolume(0f, 0f); volumeAppliedTo = player; volumeApplied = 0f } catch (_: Exception) {}
                             applyPlaybackSpeed(_playbackSpeed.value)
                             player.start()
                             applySpeedTo(player, _playbackSpeed.value)
                             _isPlaying.value = true
                             startProgressTracker()
                             applicationContext?.let { updateNotification(it, _currentTrack.value, true) }
-                            rampOutputVolume(300L)
-                        } else {
-                            // the fade-out was still running when the focus came back
-                            rampOutputVolume(200L)
                         }
                     }
                 } else {
@@ -2123,43 +2105,14 @@ object AudioPlaybackManager {
         }
     }
 
-    private var focusPauseJob: Job? = null
-    private var volumeRampJob: Job? = null
-
-    private fun targetOutputVolume(): Float {
-        val base = if (eqVolumeBoostDb > 0.05f) {
-            Math.pow(10.0, (eqVolumeBoostDb / 25.0)).toFloat().coerceIn(1.0f, 2.0f)
-        } else 1.0f
-        return if (duckedForFocus) base * 0.2f else base
-    }
-
-    /** Moves the volume to the wanted level in small steps (no jump = no click) when another app starts / stops its sound. */
-    private fun rampOutputVolume(durationMs: Long) {
-        val player = mediaPlayer ?: return
-        val wanted = targetOutputVolume()
-        val from = if (player === volumeAppliedTo && volumeApplied >= 0f) volumeApplied else 1f
-        volumeRampJob?.cancel()
-        if (kotlin.math.abs(from - wanted) < 0.01f) {
-            applyOutputVolume()
-            return
-        }
-        volumeRampJob = scope.launch {
-            val steps = (durationMs / 16L).toInt().coerceAtLeast(2)
-            for (i in 1..steps) {
-                if (mediaPlayer !== player) return@launch
-                val v = from + (wanted - from) * (i / steps.toFloat())
-                try { player.setVolume(v, v); volumeAppliedTo = player; volumeApplied = v } catch (_: Exception) {}
-                delay(16L)
-            }
-            applyOutputVolume()
-        }
-    }
-
     /** The volume the player really needs: volume boost and the short duck while another app makes a sound. */
     private fun applyOutputVolume() {
         try {
             val player = mediaPlayer ?: return
-            val wanted = targetOutputVolume()
+            val base = if (eqVolumeBoostDb > 0.05f) {
+                Math.pow(10.0, (eqVolumeBoostDb / 25.0)).toFloat().coerceIn(1.0f, 2.0f)
+            } else 1.0f
+            val wanted = if (duckedForFocus) base * 0.2f else base
             // An unchanged value is not written again (every write is one more tick in the output).
             if (player === volumeAppliedTo && wanted == volumeApplied) return
             player.setVolume(wanted, wanted)
