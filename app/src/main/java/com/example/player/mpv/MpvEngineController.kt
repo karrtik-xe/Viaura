@@ -395,6 +395,7 @@ class MpvPlayerController {
     @Volatile private var scrubMuted = false
     @Volatile private var scrubUserMuted = false
     @Volatile private var lastScrubDir = 0
+    @Volatile private var settledScrubTargetMs = -1L
     private var scrubUnmuteJob: kotlinx.coroutines.Job? = null
 
     private var scrubAudioJob: kotlinx.coroutines.Job? = null
@@ -434,7 +435,7 @@ class MpvPlayerController {
         val previous = scrubAudioJob
         val job = playerScope.launch(Dispatchers.Default) {
             try { previous?.join() } catch (_: Throwable) {}
-            delay(130L)
+            delay(60L)
             var ramp = false
             kotlinx.coroutines.withContext(NonCancellable) {
                 if (scrubMuted) {
@@ -442,7 +443,7 @@ class MpvPlayerController {
                     if (!scrubUserMuted) {
                         withMpvLock(Unit) { v ->
                             try {
-                                v.mpv.setPropertyDouble("volume", 0.0)
+                                v.mpv.setPropertyDouble("volume", currentVolumeLevel * 0.25)
                                 v.mpv.setPropertyBoolean("mute", false)
                             } catch (_: Throwable) {}
                         }
@@ -452,11 +453,11 @@ class MpvPlayerController {
             }
             if (ramp) {
                 try {
-                    for (i in 1..10) {
+                    for (i in 1..6) {
                         if (scrubMuted || isReleased) break
-                        val vol = currentVolumeLevel.toDouble() * (i / 10.0)
+                        val vol = currentVolumeLevel.toDouble() * (0.25 + 0.75 * (i / 6.0))
                         withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
-                        delay(25L)
+                        delay(18L)
                     }
                 } finally {
                     kotlinx.coroutines.withContext(NonCancellable) {
@@ -2676,7 +2677,7 @@ class MpvPlayerController {
             val now = System.currentTimeMillis()
             // seeks that follow each other quickly = the finger is scrubbing: nearest-keyframe seeks show a new picture at once, the exact
             // seek to the final spot follows as soon as the finger rests (a few ms after the last move)
-            val scrubbing = now - lastScrubSeekAt < 250L
+            val scrubbing = now - lastScrubSeekAt < 600L
             lastScrubSeekAt = now
             seekPendingTargetMs = timeMs
             seekPendingAt = now
@@ -2687,6 +2688,20 @@ class MpvPlayerController {
             // the spot already sent changes nothing on the screen: it only updates where the exact seek will land.
             // A resting finger also jitters a pixel or two back and forth; on a long video one pixel is seconds. Such a small
             // move AGAINST the direction of travel is jitter: it must not send mpv back and forth between two key frames.
+            // The exact seek has put the video on the chosen spot and the finger is still down: tiny moves around that spot are
+            // touch jitter and must not pull the video back (then forward again) - it simply plays on from there.
+            if (!scrubbing) settledScrubTargetMs = -1L
+            if (scrubbing && settledScrubTargetMs >= 0L) {
+                if (kotlin.math.abs(timeMs - settledScrubTargetMs) < 1000L) {
+                    scrubFinalTargetMs = settledScrubTargetMs
+                    if (wasAtEof) {
+                        mpvView?.mpv?.setPropertyBoolean("pause", false)
+                        _isPlaying.value = true
+                    }
+                    return
+                }
+                settledScrubTargetMs = -1L
+            }
             val stepFromIssued = timeMs - lastScrubIssuedTargetMs
             val dir = if (stepFromIssued > 0L) 1 else if (stepFromIssued < 0L) -1 else 0
             // only while the finger rests (nothing was sent for a moment); a finger that really moves back is always followed
@@ -2731,7 +2746,7 @@ class MpvPlayerController {
                 }
                 // the finger rests: the exact frame of the chosen spot
                 trailingExactSeekJob = playerScope.launch {
-                    kotlinx.coroutines.delay(160L)
+                    kotlinx.coroutines.delay(90L)
                     try {
                         // where the finger finally stopped (it may have drifted a little since this seek was scheduled)
                         val finalMs = if (scrubFinalTargetMs >= 0L) scrubFinalTargetMs else timeMs
@@ -2739,6 +2754,7 @@ class MpvPlayerController {
                         seekPendingAt = System.currentTimeMillis()
                         seekStage = 2
                         lastScrubIssuedTargetMs = finalMs
+                        settledScrubTargetMs = finalMs
                         mpvView?.mpv?.command("seek", "${finalMs / 1000.0}", "absolute+exact")
                         unmuteAfterScrub()
                     } catch (_: Throwable) {
@@ -2967,48 +2983,62 @@ class MpvPlayerController {
      * Anime4K: sets mpv's `glsl-shaders` chain (GPU shaders, so no `vf` / hwdec change is needed).
      * Does nothing unless the wanted chain differs from what mpv already has; an unavailable mode clears the chain.
      */
+    @Volatile private var wantedGlslChain: String? = null
+
     private fun applyAnime4kShaders(view: VideoPlayerMpvView): Boolean {
-        var flipByShader = false
+        var fxByShader = false
         try {
-            val anime = Anime4KShaders.resolveMpvValue(view.context.applicationContext, currentManualVideoAdjustments.anime4k)
-            // Mirror / flip as a GPU shader (last in the chain): no filter chain rebuild, no decoder change, no re-seek, so the
-            // sound is never touched and the picture does not stop. The subtitles are drawn after it and are not mirrored.
-            val flip = flipShaderPath(view.context.applicationContext, videoMirrorHorizontal, videoFlipVertical)
-            flipByShader = flip != null || !(videoMirrorHorizontal || videoFlipVertical)
-            val wanted = listOf(anime, flip ?: "").filter { it.isNotEmpty() }.joinToString(":")
+            val ctx = view.context.applicationContext
+            val anime = Anime4KShaders.resolveMpvValue(ctx, currentManualVideoAdjustments.anime4k)
+            val temp = (currentVideoFilterPreset.temperature + currentManualVideoAdjustments.temperature).coerceIn(-100, 100)
+            val tint = (currentVideoFilterPreset.tint + currentManualVideoAdjustments.tint).coerceIn(-100, 100)
+            // Mirror / flip and colour temperature / tint as ONE small GPU shader (last in the chain): no filter chain rebuild, no
+            // decoder change, no re-seek, so the sound is never touched and the picture does not stop. The subtitles are drawn
+            // after it and are not mirrored.
+            val wantsFx = videoMirrorHorizontal || videoFlipVertical || temp != 0 || tint != 0
+            val fx = if (wantsFx) fxShaderPath(ctx, videoMirrorHorizontal, videoFlipVertical, temp, tint) else null
+            fxByShader = !wantsFx || fx != null
+            val wanted = listOf(anime, fx ?: "").filter { it.isNotEmpty() }.joinToString(":")
             val current = try { view.mpv.getPropertyString("glsl-shaders") ?: "" } catch (_: Throwable) { "" }
             if (current != wanted) {
-                // same chain apart from our own flip shader (switched on, off or changed)
-                val currentBase = current.split(":").filter { it.isNotEmpty() && !it.contains("viaura_flip_") }.joinToString(":")
-                val onlyFlipDiffers = currentBase == anime
-                if (onlyFlipDiffers) {
-                    // sound keeps playing: no volume fade, and never on the calling (UI) thread
-                    playerScope.launch(Dispatchers.Default) {
-                        withMpvLock(Unit) { v -> try { v.mpv.setPropertyString("glsl-shaders", wanted) } catch (_: Throwable) {} }
+                // A shader change only re-initialises the GPU renderer (no decoder, no seek): the sound plays on untouched, so no
+                // volume fade here. Never on the calling (UI) thread: mpv answers only when its core thread is free.
+                wantedGlslChain = wanted
+                playerScope.launch(Dispatchers.Default) {
+                    withMpvLock(Unit) { v ->
+                        try {
+                            if (wantedGlslChain == wanted) v.mpv.setPropertyString("glsl-shaders", wanted)
+                        } catch (_: Throwable) {}
                     }
-                } else {
-                    runSeamlessChange("glsl") { view.mpv.setPropertyString("glsl-shaders", wanted) }
                 }
             }
         } catch (t: Throwable) {
             t.printStackTrace()
         }
-        return flipByShader
+        return fxByShader
     }
 
-    private fun flipShaderPath(context: android.content.Context, mirror: Boolean, flip: Boolean): String? {
-        if (!mirror && !flip) return null
+    private fun fxShaderPath(context: android.content.Context, mirror: Boolean, flip: Boolean, temp: Int, tint: Int): String? {
         return try {
-            val dir = File(context.filesDir, "viaura_flip").apply { mkdirs() }
-            val file = File(dir, "viaura_flip_${if (mirror) "h" else ""}${if (flip) "v" else ""}.glsl")
+            val dir = File(context.filesDir, "viaura_fx").apply { mkdirs() }
+            val name = "viaura_fx_${if (mirror) "h" else ""}${if (flip) "v" else ""}_${temp}_${tint}.glsl"
+            val file = File(dir, name)
             if (!file.exists() || file.length() == 0L) {
+                val rs = (temp * 0.003 + tint * 0.0015).coerceIn(-1.0, 1.0)
+                val gs = (-tint * 0.003).coerceIn(-1.0, 1.0)
+                val bs = (-temp * 0.003 + tint * 0.0015).coerceIn(-1.0, 1.0)
                 val body = buildString {
-                    append("//!DESC viaura mirror/flip\n//!HOOK MAIN\n//!BIND HOOKED\n\nvec4 hook() {\n    vec2 p = HOOKED_pos;\n")
+                    append("//!DESC viaura mirror/flip/colour\n//!HOOK MAIN\n//!BIND HOOKED\n\nvec4 hook() {\n    vec2 p = HOOKED_pos;\n")
                     if (mirror) append("    p.x = 1.0 - p.x;\n")
                     if (flip) append("    p.y = 1.0 - p.y;\n")
-                    append("    return HOOKED_tex(p);\n}\n")
+                    append("    vec4 c = HOOKED_tex(p);\n")
+                    if (temp != 0 || tint != 0) {
+                        append(String.format(java.util.Locale.US, "    c.rgb *= vec3(%.4f, %.4f, %.4f);\n", 1.0 + rs * 0.8, 1.0 + gs * 0.8, 1.0 + bs * 0.8))
+                    }
+                    append("    return c;\n}\n")
                 }
                 file.writeText(body)
+                dir.listFiles()?.forEach { if (it.name != name && it.name.startsWith("viaura_fx_")) it.delete() }
             }
             file.absolutePath
         } catch (_: Throwable) {
@@ -3019,7 +3049,7 @@ class MpvPlayerController {
     private fun applyVideoAdjustments(immediate: Boolean = false) {
         try {
             val view = mpvView ?: return
-            val flipByShader = applyAnime4kShaders(view)
+            val fxByShader = applyAnime4kShaders(view)
 
             val totalBrightness = (currentVideoFilterPreset.brightness + currentManualVideoAdjustments.brightness).coerceIn(-100, 100)
             val totalContrast = (currentVideoFilterPreset.contrast + currentManualVideoAdjustments.contrast).coerceIn(-100, 100)
@@ -3029,18 +3059,23 @@ class MpvPlayerController {
             val totalSharpen = (currentVideoFilterPreset.sharpness + currentManualVideoAdjustments.sharpness).coerceIn(0, 100)
             val totalDeband = currentVideoFilterPreset.deband || currentManualVideoAdjustments.deband
 
-            // 1. Direct Hardware/GPU Video Properties (Instant, 0-cost, no reload)
-            try {
-                view.mpv.setPropertyInt("brightness", totalBrightness)
-                view.mpv.setPropertyInt("contrast", totalContrast)
-                view.mpv.setPropertyInt("saturation", totalSaturation)
-                view.mpv.setPropertyInt("gamma", totalGamma)
-                view.mpv.setPropertyInt("hue", totalHue)
-                view.mpv.setPropertyBoolean("deband", totalDeband)
-                // Sharpen scale in MPV (0.0 to 5.0)
-                view.mpv.setPropertyDouble("sharpen", totalSharpen.toDouble() / 20.0)
-            } catch (t: Throwable) {
-                t.printStackTrace()
+            // 1. Direct Hardware/GPU Video Properties (no reload, no seek). Set on a background thread: mpv answers only when its
+            // core thread is free, so setting them from the touch / UI thread could make the screen wait.
+            playerScope.launch(Dispatchers.Default) {
+                withMpvLock(Unit) { v ->
+                    try {
+                        v.mpv.setPropertyInt("brightness", totalBrightness)
+                        v.mpv.setPropertyInt("contrast", totalContrast)
+                        v.mpv.setPropertyInt("saturation", totalSaturation)
+                        v.mpv.setPropertyInt("gamma", totalGamma)
+                        v.mpv.setPropertyInt("hue", totalHue)
+                        v.mpv.setPropertyBoolean("deband", totalDeband)
+                        // Sharpen scale in MPV (0.0 to 5.0)
+                        v.mpv.setPropertyDouble("sharpen", totalSharpen.toDouble() / 20.0)
+                    } catch (t: Throwable) {
+                        t.printStackTrace()
+                    }
+                }
             }
 
             // 2. Temperature & Tint Video Filter (colorbalance vf)
@@ -3050,11 +3085,11 @@ class MpvPlayerController {
             // All video filters are combined into ONE lavfi graph because `vf` is set as a whole:
             // setting it for flips alone would wipe the colour-balance filter and vice versa.
             val vfParts = mutableListOf<String>()
-            if (!flipByShader) {
+            if (!fxByShader) {
                 if (videoMirrorHorizontal) vfParts.add("hflip")
                 if (videoFlipVertical) vfParts.add("vflip")
             }
-            if (totalTemperature != 0 || totalTint != 0) {
+            if (!fxByShader && (totalTemperature != 0 || totalTint != 0)) {
                 val rs = (totalTemperature * 0.003 + totalTint * 0.0015).coerceIn(-1.0, 1.0)
                 val gs = (-totalTint * 0.003).coerceIn(-1.0, 1.0)
                 val bs = (-totalTemperature * 0.003 + totalTint * 0.0015).coerceIn(-1.0, 1.0)
