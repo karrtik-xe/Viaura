@@ -391,6 +391,49 @@ class MpvPlayerController {
     /** The spot the last key-frame seek of a scrub was sent to, and the newest spot the finger chose (the exact seek goes there). */
     @Volatile private var lastScrubIssuedTargetMs = -1L
     @Volatile private var scrubFinalTargetMs = -1L
+    /** Scrub audio: every key-frame seek flushes the sound and plays a few ms of the old spot again (a stutter loop), so the sound is muted while scrubbing. */
+    @Volatile private var scrubMuted = false
+    @Volatile private var scrubUserMuted = false
+    @Volatile private var lastScrubDir = 0
+    private var scrubUnmuteJob: kotlinx.coroutines.Job? = null
+
+    private fun muteForScrub() {
+        scrubUnmuteJob?.cancel()
+        if (scrubMuted) return
+        try {
+            val v = mpvView ?: return
+            scrubUserMuted = try { v.mpv.getPropertyBoolean("mute") == true } catch (_: Throwable) { false }
+            if (!scrubUserMuted) v.mpv.setPropertyBoolean("mute", true)
+            scrubMuted = true
+        } catch (_: Throwable) {}
+    }
+
+    /** After the exact seek has landed the sound comes back (never later than ~1.5 s, never over the user's own mute). */
+    private fun unmuteAfterScrub() {
+        if (!scrubMuted) return
+        scrubUnmuteJob?.cancel()
+        scrubUnmuteJob = playerScope.launch(Dispatchers.Default) {
+            try {
+                var waited = 0L
+                delay(60L)
+                while (waited < 1500L) {
+                    val seeking = withMpvLock(false) { v -> try { v.mpv.getPropertyBoolean("seeking") == true } catch (_: Throwable) { false } }
+                    if (!seeking) break
+                    delay(30L); waited += 30L
+                }
+                delay(80L)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+            }
+            kotlinx.coroutines.withContext(NonCancellable) {
+                if (scrubMuted) {
+                    scrubMuted = false
+                    if (!scrubUserMuted) withMpvLock(Unit) { v -> try { v.mpv.setPropertyBoolean("mute", false) } catch (_: Throwable) {} }
+                }
+            }
+        }
+    }
 
     private fun publishPolledPosition(realMs: Long, paused: Boolean) {
         val target = seekPendingTargetMs
@@ -2606,8 +2649,16 @@ class MpvPlayerController {
             // them used to restart mpv's seek (the sound was flushed and repeated every few milliseconds, the picture flipped
             // between one or two frames) and pushed the exact seek further away, so it never came. A move that stays close to
             // the spot already sent changes nothing on the screen: it only updates where the exact seek will land.
+            // A resting finger also jitters a pixel or two back and forth; on a long video one pixel is seconds. Such a small
+            // move AGAINST the direction of travel is jitter: it must not send mpv back and forth between two key frames.
+            val stepFromIssued = timeMs - lastScrubIssuedTargetMs
+            val dir = if (stepFromIssued > 0L) 1 else if (stepFromIssued < 0L) -1 else 0
+            val jitter = scrubbing && lastScrubIssuedTargetMs >= 0L && dir != 0 && lastScrubDir != 0 && dir != lastScrubDir &&
+                kotlin.math.abs(stepFromIssued) < 1500L
+            if (!jitter && dir != 0 && kotlin.math.abs(stepFromIssued) >= SCRUB_MIN_STEP_MS) lastScrubDir = dir
+            if (!scrubbing) lastScrubDir = 0
             if (scrubbing && lastScrubIssuedTargetMs >= 0L &&
-                kotlin.math.abs(timeMs - lastScrubIssuedTargetMs) < SCRUB_MIN_STEP_MS) {
+                (jitter || kotlin.math.abs(timeMs - lastScrubIssuedTargetMs) < SCRUB_MIN_STEP_MS)) {
                 scrubFinalTargetMs = timeMs
                 if (wasAtEof) {
                     mpvView?.mpv?.setPropertyBoolean("pause", false)
@@ -2625,6 +2676,7 @@ class MpvPlayerController {
                 mpvView?.mpv?.command("seek", "$sec", if (preciseSeekingEnabled) "absolute+exact" else "absolute")
             } else {
                 seekStage = 1
+                muteForScrub()
                 // a finger sends 60-120 moves a second: mpv gets at most one key-frame seek every 45 ms (always the newest spot),
                 // so it is never flooded and the picture keeps following the finger smoothly
                 scrubIssueJob?.cancel()
@@ -2651,8 +2703,10 @@ class MpvPlayerController {
                         seekStage = 2
                         lastScrubIssuedTargetMs = finalMs
                         mpvView?.mpv?.command("seek", "${finalMs / 1000.0}", "absolute+exact")
+                        unmuteAfterScrub()
                     } catch (_: Throwable) {
                         seekStage = 0
+                        unmuteAfterScrub()
                     }
                 }
             }
@@ -2920,8 +2974,15 @@ class MpvPlayerController {
             // All video filters are combined into ONE lavfi graph because `vf` is set as a whole:
             // setting it for flips alone would wipe the colour-balance filter and vice versa.
             val vfParts = mutableListOf<String>()
-            if (videoMirrorHorizontal) vfParts.add("hflip")
-            if (videoFlipVertical) vfParts.add("vflip")
+            // Mirror / flip are done by the compositor on the player-owned surface layer (no mpv filter chain rebuild, no decoder
+            // change, no re-seek: picture and sound never stop). Only without that surface (API < 29) the old hflip / vflip filter is used.
+            val compositorFlip = try {
+                view.output?.setFlip(videoMirrorHorizontal, videoFlipVertical) == true
+            } catch (_: Throwable) { false }
+            if (!compositorFlip) {
+                if (videoMirrorHorizontal) vfParts.add("hflip")
+                if (videoFlipVertical) vfParts.add("vflip")
+            }
             if (totalTemperature != 0 || totalTint != 0) {
                 val rs = (totalTemperature * 0.003 + totalTint * 0.0015).coerceIn(-1.0, 1.0)
                 val gs = (-totalTint * 0.003).coerceIn(-1.0, 1.0)

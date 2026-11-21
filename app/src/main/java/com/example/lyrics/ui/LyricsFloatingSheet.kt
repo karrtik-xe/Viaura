@@ -31,7 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,64 +63,29 @@ fun LyricsFloatingSheet(
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true,
-            decorFitsSystemWindows = false
-        )
+    // Same bottom sheet as the playlist "Create Playlist" options: it slides up from the bottom edge (no centred / floating card).
+    PlaylistBottomSheet(
+        isDark = isDark,
+        glassBlurTransparency = LocalPanelTransparency.current,
+        onDismiss = onDismiss
     ) {
-        val view = LocalView.current
-        DisposableEffect(view) {
-            configureEdgeToEdgeDialogWindow(view = view, isLightStatusBars = !isDark, isLightNavBars = !isDark)
-            onDispose {}
-        }
-        BackHandler { onDismiss() }
-
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Transparent)
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onDismiss),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .fillMaxHeight()
-                    .statusBarsPadding()
-                    .padding(top = 68.dp)
-                    .navigationBarsPadding()
-                    .padding(start = 14.dp, end = 14.dp, bottom = 76.dp)
-                    .shadow(
-                        elevation = 24.dp,
-                        shape = RoundedCornerShape(26.dp),
-                        ambientColor = Color.Black.copy(alpha = 0.35f),
-                        spotColor = Color.Black.copy(alpha = 0.45f)
-                    )
-                    .clip(RoundedCornerShape(26.dp))
-                    .background(sheetBg)
-                    .glassCardBorder(1.2.dp, borderColor, RoundedCornerShape(26.dp), isDark)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = {})
-                    .padding(16.dp)
-            ) {
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(38.dp)) {
-                        StyledIcon(imageVector = Icons.Outlined.Close, contentDescription = "Close", tint = primaryText, modifier = Modifier.size(22.dp))
-                    }
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (!subtitle.isNullOrBlank()) {
-                            Text(subtitle, fontSize = 11.5.sp, color = secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(10.dp))
-                content()
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onDismiss, modifier = Modifier.size(38.dp)) {
+                StyledIcon(imageVector = Icons.Outlined.Close, contentDescription = "Close", tint = primaryText, modifier = Modifier.size(22.dp))
             }
+            Spacer(modifier = Modifier.width(6.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!subtitle.isNullOrBlank()) {
+                    Text(subtitle, fontSize = 11.5.sp, color = secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        // The sheet body scrolls, so the lists inside need a fixed height of their own (their weight(1f) fills it).
+        val listHeight = (LocalConfiguration.current.screenHeightDp * 0.60f).dp
+        Column(modifier = Modifier.fillMaxWidth().height(listHeight)) {
+            content()
         }
     }
 }

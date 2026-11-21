@@ -27,6 +27,8 @@ class PersistentVideoOutput private constructor(
         private set
     @Volatile private var host: SurfaceView? = null
     @Volatile private var released = false
+    @Volatile private var mirrorH = false
+    @Volatile private var flipV = false
 
     /** True while a visible host shows this output. */
     val isBound: Boolean get() = host != null
@@ -41,6 +43,7 @@ class PersistentVideoOutput private constructor(
                 t.setBufferSize(control, w, h)
                 t.setLayer(control, 1)
                 t.setVisibility(control, true)
+                applyFlip(t, w, h)
                 t.apply()
             }
             host = newHost
@@ -50,6 +53,35 @@ class PersistentVideoOutput private constructor(
         } catch (_: Throwable) {
             false
         }
+    }
+
+    /**
+     * Mirror / flip done by the compositor (a matrix on this layer) instead of an mpv `vf` filter. A `vf` change makes mpv
+     * rebuild its filter chain (and decoder) and re-seek, which stalls the picture and cuts the sound. A layer matrix is
+     * applied on the next screen refresh: mpv is never touched, so video and audio keep running without any hitch.
+     * Returns false when it could not be applied (the caller then falls back to the `vf` filter).
+     */
+    fun setFlip(mirrorHorizontal: Boolean, flipVertical: Boolean): Boolean {
+        mirrorH = mirrorHorizontal
+        flipV = flipVertical
+        if (released) return false
+        if (host == null) return true // applied as soon as a host binds
+        return try {
+            SurfaceControl.Transaction().use { t ->
+                applyFlip(t, width, height)
+                t.apply()
+            }
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun applyFlip(t: SurfaceControl.Transaction, w: Int, h: Int) {
+        val sx = if (mirrorH) -1f else 1f
+        val sy = if (flipV) -1f else 1f
+        t.setMatrix(control, sx, 0f, 0f, sy)
+        t.setPosition(control, if (mirrorH) w.toFloat() else 0f, if (flipV) h.toFloat() else 0f)
     }
 
     fun unbind(from: SurfaceView) {
