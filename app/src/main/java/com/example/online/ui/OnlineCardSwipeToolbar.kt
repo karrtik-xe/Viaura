@@ -162,7 +162,7 @@ fun OnlineQuickActionBar(
     /** Online folders (playlists): heart that adds / removes the item from Favourites. */
     isFavourite: Boolean = false,
     onFavourite: (() -> Unit)? = null,
-    /** More than one card is selected: the bar shows every action (applied to all selected cards) plus a "Clear (N)" item. */
+    /** More than one card is selected: the bar shows only "N selected", Download all and Clear. */
     selectedCount: Int = 1,
     onClearSelection: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -200,10 +200,48 @@ fun OnlineQuickActionBar(
             .padding(horizontal = 0.dp),
         contentAlignment = Alignment.Center
     ) {
-        // Items keep a comfortable fixed width and the row scrolls sideways. With several cards selected the SAME actions stay
-        // available (Play next, Play last, Playlist, Watch later, Download, Not interested, Share): each one is applied to
-        // every selected card; the first item shows how many are selected and clears the selection.
-        Row(
+        // Items keep a comfortable fixed width and the row scrolls sideways, so more actions can be added later.
+        if (shownCount > 1 && onDownload != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "$shownCount selected",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = primaryText,
+                    modifier = Modifier.padding(start = 4.dp)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (onClearSelection != null) {
+                        Text(
+                            text = "Clear",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryText,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .clickable(onClick = onClearSelection)
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(AccentGradient)
+                            .clickable(onClick = onDownload)
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        StyledIcon(R.drawable.viaura_download_minimalistic, null, Modifier.size(18.dp), Color.White)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Download all", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                    }
+                }
+            }
+        } else Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
@@ -211,9 +249,6 @@ fun OnlineQuickActionBar(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (shownCount > 1 && onClearSelection != null) {
-                QuickActionItem(R.drawable.viaura_close_circle, "Clear ($shownCount)", primaryText, Modifier.width(78.dp), onClearSelection)
-            }
             if (onPlayNext != null) {
                 QuickActionItem(R.drawable.viaura_next_in_queue, "Play next", AccentSkyBlue, Modifier.width(78.dp), onPlayNext)
             }
@@ -290,20 +325,6 @@ fun shareOnlineLink(context: Context, title: String, url: String) {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, title)
             putExtra(Intent.EXTRA_TEXT, "$title\n$url")
-        }
-        context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    } catch (_: Throwable) {}
-}
-
-/** Shares several links in one message ("title" + link for each). */
-fun shareOnlineLinks(context: Context, entries: List<Pair<String, String>>) {
-    if (entries.isEmpty()) return
-    if (entries.size == 1) { shareOnlineLink(context, entries[0].first, entries[0].second); return }
-    try {
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "${entries.size} links")
-            putExtra(Intent.EXTRA_TEXT, entries.joinToString("\n\n") { (title, url) -> "$title\n$url" })
         }
         context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     } catch (_: Throwable) {}

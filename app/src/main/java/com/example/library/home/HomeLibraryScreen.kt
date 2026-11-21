@@ -1788,7 +1788,7 @@ fun HomeScreen(
                 } else {
                     val headerTitle = when (effectiveSelectedTab) {
                         NavigationTab.HOME -> if (isOnlineVideoOpen) "Vitube" else (currentFolder?.name ?: AppStrings.getTitle(lang))
-                        NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Otube" else (selectedMusicFolder?.name ?: "Music & Audio")
+                        NavigationTab.MUSIC -> if (selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) "Me Otube" else (selectedMusicFolder?.name ?: "Music & Audio")
                         NavigationTab.RECENTS -> selectedRecentsFolder?.name ?: "Recently Played"
                         NavigationTab.NETWORK, NavigationTab.DOWNLOADS -> if (showDownloads) "Downloads" else (MediaDetailState.provider?.name ?: "Network")
                         NavigationTab.PLAYLISTS -> selectedPlaylist?.name ?: "Playlists"
@@ -1837,7 +1837,7 @@ fun HomeScreen(
                         titleSuffix = if (effectiveSelectedTab == NavigationTab.HOME && !isOnlineVideoOpen && currentFolder == null &&
                             com.example.BuildConfig.VERSION_NAME.contains("beta", ignoreCase = true)) "(Beta)" else null,
                         onBackClick = when (effectiveSelectedTab) {
-                            // Vitube (online video) and Otube (online audio): no back arrow, the shining app logo stays like on the
+                            // Vitube (online video) and Me Otube (online audio): no back arrow, the shining app logo stays like on the
                             // Home screen; the phone's back gesture / button still leaves the folder (BackHandler above)
                             NavigationTab.HOME -> if (isOnlineVideoOpen) {
                                 null

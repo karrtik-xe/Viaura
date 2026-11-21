@@ -244,7 +244,7 @@ fun ChannelDetailScreen(
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, (uiState?.glassBlurTransparency ?: 75f)) { downloadRequest = null }
     com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, (uiState?.glassBlurTransparency ?: 75f)) { batchRequests = null }
     if (actionTarget != null) lastActionTarget = actionTarget
-    var playlistTargets by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var hiddenVersion by remember { mutableIntStateOf(0) }
     var watchLaterList by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     LaunchedEffect(Unit) {
@@ -885,12 +885,10 @@ fun ChannelDetailScreen(
                 val t = actionTarget ?: lastActionTarget
                 if (t != null) {
                     val kind = com.example.util.OnlineMediaLibrary.KIND_VIDEO
-                    // every action works on ALL selected cards (one card = the same as before)
-                    val picks = actionState.items.toList().ifEmpty { listOf(t) }
                     com.example.ui.components.OnlineQuickActionBar(
                         isDark = isDark,
                         alphaRatio = ((uiState?.glassBlurTransparency ?: 75f) / 100f).coerceIn(0.15f, 1.0f),
-                        isSavedForLater = picks.all { p -> watchLaterList.any { it.videoUrl == p.videoUrl } },
+                        isSavedForLater = watchLaterList.any { it.videoUrl == t.videoUrl },
                         selectedCount = actionState.size,
                     onClearSelection = { actionTarget = null },
                     onDownload = {
@@ -901,65 +899,40 @@ fun ChannelDetailScreen(
                         }
                         actionTarget = null
                     },
-                        onPlayNext = {
-                            // reversed: the selected videos keep their order at the front of the queue
-                            picks.asReversed().forEach { v ->
-                                com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, v)
-                                com.example.util.OnlineVideoQueue.addNext(v)
-                            }
-                            Toast.makeText(context, if (picks.size > 1) "${picks.size} videos will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
-                            actionTarget = null
-                        },
-                        onPlayLast = {
-                            picks.forEach { v ->
-                                com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, v)
-                                com.example.util.OnlineVideoQueue.addLast(v)
-                            }
-                            Toast.makeText(context, if (picks.size > 1) "${picks.size} videos added to the end of the queue" else "Added to the end of the queue", Toast.LENGTH_SHORT).show()
-                            actionTarget = null
-                        },
                         onSaveToPlaylist = {
-                            picks.forEach { v -> com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, v) }
-                            playlistTargets = picks
+                            com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, t)
+                            playlistTarget = t
                             actionTarget = null
                         },
                         onWatchLater = {
-                            // all already saved -> remove them all, otherwise save the ones that are not saved yet
-                            val allSaved = picks.all { p -> watchLaterList.any { it.videoUrl == p.videoUrl } }
-                            var saved = false
-                            picks.forEach { v ->
-                                val isSaved = watchLaterList.any { it.videoUrl == v.videoUrl }
-                                if (allSaved || !isSaved) saved = com.example.util.OnlineMediaLibrary.toggleWatchLater(context, kind, v)
-                            }
+                            val saved = com.example.util.OnlineMediaLibrary.toggleWatchLater(context, kind, t)
                             watchLaterList = com.example.util.OnlineMediaLibrary.watchLater(context, kind)
                             Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                             actionTarget = null
                         },
                         onNotInterested = {
-                            picks.forEach { v ->
-                                com.example.util.OnlineMediaLibrary.markNotInterested(context, kind, v.videoUrl)
-                                com.example.util.OnlineVideoQueue.remove(v.videoUrl)
-                            }
+                            com.example.util.OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
+                            com.example.util.OnlineVideoQueue.remove(t.videoUrl)
                             watchLaterList = com.example.util.OnlineMediaLibrary.watchLater(context, kind)
                             hiddenVersion++
                             Toast.makeText(context, "Okay, you will see fewer videos like this", Toast.LENGTH_SHORT).show()
                             actionTarget = null
                         },
                         onShare = {
-                            com.example.ui.components.shareOnlineLinks(context, picks.map { it.title to it.videoUrl })
+                            com.example.ui.components.shareOnlineLink(context, t.title, t.videoUrl)
                             actionTarget = null
                         },
                     )
                 }
             }
 
-            if (playlistTargets.isNotEmpty()) {
+            playlistTarget?.let { t ->
                 com.example.ui.components.AddToPlaylistDialog(
-                    selectedVideos = playlistTargets.map { it.toOnlineVideoItem() },
+                    selectedVideos = listOf(t.toOnlineVideoItem()),
                     isDark = isDark,
                     glassBlurTransparency = uiState?.glassBlurTransparency ?: 75f,
-                    onDismiss = { playlistTargets = emptyList() },
-                    onPlaylistUpdated = { playlistTargets = emptyList() }
+                    onDismiss = { playlistTarget = null },
+                    onPlaylistUpdated = { playlistTarget = null }
                 )
             }
             }

@@ -91,7 +91,7 @@ fun SharedPlaylistScreen(
     com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, uiState.glassBlurTransparency) { batchRequests = null }
     var lastSwipeActionTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     if (swipeActionTrack != null) lastSwipeActionTrack = swipeActionTrack
-    var playlistSaveTracks by remember { mutableStateOf<List<AudioTrackItem>>(emptyList()) }
+    var playlistSaveTrack by remember { mutableStateOf<AudioTrackItem?>(null) }
     var swipeHiddenVersion by remember { mutableStateOf(0) }
     val swipeHiddenUrls = remember(swipeHiddenVersion) {
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_AUDIO)
@@ -543,20 +543,8 @@ fun SharedPlaylistScreen(
                     thumbnailUrl = t.thumbnailUrl,
                     uploadDateEpochMs = t.dateModified.takeIf { it > 0L }
                 )
-                // every action works on ALL selected cards (one card = the same as before)
-                val picks = swipeState.items.toList().ifEmpty { listOf(t) }
-                val pickResults = picks.map { x ->
-                    com.example.util.OnlineTrackResult(
-                        videoUrl = x.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX),
-                        title = x.title,
-                        artist = x.artist,
-                        durationSec = x.durationMs / 1000L,
-                        thumbnailUrl = x.thumbnailUrl,
-                        uploadDateEpochMs = x.dateModified.takeIf { it > 0L }
-                    )
-                }
-                val savedLater = remember(swipeLaterVersion, pickResults) {
-                    pickResults.all { com.example.util.OnlineMediaLibrary.isWatchLater(context, kind, it.videoUrl) }
+                val savedLater = remember(swipeLaterVersion, trackUrl) {
+                    com.example.util.OnlineMediaLibrary.isWatchLater(context, kind, trackUrl)
                 }
                 OnlineQuickActionBar(
                     isDark = isDark,
@@ -575,41 +563,34 @@ fun SharedPlaylistScreen(
                         swipeActionTrack = null
                     },
                     onPlayNext = {
-                        // reversed: the selected songs keep their order right after the current one
-                        picks.asReversed().forEach { AudioPlaybackManager.playNext(it) }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} songs will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        AudioPlaybackManager.playNext(t)
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
                         swipeActionTrack = null
                     },
                     onPlayLast = {
-                        picks.forEach { AudioPlaybackManager.playLast(it) }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} songs added to queue" else "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                        AudioPlaybackManager.playLast(t)
+                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
                         swipeActionTrack = null
                     },
                     onSaveToPlaylist = {
-                        pickResults.forEach { com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, it) }
-                        playlistSaveTracks = picks
+                        com.example.util.OnlineMediaLibrary.rememberMeta(context, kind, asResult)
+                        playlistSaveTrack = t
                         swipeActionTrack = null
                     },
                     onWatchLater = {
-                        // all already saved -> remove them all, otherwise save the ones that are not saved yet
-                        val allSaved = pickResults.all { com.example.util.OnlineMediaLibrary.isWatchLater(context, kind, it.videoUrl) }
-                        var saved = false
-                        pickResults.forEach { r ->
-                            val isSaved = com.example.util.OnlineMediaLibrary.isWatchLater(context, kind, r.videoUrl)
-                            if (allSaved || !isSaved) saved = com.example.util.OnlineMediaLibrary.toggleWatchLater(context, kind, r)
-                        }
+                        val saved = com.example.util.OnlineMediaLibrary.toggleWatchLater(context, kind, asResult)
                         swipeLaterVersion++
                         Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                         swipeActionTrack = null
                     },
                     onNotInterested = {
-                        pickResults.forEach { com.example.util.OnlineMediaLibrary.markNotInterested(context, kind, it.videoUrl) }
+                        com.example.util.OnlineMediaLibrary.markNotInterested(context, kind, trackUrl)
                         swipeHiddenVersion++
                         Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
                         swipeActionTrack = null
                     },
                     onShare = {
-                        shareOnlineLinks(context, pickResults.map { it.title to it.videoUrl })
+                        shareOnlineLink(context, t.title, trackUrl)
                         swipeActionTrack = null
                     },
                 )
@@ -726,14 +707,14 @@ fun SharedPlaylistScreen(
         )
     }
 
-    // Save the swiped track(s) into one of the user's audio playlists
-    if (playlistSaveTracks.isNotEmpty()) {
+    // Save a single swiped track into one of the user's audio playlists
+    playlistSaveTrack?.let { t ->
         AddToPlaylistDialog(
-            selectedAudioTracks = playlistSaveTracks,
+            selectedAudioTracks = listOf(t),
             isDark = isDark,
             glassBlurTransparency = uiState.glassBlurTransparency,
-            onDismiss = { playlistSaveTracks = emptyList() },
-            onPlaylistUpdated = { playlistSaveTracks = emptyList() }
+            onDismiss = { playlistSaveTrack = null },
+            onPlaylistUpdated = { playlistSaveTrack = null }
         )
     }
 

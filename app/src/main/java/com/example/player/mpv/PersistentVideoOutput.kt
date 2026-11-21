@@ -27,8 +27,6 @@ class PersistentVideoOutput private constructor(
         private set
     @Volatile private var host: SurfaceView? = null
     @Volatile private var released = false
-    @Volatile private var mirrorH = false
-    @Volatile private var flipV = false
 
     /** True while a visible host shows this output. */
     val isBound: Boolean get() = host != null
@@ -43,7 +41,6 @@ class PersistentVideoOutput private constructor(
                 t.setBufferSize(control, w, h)
                 t.setLayer(control, 1)
                 t.setVisibility(control, true)
-                applyFlip(t, w, h)
                 t.apply()
             }
             host = newHost
@@ -53,38 +50,6 @@ class PersistentVideoOutput private constructor(
         } catch (_: Throwable) {
             false
         }
-    }
-
-    /**
-     * Mirror / flip done by the compositor (a matrix on this layer) instead of an mpv `vf` filter. A `vf` change makes mpv
-     * rebuild its filter chain (and decoder) and re-seek, which stalls the picture and cuts the sound. A layer matrix is
-     * applied on the next screen refresh: mpv is never touched, so video and audio keep running without any hitch.
-     * Returns false when it could not be applied (the caller then falls back to the `vf` filter).
-     */
-    fun setFlip(mirrorHorizontal: Boolean, flipVertical: Boolean): Boolean {
-        mirrorH = mirrorHorizontal
-        flipV = flipVertical
-        // below Android 12 there is no public compositor mirror: the caller keeps the old hflip / vflip filter
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return !(mirrorHorizontal || flipVertical)
-        if (released) return false
-        if (host == null) return true // applied as soon as a host binds
-        return try {
-            SurfaceControl.Transaction().use { t ->
-                applyFlip(t, width, height)
-                t.apply()
-            }
-            true
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun applyFlip(t: SurfaceControl.Transaction, w: Int, h: Int) {
-        // public API 31+: the compositor mirrors the layer (setMatrix is a hidden API and does not compile)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        val transform = (if (mirrorH) SurfaceControl.BUFFER_TRANSFORM_MIRROR_HORIZONTAL else 0) or
-            (if (flipV) SurfaceControl.BUFFER_TRANSFORM_MIRROR_VERTICAL else 0)
-        t.setBufferTransform(control, transform)
     }
 
     fun unbind(from: SurfaceView) {

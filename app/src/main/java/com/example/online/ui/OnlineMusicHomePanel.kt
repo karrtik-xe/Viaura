@@ -164,7 +164,7 @@ fun OnlineMusicPanel(
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, glassBlurTransparency) { downloadRequest = null }
     com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, glassBlurTransparency) { batchRequests = null }
     if (actionTarget != null) lastActionTarget = actionTarget
-    var playlistTargets by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var watchLaterTracks by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     var hiddenVersion by remember { mutableStateOf(0) }
     LaunchedEffect(Unit) {
@@ -902,12 +902,10 @@ fun OnlineMusicPanel(
             val t = actionTarget ?: lastActionTarget
             if (t != null) {
                 val kind = OnlineMediaLibrary.KIND_AUDIO
-                // every action works on ALL selected cards (one card = the same as before)
-                val picks = actionState.items.toList().ifEmpty { listOf(t) }
                 OnlineQuickActionBar(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
-                    isSavedForLater = picks.all { p -> watchLaterTracks.any { it.videoUrl == p.videoUrl } },
+                    isSavedForLater = watchLaterTracks.any { it.videoUrl == t.videoUrl },
                     selectedCount = actionState.size,
                     onClearSelection = { actionTarget = null },
                     onDownload = {
@@ -919,55 +917,48 @@ fun OnlineMusicPanel(
                         actionTarget = null
                     },
                     onPlayNext = {
-                        // reversed: the selected songs keep their order right after the current one
-                        picks.asReversed().forEach { v -> AudioPlaybackManager.playNext(v.toAudioTrackItem()) }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} songs will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        AudioPlaybackManager.playNext(t.toAudioTrackItem())
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onPlayLast = {
-                        picks.forEach { v -> AudioPlaybackManager.playLast(v.toAudioTrackItem()) }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} songs added to queue" else "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                        AudioPlaybackManager.playLast(t.toAudioTrackItem())
+                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onSaveToPlaylist = {
-                        picks.forEach { v -> OnlineMediaLibrary.rememberMeta(context, kind, v) }
-                        playlistTargets = picks
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        playlistTarget = t
                         actionTarget = null
                     },
                     onWatchLater = {
-                        // all already saved -> remove them all, otherwise save the ones that are not saved yet
-                        val allSaved = picks.all { p -> watchLaterTracks.any { it.videoUrl == p.videoUrl } }
-                        var saved = false
-                        picks.forEach { v ->
-                            val isSaved = watchLaterTracks.any { it.videoUrl == v.videoUrl }
-                            if (allSaved || !isSaved) saved = OnlineMediaLibrary.toggleWatchLater(context, kind, v)
-                        }
+                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
                         watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
                         Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onNotInterested = {
-                        picks.forEach { v -> OnlineMediaLibrary.markNotInterested(context, kind, v.videoUrl) }
+                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
                         watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
                         hiddenVersion++
                         Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onShare = {
-                        shareOnlineLinks(context, picks.map { it.title to it.videoUrl })
+                        shareOnlineLink(context, t.title, t.videoUrl)
                         actionTarget = null
                     },
                 )
             }
         }
 
-        if (playlistTargets.isNotEmpty()) {
+        playlistTarget?.let { t ->
             AddToPlaylistDialog(
-                selectedAudioTracks = playlistTargets.map { it.toAudioTrackItem() },
+                selectedAudioTracks = listOf(t.toAudioTrackItem()),
                 isDark = isDark,
                 glassBlurTransparency = glassBlurTransparency,
-                onDismiss = { playlistTargets = emptyList() },
-                onPlaylistUpdated = { playlistTargets = emptyList() }
+                onDismiss = { playlistTarget = null },
+                onPlaylistUpdated = { playlistTarget = null }
             )
         }
     }

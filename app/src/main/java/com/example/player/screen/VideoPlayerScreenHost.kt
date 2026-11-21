@@ -4642,8 +4642,7 @@ private fun BoxScope.ChannelModeLayer(
             HeaderBar(
                 title = when {
                     isProviderPlayback(currentVideo) -> providerNameOf(currentVideo)
-                    // same name as the online video folder (Vitube)
-                    currentVideo?.isOnline == true -> "Vitube"
+                    currentVideo?.isOnline == true -> "Online"
                     currentVideo?.isNetworkStream == true -> "Network"
                     currentVideo?.isDirectStream == true -> "Stream"
                     currentVideo != null && com.example.util.media.PluginQueuedEpisodes.isQueued(currentVideo.path) ->
@@ -4651,8 +4650,7 @@ private fun BoxScope.ChannelModeLayer(
                     else -> currentVideo?.path?.let { File(it).parentFile?.name }?.takeIf { it.isNotBlank() } ?: "Player"
                 },
                 themeMode = uiState.themeMode,
-                // online video: the shining app logo stays on the left like inside Vitube (the phone's back still leaves the player)
-                onBackClick = if (currentVideo?.isOnline == true && !isProviderPlayback(currentVideo)) null else onHeaderBack,
+                onBackClick = onHeaderBack,
                 onSearchClick = { PinnedHeaderUi.onHeaderAction(com.example.util.PlayerHeaderAction.SEARCH) },
                 onSortClick = { PinnedHeaderUi.onHeaderAction(com.example.util.PlayerHeaderAction.SORT) },
                 onSettingsClick = { PinnedHeaderUi.onHeaderAction(com.example.util.PlayerHeaderAction.SETTINGS) }

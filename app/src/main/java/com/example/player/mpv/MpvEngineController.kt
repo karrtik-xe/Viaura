@@ -391,57 +391,6 @@ class MpvPlayerController {
     /** The spot the last key-frame seek of a scrub was sent to, and the newest spot the finger chose (the exact seek goes there). */
     @Volatile private var lastScrubIssuedTargetMs = -1L
     @Volatile private var scrubFinalTargetMs = -1L
-    /** Scrub audio: every key-frame seek flushes the sound and plays a few ms of the old spot again (a stutter loop), so the sound is muted while scrubbing. */
-    @Volatile private var scrubMuted = false
-    @Volatile private var scrubUserMuted = false
-    @Volatile private var lastScrubDir = 0
-    private var scrubUnmuteJob: kotlinx.coroutines.Job? = null
-
-    private var scrubAudioJob: kotlinx.coroutines.Job? = null
-
-    /**
-     * mpv answers a property change only when its core thread is free, and during a seek that thread is busy: changing "mute" on the
-     * calling (touch / UI) thread made the finger gesture wait for the seek (the lag). Both changes therefore run on a background
-     * thread, one after the other, and the UI thread never waits for mpv.
-     */
-    private fun muteForScrub() {
-        if (scrubMuted) {
-            // a pending "sound back" from the previous scrub is cancelled: the finger moves again
-            scrubUnmuteJob?.cancel()
-            scrubUnmuteJob = null
-            return
-        }
-        scrubMuted = true
-        val previous = scrubAudioJob
-        scrubAudioJob = playerScope.launch(Dispatchers.Default) {
-            try { previous?.join() } catch (_: Throwable) {}
-            withMpvLock(Unit) { v ->
-                try {
-                    scrubUserMuted = v.mpv.getPropertyBoolean("mute") == true
-                    if (!scrubUserMuted) v.mpv.setPropertyBoolean("mute", true)
-                } catch (_: Throwable) {}
-            }
-        }
-    }
-
-    /** The sound comes back a moment after the exact seek was sent (never over the user's own mute). No polling of mpv. */
-    private fun unmuteAfterScrub() {
-        if (!scrubMuted) return
-        scrubUnmuteJob?.cancel()
-        val previous = scrubAudioJob
-        val job = playerScope.launch(Dispatchers.Default) {
-            try { previous?.join() } catch (_: Throwable) {}
-            delay(450L)
-            kotlinx.coroutines.withContext(NonCancellable) {
-                if (scrubMuted) {
-                    scrubMuted = false
-                    if (!scrubUserMuted) withMpvLock(Unit) { v -> try { v.mpv.setPropertyBoolean("mute", false) } catch (_: Throwable) {} }
-                }
-            }
-        }
-        scrubUnmuteJob = job
-        scrubAudioJob = job
-    }
 
     private fun publishPolledPosition(realMs: Long, paused: Boolean) {
         val target = seekPendingTargetMs
@@ -2657,17 +2606,8 @@ class MpvPlayerController {
             // them used to restart mpv's seek (the sound was flushed and repeated every few milliseconds, the picture flipped
             // between one or two frames) and pushed the exact seek further away, so it never came. A move that stays close to
             // the spot already sent changes nothing on the screen: it only updates where the exact seek will land.
-            // A resting finger also jitters a pixel or two back and forth; on a long video one pixel is seconds. Such a small
-            // move AGAINST the direction of travel is jitter: it must not send mpv back and forth between two key frames.
-            val stepFromIssued = timeMs - lastScrubIssuedTargetMs
-            val dir = if (stepFromIssued > 0L) 1 else if (stepFromIssued < 0L) -1 else 0
-            // only while the finger rests (nothing was sent for a moment); a finger that really moves back is always followed
-            val jitter = scrubbing && lastScrubIssuedTargetMs >= 0L && dir != 0 && lastScrubDir != 0 && dir != lastScrubDir &&
-                kotlin.math.abs(stepFromIssued) < 1500L && now - lastScrubIssueAt > 150L
-            if (!jitter && dir != 0 && kotlin.math.abs(stepFromIssued) >= SCRUB_MIN_STEP_MS) lastScrubDir = dir
-            if (!scrubbing) lastScrubDir = 0
             if (scrubbing && lastScrubIssuedTargetMs >= 0L &&
-                (jitter || kotlin.math.abs(timeMs - lastScrubIssuedTargetMs) < SCRUB_MIN_STEP_MS)) {
+                kotlin.math.abs(timeMs - lastScrubIssuedTargetMs) < SCRUB_MIN_STEP_MS) {
                 scrubFinalTargetMs = timeMs
                 if (wasAtEof) {
                     mpvView?.mpv?.setPropertyBoolean("pause", false)
@@ -2685,7 +2625,6 @@ class MpvPlayerController {
                 mpvView?.mpv?.command("seek", "$sec", if (preciseSeekingEnabled) "absolute+exact" else "absolute")
             } else {
                 seekStage = 1
-                muteForScrub()
                 // a finger sends 60-120 moves a second: mpv gets at most one key-frame seek every 45 ms (always the newest spot),
                 // so it is never flooded and the picture keeps following the finger smoothly
                 scrubIssueJob?.cancel()
@@ -2712,10 +2651,8 @@ class MpvPlayerController {
                         seekStage = 2
                         lastScrubIssuedTargetMs = finalMs
                         mpvView?.mpv?.command("seek", "${finalMs / 1000.0}", "absolute+exact")
-                        unmuteAfterScrub()
                     } catch (_: Throwable) {
                         seekStage = 0
-                        unmuteAfterScrub()
                     }
                 }
             }

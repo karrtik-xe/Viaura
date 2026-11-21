@@ -133,7 +133,7 @@ fun OnlineVideoPanel(
     com.example.ui.components.DownloadRequestHost(downloadRequest, isDark, glassBlurTransparency) { downloadRequest = null }
     com.example.ui.components.OnlineBatchDownloadHost(batchRequests, isDark, glassBlurTransparency) { batchRequests = null }
     if (actionTarget != null) lastActionTarget = actionTarget
-    var playlistTargets by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    var playlistTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     LaunchedEffect(Unit) {
         OnlineMediaLibrary.attach(context)
         st.watchLater = withContext(Dispatchers.IO) { OnlineMediaLibrary.watchLater(context, OnlineMediaLibrary.KIND_VIDEO) }
@@ -768,12 +768,10 @@ fun OnlineVideoPanel(
             val t = actionTarget ?: lastActionTarget
             if (t != null) {
                 val kind = OnlineMediaLibrary.KIND_VIDEO
-                // every action works on ALL selected cards (one card = the same as before)
-                val picks = actionState.items.toList().ifEmpty { listOf(t) }
                 OnlineQuickActionBar(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
-                    isSavedForLater = picks.all { p -> st.watchLater.any { it.videoUrl == p.videoUrl } },
+                    isSavedForLater = st.watchLater.any { it.videoUrl == t.videoUrl },
                     selectedCount = actionState.size,
                     onClearSelection = { actionTarget = null },
                     onDownload = {
@@ -785,65 +783,52 @@ fun OnlineVideoPanel(
                         actionTarget = null
                     },
                     onPlayNext = {
-                        // reversed: the selected videos keep their order at the front of the queue
-                        picks.asReversed().forEach { v ->
-                            OnlineMediaLibrary.rememberMeta(context, kind, v)
-                            OnlineVideoQueue.addNext(v)
-                        }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} videos will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        OnlineVideoQueue.addNext(t)
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onPlayLast = {
-                        picks.forEach { v ->
-                            OnlineMediaLibrary.rememberMeta(context, kind, v)
-                            OnlineVideoQueue.addLast(v)
-                        }
-                        Toast.makeText(context, if (picks.size > 1) "${picks.size} videos added to the end of the queue" else "Added to the end of the queue", Toast.LENGTH_SHORT).show()
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        OnlineVideoQueue.addLast(t)
+                        Toast.makeText(context, "Added to the end of the queue", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onSaveToPlaylist = {
-                        picks.forEach { v -> OnlineMediaLibrary.rememberMeta(context, kind, v) }
-                        playlistTargets = picks
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        playlistTarget = t
                         actionTarget = null
                     },
                     onWatchLater = {
-                        // all already saved -> remove them all, otherwise save the ones that are not saved yet
-                        val allSaved = picks.all { p -> st.watchLater.any { it.videoUrl == p.videoUrl } }
-                        var saved = false
-                        picks.forEach { v ->
-                            val isSaved = st.watchLater.any { it.videoUrl == v.videoUrl }
-                            if (allSaved || !isSaved) saved = OnlineMediaLibrary.toggleWatchLater(context, kind, v)
-                        }
+                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
                         st.watchLater = OnlineMediaLibrary.watchLater(context, kind)
                         if (saved) { st.listIndex = 0; st.listOffset = 0; st.gridIndex = 0; st.gridOffset = 0 }
                         Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onNotInterested = {
-                        picks.forEach { v ->
-                            OnlineMediaLibrary.markNotInterested(context, kind, v.videoUrl)
-                            OnlineVideoQueue.remove(v.videoUrl)
-                        }
+                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
+                        OnlineVideoQueue.remove(t.videoUrl)
                         st.watchLater = OnlineMediaLibrary.watchLater(context, kind)
                         st.hiddenVersion++
                         Toast.makeText(context, "Okay, you will see fewer videos like this", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
                     onShare = {
-                        shareOnlineLinks(context, picks.map { it.title to it.videoUrl })
+                        shareOnlineLink(context, t.title, t.videoUrl)
                         actionTarget = null
                     },
                 )
             }
         }
 
-        if (playlistTargets.isNotEmpty()) {
+        playlistTarget?.let { t ->
             AddToPlaylistDialog(
-                selectedVideos = playlistTargets.map { it.toOnlineVideoItem() },
+                selectedVideos = listOf(t.toOnlineVideoItem()),
                 isDark = isDark,
                 glassBlurTransparency = glassBlurTransparency,
-                onDismiss = { playlistTargets = emptyList() },
-                onPlaylistUpdated = { playlistTargets = emptyList() }
+                onDismiss = { playlistTarget = null },
+                onPlaylistUpdated = { playlistTarget = null }
             )
         }
     }
@@ -932,8 +917,8 @@ private fun YouTubeChannelLogo(name: String, avatarUrl: String?, size: androidx.
 }
 
 /**
- * One video in the YouTube-style layout: the same glass card look as the offline video card (thin plain border, rounded top corners),
- * the whole thumbnail on top, and below it the channel logo, the video title (up to 2 lines) and "channel - views - age" on one line.
+ * One video in the YouTube-style layout: the same glass card as the channel card (gradient border, rounded top corners),
+ * the whole thumbnail on top, and below it the channel logo, the video title (up to 2 lines), the channel name and "views - age".
  * No Subscribe button here: tap the video = play; tap the channel logo = open the channel (subscribe from there).
  */
 @Composable
@@ -946,7 +931,6 @@ internal fun OnlineYouTubeVideoCard(
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
-    val borderColor = if (isDark) com.example.ui.theme.DarkGlassBorder else com.example.ui.theme.LightGlassBorder
     val shape = RoundedCornerShape(16.dp)
 
     var thumb by remember(video.thumbnailUrl) { mutableStateOf<android.graphics.Bitmap?>(null) }
@@ -954,8 +938,8 @@ internal fun OnlineYouTubeVideoCard(
         if (!video.thumbnailUrl.isNullOrBlank()) thumb = loadRemoteAudioThumbnail(video.thumbnailUrl, targetSizePx = 900)
     }
     val channelUrl = video.channelUrl
-    // one line beside each other: "channel \u2022 views \u2022 age"
-    val meta = listOf(video.artist, formatViews(video.viewCount), youtubeAgeText(video)).filter { it.isNotBlank() }.joinToString(" \u2022 ")
+    // line 2: channel name on its own line; line 3: "views \u2022 age"
+    val stats = listOf(formatViews(video.viewCount), youtubeAgeText(video)).filter { it.isNotBlank() }.joinToString(" \u2022 ")
 
     Column(
         modifier = Modifier
@@ -966,18 +950,17 @@ internal fun OnlineYouTubeVideoCard(
                     this
                         .clip(shape)
                         .background(cardTone(surfaceColor))
-                        // Liquid Glass OFF: the thin plain border of the offline video card (no gradient)
-                        .border(1.dp, borderColor, shape)
+                        .border(1.5.dp, AccentGradient, shape)
                 }
             }
-            .padding(1.dp)
+            .padding(1.5.dp)
     ) {
         // Whole thumbnail, top corners rounded like the channel banner
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(topStart = 15.dp, topEnd = 15.dp))
+                .clip(RoundedCornerShape(topStart = 14.5.dp, topEnd = 14.5.dp))
                 .background(if (isDark) Neutral.D1E293B else Neutral.E2E8F0)
                 .clickable { onClick() }
         ) {
@@ -1018,8 +1001,14 @@ internal fun OnlineYouTubeVideoCard(
                     video.title, color = primaryText, fontSize = 15.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold,
                     maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
-                if (meta.isNotBlank()) {
-                    Text(meta, color = secondaryText, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                if (video.artist.isNotBlank()) {
+                    Text(
+                        video.artist, color = secondaryText, fontSize = 12.5.sp, fontWeight = FontWeight.Medium,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp)
+                    )
+                }
+                if (stats.isNotBlank()) {
+                    Text(stats, color = secondaryText.copy(alpha = 0.85f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
                 }
             }
         }
