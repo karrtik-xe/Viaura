@@ -18,11 +18,14 @@ object PlaybackHistoryManager {
     private const val KEY_PATH_PREFIX = "path_"
     private const val KEY_URI_PREFIX = "uri_"
     private const val KEY_ID_PREFIX = "id_"
+    /** Marks a video that was watched to the end: its card keeps showing a FULL bar even after the resume position is kept. */
+    private const val KEY_DONE_PREFIX = "done_"
     private const val KEY_LAST_WATCHED_KEY = "last_watched_primary_key"
 
     // Fast in-memory cache for instant UI rendering without disk latency
     private val memoryPosCache = ConcurrentHashMap<String, Long>()
     private val memoryDurCache = ConcurrentHashMap<String, Long>()
+    private val memoryDoneCache = ConcurrentHashMap<String, Boolean>()
     private val memoryRecordCache = ConcurrentHashMap<String, VideoPlaybackRecord>()
     private val lastDiskSaveTimes = ConcurrentHashMap<String, Long>()
     /**
@@ -59,6 +62,8 @@ object PlaybackHistoryManager {
                         memoryPosCache[k.removePrefix(KEY_POS_PREFIX)] = v
                     } else if (k.startsWith(KEY_DUR_PREFIX) && v is Long) {
                         memoryDurCache[k.removePrefix(KEY_DUR_PREFIX)] = v
+                    } else if (k.startsWith(KEY_DONE_PREFIX) && v == true) {
+                        memoryDoneCache[k.removePrefix(KEY_DONE_PREFIX)] = true
                     }
                 }
                 val primaryKey = prefs.getString(KEY_LAST_WATCHED_KEY, null)
@@ -136,10 +141,13 @@ object PlaybackHistoryManager {
             else -> positionMs
         }
 
-        // If completed or near the very end (> 96% or remaining < 3.5 seconds), reset to 0 so next open starts fresh
+        // Completed or near the very end (> 96% or remaining < 3.5 seconds): the video is marked as WATCHED (its card keeps
+        // a full bar, also after the user moves on to the next episode). The resume position is NOT wiped any more: it stays
+        // where the user last was before the ending, so tapping the video again continues from there.
         val isFinished = validDur > 0L && (safePos >= validDur - 3500L || (safePos.toFloat() / validDur.toFloat()) >= 0.96f)
         val finalPos = if (isFinished) {
-            0L
+            val kept = getSavedPosition(context, videoId, path, uriString, title)
+            if (kept > 0L && kept < validDur - 3500L && kept.toFloat() / validDur.toFloat() < 0.96f) kept else 0L
         } else {
             safePos.coerceAtLeast(0L)
         }
@@ -185,12 +193,13 @@ object PlaybackHistoryManager {
         candidateKeys.forEach { key ->
             memoryPosCache[key] = finalPos
             if (validDur > 0L) memoryDurCache[key] = validDur
+            if (isFinished) memoryDoneCache[key] = true
             memoryRecordCache[key] = record
         }
 
         // Throttled / Debounced disk persistence: only write to disk if forced (e.g. pause/seek/back/exit) or > 2.5s since last write
         val lastSave = lastDiskSaveTimes[primaryKey] ?: 0L
-        if (forceDiskWrite || (now - lastSave >= 2500L)) {
+        if (forceDiskWrite || isFinished || (now - lastSave >= 2500L)) {
             lastDiskSaveTimes[primaryKey] = now
             try {
                 val prefs = getPrefs(context)
@@ -201,6 +210,7 @@ object PlaybackHistoryManager {
                         editor.putLong(KEY_DUR_PREFIX + key, validDur)
                     }
                     editor.putLong(KEY_TIME_PREFIX + key, now)
+                    if (isFinished) editor.putBoolean(KEY_DONE_PREFIX + key, true)
                     if (title.isNotBlank()) editor.putString(KEY_TITLE_PREFIX + key, title)
                     if (path.isNotBlank()) editor.putString(KEY_PATH_PREFIX + key, path)
                     if (uriString.isNotBlank()) editor.putString(KEY_URI_PREFIX + key, uriString)
@@ -321,6 +331,8 @@ object PlaybackHistoryManager {
         title: String = ""
     ): Float {
         ensureMemoryCacheLoaded(context)
+        // Watched to the end once: always a FULL bar (stays full when the user continues with the next episode)
+        if (generateCandidateKeys(videoId, path, uriString, title).any { memoryDoneCache[it] == true }) return 1f
         // The scanned duration can be 0 / stale: fall back to the duration recorded while playing.
         val dur = if (durationMs > 0L) durationMs
         else generateCandidateKeys(videoId, path, uriString, title).firstNotNullOfOrNull { memoryDurCache[it] } ?: 0L
@@ -393,6 +405,7 @@ object PlaybackHistoryManager {
         candidateKeys.forEach { key ->
             memoryPosCache.remove(key)
             memoryDurCache.remove(key)
+            memoryDoneCache.remove(key)
             memoryRecordCache.remove(key)
         }
         try {
@@ -401,6 +414,7 @@ object PlaybackHistoryManager {
                 candidateKeys.forEach { key ->
                     remove(KEY_POS_PREFIX + key)
                     remove(KEY_DUR_PREFIX + key)
+                    remove(KEY_DONE_PREFIX + key)
                     remove(KEY_TIME_PREFIX + key)
                     remove(KEY_TITLE_PREFIX + key)
                     remove(KEY_PATH_PREFIX + key)
@@ -469,6 +483,7 @@ object PlaybackHistoryManager {
     fun clearAllHistory(context: Context) {
         memoryPosCache.clear()
         memoryDurCache.clear()
+        memoryDoneCache.clear()
         memoryRecordCache.clear()
         inMemoryLastWatchedRecord = null
         try {

@@ -1624,11 +1624,7 @@ fun AudioPlayerScreen(
                             this
                                 .clip(CircleShape)
                                 .background(islandBg)
-                                .border(
-                                    1.dp,
-                                    if (equalizerEnabled) AccentSkyBlue.copy(alpha = 0.65f) else islandBorder,
-                                    CircleShape
-                                )
+                                .border(1.dp, islandBorder, CircleShape)
                         }
                         .clickable { showEqualizerSheet = true },
                     contentAlignment = Alignment.Center
@@ -1636,8 +1632,8 @@ fun AudioPlayerScreen(
                     StyledIcon(
                         drawableRes = R.drawable.viaura_equalizer,
                         contentDescription = "Equalizer",
-                        tint = if (equalizerEnabled) AccentSkyBlue else primaryText,
-                        modifier = Modifier.size(22.dp)
+                        tint = if (equalizerEnabled) Color.White else primaryText,
+                        modifier = Modifier.size(25.dp).activeGradientIcon(equalizerEnabled)
                     )
                 }
 
@@ -1662,18 +1658,14 @@ fun AudioPlayerScreen(
                                 .testTag("audio_player_shuffle_button")
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (isShuffle) AccentSkyBlue.copy(alpha = 0.22f)
-                                    else Color.Transparent
-                                )
                                 .clickable { AudioPlaybackManager.toggleShuffle() },
                             contentAlignment = Alignment.Center
                         ) {
                             StyledIcon(
                                 imageVector = Icons.Default.Shuffle,
                                 contentDescription = "Shuffle",
-                                tint = if (isShuffle) AccentSkyBlue else secondaryText,
-                                modifier = Modifier.size(19.dp)
+                                tint = if (isShuffle) Color.White else secondaryText,
+                                modifier = Modifier.size(23.dp).activeGradientIcon(isShuffle)
                             )
                         }
 
@@ -1683,18 +1675,14 @@ fun AudioPlayerScreen(
                                 .testTag("audio_player_repeat_button")
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (repeatMode != AudioRepeatMode.OFF) AccentSkyBlue.copy(alpha = 0.22f)
-                                    else Color.Transparent
-                                )
                                 .clickable { AudioPlaybackManager.toggleRepeat() },
                             contentAlignment = Alignment.Center
                         ) {
                             StyledIcon(
                                 imageVector = if (repeatMode == AudioRepeatMode.ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
                                 contentDescription = repeatMode.label,
-                                tint = if (repeatMode != AudioRepeatMode.OFF) AccentSkyBlue else secondaryText,
-                                modifier = Modifier.size(19.dp)
+                                tint = if (repeatMode != AudioRepeatMode.OFF) Color.White else secondaryText,
+                                modifier = Modifier.size(23.dp).activeGradientIcon(repeatMode != AudioRepeatMode.OFF)
                             )
                         }
 
@@ -1704,16 +1692,6 @@ fun AudioPlayerScreen(
                                 .testTag("audio_player_ab_loop_button")
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (isABLoopActive) AccentSkyBlue.copy(alpha = 0.28f)
-                                    else if (loopPointA != null) AccentSkyBlue.copy(alpha = 0.16f)
-                                    else Color.Transparent
-                                )
-                                .border(
-                                    1.dp,
-                                    if (isABLoopActive || loopPointA != null) AccentSkyBlue.copy(alpha = 0.65f) else Color.Transparent,
-                                    CircleShape
-                                )
                                 .clickable {
                                     AudioPlaybackManager.toggleABLoop(effectivePosition)
                                     showABControlsBar = true
@@ -1723,8 +1701,8 @@ fun AudioPlayerScreen(
                             Icon(
                                 painter = painterResource(id = R.drawable.viaura_ab_loop),
                                 contentDescription = "A-B Loop",
-                                tint = if (isABLoopActive || loopPointA != null) AccentSkyBlue else secondaryText,
-                                modifier = Modifier.size(19.dp)
+                                tint = if (isABLoopActive || loopPointA != null) Color.White else secondaryText,
+                                modifier = Modifier.size(23.dp).activeGradientIcon(isABLoopActive || loopPointA != null)
                             )
                         }
 
@@ -1734,15 +1712,6 @@ fun AudioPlayerScreen(
                                 .testTag("audio_player_lyrics_button")
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (isLyricsViewExpanded) AccentSkyBlue.copy(alpha = 0.28f)
-                                    else Color.Transparent
-                                )
-                                .border(
-                                    1.dp,
-                                    if (isLyricsViewExpanded) AccentSkyBlue.copy(alpha = 0.65f) else Color.Transparent,
-                                    CircleShape
-                                )
                                 .clickable {
                                     isLyricsViewExpanded = !isLyricsViewExpanded
                                 },
@@ -1751,8 +1720,8 @@ fun AudioPlayerScreen(
                             StyledIcon(
                                 drawableRes = R.drawable.viaura_lyrice,
                                 contentDescription = "Lyrics",
-                                tint = if (isLyricsViewExpanded || track.hasLyrics) AccentSkyBlue else secondaryText,
-                                modifier = Modifier.size(19.dp)
+                                tint = if (isLyricsViewExpanded || track.hasLyrics) Color.White else secondaryText,
+                                modifier = Modifier.size(23.dp).activeGradientIcon(isLyricsViewExpanded || track.hasLyrics)
                             )
                         }
 
@@ -1762,10 +1731,6 @@ fun AudioPlayerScreen(
                                 .testTag("audio_player_headphone_button")
                                 .size(36.dp)
                                 .clip(CircleShape)
-                                .background(
-                                    if (isHeadphoneSurroundActive) AccentSkyBlue.copy(alpha = 0.22f)
-                                    else Color.Transparent
-                                )
                                 .clickable {
                                     isHeadphoneSurroundActive = !isHeadphoneSurroundActive
                                     statusToastMessage = if (isHeadphoneSurroundActive) "Headphone Spatial Mode Enabled" else "Headphone Spatial Mode Disabled"
@@ -1775,8 +1740,8 @@ fun AudioPlayerScreen(
                             StyledIcon(
                                 imageVector = Icons.Outlined.Headphones,
                                 contentDescription = "Headphone Surround",
-                                tint = if (isHeadphoneSurroundActive) AccentSkyBlue else secondaryText,
-                                modifier = Modifier.size(19.dp)
+                                tint = if (isHeadphoneSurroundActive) Color.White else secondaryText,
+                                modifier = Modifier.size(23.dp).activeGradientIcon(isHeadphoneSurroundActive)
                             )
                         }
                     }
@@ -1800,7 +1765,7 @@ fun AudioPlayerScreen(
                         drawableRes = R.drawable.viaura_audio_track,
                         contentDescription = "Queue",
                         tint = primaryText,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(25.dp)
                     )
                 }
             }
@@ -1860,25 +1825,12 @@ fun AudioPlayerScreen(
 
         // On-device selection + no-key online translation fallback, matching MpvRx's language picker.
         if (showLyricsLanguagePicker) {
-            ModalBottomSheet(
-                onDismissRequest = { showLyricsLanguagePicker = false },
-                containerColor = floatingSheetBg,
-                scrimColor = Color.Black.copy(alpha = 0.35f),
-                shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                dragHandle = null,
+            com.example.ui.components.LyricsFloatingSheet(
+                title = "Translate lyrics",
+                subtitle = "No API key required • Internet connection needed",
+                isDark = isDark,
+                onDismiss = { showLyricsLanguagePicker = false }
             ) {
-        com.example.ui.components.EdgeToEdgeSheetWindowEffect()
-                // Liquid Glass: blurred app behind the sheet (no-op when the style is OFF)
-                LiquidDialogBlur()
-                Column(
-                    modifier = Modifier.fillMaxWidth().fillMaxHeight(0.72f)
-                        .liquidGlassEdge(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp), isDark)
-                        .padding(horizontal = 22.dp, vertical = 18.dp),
-                ) {
-                    Text("Translate lyrics", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = primaryText)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("No API key required • Internet connection needed", fontSize = 12.sp, color = secondaryText)
-                    Spacer(modifier = Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         listOf(false to "Dual line", true to "Replace original").forEach { (replaceMode, label) ->
                             Box(
@@ -1944,10 +1896,9 @@ fun AudioPlayerScreen(
                             }
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
             }
         }
+
 
       }
 
@@ -2701,6 +2652,7 @@ fun AudioPlayerScreen(
 
         LyricsProviderPickerDialog(
             visible = showLyricsProviderPicker,
+            isDark = isDark,
             activeProvider = activeLyricsProvider,
             sourceType = lyricsSourceType,
             hasLocalLyrics = currentTrack?.let { it.hasLyrics && it.lyricsText.isNotBlank() } == true,

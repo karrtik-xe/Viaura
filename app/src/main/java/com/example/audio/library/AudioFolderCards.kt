@@ -155,7 +155,7 @@ fun OnlineFolderCard(
     isDark: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    title: String = "Me Otube",
+    title: String = "Otube",
     subtitle: String = "Search & stream any song online"
 ) {
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface

@@ -385,8 +385,91 @@ class MpvPlayerController {
     /** 0 = a normal seek, 1 = scrubbing: a key frame was shown and the exact seek is still to come, 2 = that exact seek was sent. */
     @Volatile private var seekStage = 0
     @Volatile private var lastScrubIssueAt = 0L
+    private val SCRUB_MIN_STEP_MS = 250L
     private var trailingExactSeekJob: kotlinx.coroutines.Job? = null
     private var scrubIssueJob: kotlinx.coroutines.Job? = null
+    /** The spot the last key-frame seek of a scrub was sent to, and the newest spot the finger chose (the exact seek goes there). */
+    @Volatile private var lastScrubIssuedTargetMs = -1L
+    @Volatile private var scrubFinalTargetMs = -1L
+    /** Scrub audio: every key-frame seek flushes the sound and plays a few ms of the old spot again (a stutter loop), so the sound is muted while scrubbing. */
+    @Volatile private var scrubMuted = false
+    @Volatile private var scrubUserMuted = false
+    @Volatile private var lastScrubDir = 0
+    private var scrubUnmuteJob: kotlinx.coroutines.Job? = null
+
+    private var scrubAudioJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * mpv answers a property change only when its core thread is free, and during a seek that thread is busy: changing "mute" on the
+     * calling (touch / UI) thread made the finger gesture wait for the seek (the lag). Both changes therefore run on a background
+     * thread, one after the other, and the UI thread never waits for mpv.
+     */
+    private fun muteForScrub() {
+        if (scrubMuted) {
+            // a pending "sound back" from the previous scrub is cancelled: the finger moves again
+            scrubUnmuteJob?.cancel()
+            scrubUnmuteJob = null
+            return
+        }
+        scrubMuted = true
+        val previous = scrubAudioJob
+        scrubAudioJob = playerScope.launch(Dispatchers.Default) {
+            try { previous?.join() } catch (_: Throwable) {}
+            withMpvLock(Unit) { v ->
+                try {
+                    scrubUserMuted = v.mpv.getPropertyBoolean("mute") == true
+                    if (!scrubUserMuted) v.mpv.setPropertyBoolean("mute", true)
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    /**
+     * Sound returns right after the exact seek was sent: unmute while the volume is 0, then rise to the user's volume in ~250 ms
+     * (no step, no burst). Never over the user's own mute. No polling of mpv.
+     */
+    private fun unmuteAfterScrub() {
+        if (!scrubMuted) return
+        scrubUnmuteJob?.cancel()
+        val previous = scrubAudioJob
+        val job = playerScope.launch(Dispatchers.Default) {
+            try { previous?.join() } catch (_: Throwable) {}
+            delay(130L)
+            var ramp = false
+            kotlinx.coroutines.withContext(NonCancellable) {
+                if (scrubMuted) {
+                    scrubMuted = false
+                    if (!scrubUserMuted) {
+                        withMpvLock(Unit) { v ->
+                            try {
+                                v.mpv.setPropertyDouble("volume", 0.0)
+                                v.mpv.setPropertyBoolean("mute", false)
+                            } catch (_: Throwable) {}
+                        }
+                        ramp = true
+                    }
+                }
+            }
+            if (ramp) {
+                try {
+                    for (i in 1..10) {
+                        if (scrubMuted || isReleased) break
+                        val vol = currentVolumeLevel.toDouble() * (i / 10.0)
+                        withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                        delay(25L)
+                    }
+                } finally {
+                    kotlinx.coroutines.withContext(NonCancellable) {
+                        if (!scrubMuted && !isReleased && !audioSwitchVolumeLowered) {
+                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", currentVolumeLevel.toDouble()) } catch (_: Throwable) {} }
+                        }
+                    }
+                }
+            }
+        }
+        scrubUnmuteJob = job
+        scrubAudioJob = job
+    }
 
     private fun publishPolledPosition(realMs: Long, paused: Boolean) {
         val target = seekPendingTargetMs
@@ -1146,7 +1229,10 @@ class MpvPlayerController {
         currentHwMode = mode
         val view = mpvView ?: return
         try {
-            view.mpv.setPropertyString("hwdec", resolveHwdecValue())
+            runSeamlessChange("hwdec") {
+                val target = resolveHwdecValue()
+                if (view.mpv.getPropertyString("hwdec") != target) view.mpv.setPropertyString("hwdec", target)
+            }
             _isHwAccelActive.value = (mode != HwAccelMode.DISABLE)
             _performanceStatus.value = when (mode) {
                 HwAccelMode.FORCE -> "MediaCodec HW Forced"
@@ -2595,7 +2681,31 @@ class MpvPlayerController {
             seekPendingTargetMs = timeMs
             seekPendingAt = now
             _currentPositionMs.value = timeMs
+            // A finger that only RESTS still sends tiny moves (touch jitter) or the very same spot again and again. Every one of
+            // them used to restart mpv's seek (the sound was flushed and repeated every few milliseconds, the picture flipped
+            // between one or two frames) and pushed the exact seek further away, so it never came. A move that stays close to
+            // the spot already sent changes nothing on the screen: it only updates where the exact seek will land.
+            // A resting finger also jitters a pixel or two back and forth; on a long video one pixel is seconds. Such a small
+            // move AGAINST the direction of travel is jitter: it must not send mpv back and forth between two key frames.
+            val stepFromIssued = timeMs - lastScrubIssuedTargetMs
+            val dir = if (stepFromIssued > 0L) 1 else if (stepFromIssued < 0L) -1 else 0
+            // only while the finger rests (nothing was sent for a moment); a finger that really moves back is always followed
+            val jitter = scrubbing && lastScrubIssuedTargetMs >= 0L && dir != 0 && lastScrubDir != 0 && dir != lastScrubDir &&
+                kotlin.math.abs(stepFromIssued) < 1500L && now - lastScrubIssueAt > 150L
+            if (!jitter && dir != 0 && kotlin.math.abs(stepFromIssued) >= SCRUB_MIN_STEP_MS) lastScrubDir = dir
+            if (!scrubbing) lastScrubDir = 0
+            if (scrubbing && lastScrubIssuedTargetMs >= 0L &&
+                (jitter || kotlin.math.abs(timeMs - lastScrubIssuedTargetMs) < SCRUB_MIN_STEP_MS)) {
+                scrubFinalTargetMs = timeMs
+                if (wasAtEof) {
+                    mpvView?.mpv?.setPropertyBoolean("pause", false)
+                    _isPlaying.value = true
+                }
+                return
+            }
             trailingExactSeekJob?.cancel()
+            lastScrubIssuedTargetMs = timeMs
+            scrubFinalTargetMs = timeMs
             if (!scrubbing) {
                 seekStage = 0
                 scrubIssueJob?.cancel()
@@ -2603,6 +2713,7 @@ class MpvPlayerController {
                 mpvView?.mpv?.command("seek", "$sec", if (preciseSeekingEnabled) "absolute+exact" else "absolute")
             } else {
                 seekStage = 1
+                muteForScrub()
                 // a finger sends 60-120 moves a second: mpv gets at most one key-frame seek every 45 ms (always the newest spot),
                 // so it is never flooded and the picture keeps following the finger smoothly
                 scrubIssueJob?.cancel()
@@ -2622,12 +2733,17 @@ class MpvPlayerController {
                 trailingExactSeekJob = playerScope.launch {
                     kotlinx.coroutines.delay(160L)
                     try {
-                        seekPendingTargetMs = timeMs
+                        // where the finger finally stopped (it may have drifted a little since this seek was scheduled)
+                        val finalMs = if (scrubFinalTargetMs >= 0L) scrubFinalTargetMs else timeMs
+                        seekPendingTargetMs = finalMs
                         seekPendingAt = System.currentTimeMillis()
                         seekStage = 2
-                        mpvView?.mpv?.command("seek", "$sec", "absolute+exact")
+                        lastScrubIssuedTargetMs = finalMs
+                        mpvView?.mpv?.command("seek", "${finalMs / 1000.0}", "absolute+exact")
+                        unmuteAfterScrub()
                     } catch (_: Throwable) {
                         seekStage = 0
+                        unmuteAfterScrub()
                     }
                 }
             }
@@ -2851,20 +2967,59 @@ class MpvPlayerController {
      * Anime4K: sets mpv's `glsl-shaders` chain (GPU shaders, so no `vf` / hwdec change is needed).
      * Does nothing unless the wanted chain differs from what mpv already has; an unavailable mode clears the chain.
      */
-    private fun applyAnime4kShaders(view: VideoPlayerMpvView) {
+    private fun applyAnime4kShaders(view: VideoPlayerMpvView): Boolean {
+        var flipByShader = false
         try {
-            val wanted = Anime4KShaders.resolveMpvValue(view.context.applicationContext, currentManualVideoAdjustments.anime4k)
+            val anime = Anime4KShaders.resolveMpvValue(view.context.applicationContext, currentManualVideoAdjustments.anime4k)
+            // Mirror / flip as a GPU shader (last in the chain): no filter chain rebuild, no decoder change, no re-seek, so the
+            // sound is never touched and the picture does not stop. The subtitles are drawn after it and are not mirrored.
+            val flip = flipShaderPath(view.context.applicationContext, videoMirrorHorizontal, videoFlipVertical)
+            flipByShader = flip != null || !(videoMirrorHorizontal || videoFlipVertical)
+            val wanted = listOf(anime, flip ?: "").filter { it.isNotEmpty() }.joinToString(":")
             val current = try { view.mpv.getPropertyString("glsl-shaders") ?: "" } catch (_: Throwable) { "" }
-            if (current != wanted) view.mpv.setPropertyString("glsl-shaders", wanted)
+            if (current != wanted) {
+                // same chain apart from our own flip shader (switched on, off or changed)
+                val currentBase = current.split(":").filter { it.isNotEmpty() && !it.contains("viaura_flip_") }.joinToString(":")
+                val onlyFlipDiffers = currentBase == anime
+                if (onlyFlipDiffers) {
+                    // sound keeps playing: no volume fade, and never on the calling (UI) thread
+                    playerScope.launch(Dispatchers.Default) {
+                        withMpvLock(Unit) { v -> try { v.mpv.setPropertyString("glsl-shaders", wanted) } catch (_: Throwable) {} }
+                    }
+                } else {
+                    runSeamlessChange("glsl") { view.mpv.setPropertyString("glsl-shaders", wanted) }
+                }
+            }
         } catch (t: Throwable) {
             t.printStackTrace()
+        }
+        return flipByShader
+    }
+
+    private fun flipShaderPath(context: android.content.Context, mirror: Boolean, flip: Boolean): String? {
+        if (!mirror && !flip) return null
+        return try {
+            val dir = File(context.filesDir, "viaura_flip").apply { mkdirs() }
+            val file = File(dir, "viaura_flip_${if (mirror) "h" else ""}${if (flip) "v" else ""}.glsl")
+            if (!file.exists() || file.length() == 0L) {
+                val body = buildString {
+                    append("//!DESC viaura mirror/flip\n//!HOOK MAIN\n//!BIND HOOKED\n\nvec4 hook() {\n    vec2 p = HOOKED_pos;\n")
+                    if (mirror) append("    p.x = 1.0 - p.x;\n")
+                    if (flip) append("    p.y = 1.0 - p.y;\n")
+                    append("    return HOOKED_tex(p);\n}\n")
+                }
+                file.writeText(body)
+            }
+            file.absolutePath
+        } catch (_: Throwable) {
+            null
         }
     }
 
     private fun applyVideoAdjustments(immediate: Boolean = false) {
         try {
             val view = mpvView ?: return
-            applyAnime4kShaders(view)
+            val flipByShader = applyAnime4kShaders(view)
 
             val totalBrightness = (currentVideoFilterPreset.brightness + currentManualVideoAdjustments.brightness).coerceIn(-100, 100)
             val totalContrast = (currentVideoFilterPreset.contrast + currentManualVideoAdjustments.contrast).coerceIn(-100, 100)
@@ -2895,8 +3050,10 @@ class MpvPlayerController {
             // All video filters are combined into ONE lavfi graph because `vf` is set as a whole:
             // setting it for flips alone would wipe the colour-balance filter and vice versa.
             val vfParts = mutableListOf<String>()
-            if (videoMirrorHorizontal) vfParts.add("hflip")
-            if (videoFlipVertical) vfParts.add("vflip")
+            if (!flipByShader) {
+                if (videoMirrorHorizontal) vfParts.add("hflip")
+                if (videoFlipVertical) vfParts.add("vflip")
+            }
             if (totalTemperature != 0 || totalTint != 0) {
                 val rs = (totalTemperature * 0.003 + totalTint * 0.0015).coerceIn(-1.0, 1.0)
                 val gs = (-totalTint * 0.003).coerceIn(-1.0, 1.0)
@@ -2926,16 +3083,18 @@ class MpvPlayerController {
                 }
             }
 
+            // Flip / mirror / colour balance rebuild mpv's video filter chain (and maybe the decoder): done like a track
+            // switch, so there is no cut in the sound and no jump of the picture. See runSeamlessChange.
             if (immediate) {
                 videoAdjustmentDebounceJob?.cancel()
                 videoAdjustmentDebounceJob = null
-                applyVf()
+                runSeamlessChange("vf") { applyVf() }
             } else {
                 videoAdjustmentDebounceJob?.cancel()
                 val scope = controllerScope ?: kotlinx.coroutines.GlobalScope
                 videoAdjustmentDebounceJob = scope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                    kotlinx.coroutines.delay(30)
-                    applyVf()
+                    kotlinx.coroutines.delay(120)
+                    runSeamlessChange("vf") { applyVf() }
                 }
             }
         } catch (t: Throwable) {
@@ -4867,9 +5026,35 @@ class MpvPlayerController {
      * primary and opened the editor. Here the edited copy is attached WITHOUT selecting it (sub-add ... auto), then put on
      * secondary-sid; the primary subtitle is never touched.
      */
+    /**
+     * While the edited copy of the secondary subtitle is still being prepared (video start / track change) the secondary line
+     * is kept hidden, so the unedited original (e.g. in its big original size) never shows up for a moment. It is shown again
+     * as soon as this sync finishes, whatever the result.
+     */
+    @Volatile private var secondaryHeldForEdit = false
+
     private suspend fun syncSecondaryAdvancedAssNow(context: Context) {
+        var again = false
+        try {
+            again = syncSecondaryAdvancedAssCore(context)
+        } finally {
+            if (!again) releaseHeldSecondary()
+        }
+    }
+
+    private suspend fun releaseHeldSecondary() {
+        if (!secondaryHeldForEdit) return
+        withMpvLock(Unit) { view ->
+            secondaryHeldForEdit = false
+            if (_secondarySubtitleTrackId.value > 0) {
+                try { view.mpv.setPropertyBoolean("secondary-sub-visibility", true) } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    private suspend fun syncSecondaryAdvancedAssCore(context: Context): Boolean {
         val selGen = subtitleSelectionGeneration.get()
-        if (!advancedAssEnabled) return   // the primary sync already removed every edited copy
+        if (!advancedAssEnabled) return false   // the primary sync already removed every edited copy
         val json = advancedAssOverridesJson
 
         // ---- Phase A (locked): is there an editable secondary subtitle? ----
@@ -4881,13 +5066,13 @@ class MpvPlayerController {
             if (!isAdvancedAssEligible(context, info)) return@withMpvLock null
             if (advancedAssBindings[logical]?.unsupported == true) return@withMpvLock null
             SecondaryAdvancedAssPlan(info, logical)
-        } ?: return
+        } ?: return false
 
         // ---- Phase B (no native calls): the edited script, exactly like the primary pipeline builds it ----
         val binding = advancedAssBindings[plan.originalId]?.takeIf { !it.unsupported }
             ?: resolveAdvancedAssBinding(context, plan.info)
-            ?: return
-        val text = ensureAdvancedAssSourceText(context, binding) ?: return
+            ?: return false
+        val text = ensureAdvancedAssSourceText(context, binding) ?: return false
         val overrides = AssOverridesStore.get(json, binding.key)
         if (!binding.fontsPrepared) {
             try { SubtitleFontManager.syncFonts(context, currentFilePath, text) } catch (_: Throwable) {}
@@ -4922,10 +5107,12 @@ class MpvPlayerController {
         }
 
         // ---- Phase C (locked): attach the copy (not selected) and show it as secondary ----
+        var rescheduled = false
         withMpvLock(Unit) { view ->
             // a newer selection wins; the sync is repeated for the new state
             if (selGen != subtitleSelectionGeneration.get() || _secondarySubtitleTrackId.value != plan.originalId) {
                 if (isNewFile) builtFile?.let { try { it.delete() } catch (_: Throwable) {} }
+                rescheduled = true
                 scheduleAdvancedAssSync(0L)
                 return@withMpvLock
             }
@@ -4997,6 +5184,7 @@ class MpvPlayerController {
             removeOrphanedAdvancedAssTracks(view, binding.key, keepPath = file.absolutePath)
             refreshTracksAndChapters()
         }
+        return rescheduled
     }
 
     private var preciseSeekRestoreJob: Job? = null
@@ -5040,6 +5228,69 @@ class MpvPlayerController {
 
     /** True while a track switch holds the volume down. A quick second tap must never remember that lowered level as "the" volume. */
     @Volatile private var audioSwitchVolumeLowered = false
+
+    private var seamlessChangeJob: Job? = null
+    private val seamlessChanges = LinkedHashMap<String, () -> Unit>()
+
+    /**
+     * Runs a change that makes mpv rebuild part of its pipeline (video filter chain for flip / mirror / colour, decoder,
+     * GPU shaders such as Anime4K) the same way a track switch is made smooth: the sound is eased down for a moment, every
+     * seek is made frame-exact (no jump back and forward of the picture) while mpv re-reads the position, and the sound
+     * comes back smoothly afterwards. Changes with the same [key] replace each other (only the newest value is applied),
+     * different keys run one after another inside the same fade.
+     */
+    private fun runSeamlessChange(key: String, change: () -> Unit) {
+        if (isReleased) return
+        synchronized(seamlessChanges) {
+            seamlessChanges.remove(key)
+            seamlessChanges[key] = change
+        }
+        val seq = audioSwitchSeq.incrementAndGet()
+        seamlessChangeJob?.cancel()
+        seamlessChangeJob = playerScope.launch(Dispatchers.Default) {
+            try {
+                val userVolume = currentVolumeLevel.toDouble()
+                val fade = _isPlaying.value && System.currentTimeMillis() >= seamlessHandOverUntil && userVolume > 0.0
+                if (fade && !audioSwitchVolumeLowered) {
+                    audioSwitchVolumeLowered = true
+                    for (i in 1..5) {
+                        if (seq != audioSwitchSeq.get()) break
+                        val vol = userVolume * (1.0 - i / 5.0)
+                        withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                        delay(8L)
+                    }
+                }
+                holdPreciseSeekForTrackSwitch()
+                while (true) {
+                    val next = synchronized(seamlessChanges) {
+                        val first = seamlessChanges.entries.firstOrNull()
+                        if (first == null) null else { seamlessChanges.remove(first.key); first.value }
+                    } ?: break
+                    // a change that was taken from the list is always carried out, even if a newer one cancels this job
+                    kotlinx.coroutines.withContext(NonCancellable) {
+                        withMpvLock(Unit) { _ -> try { next() } catch (t: Throwable) { t.printStackTrace() } }
+                    }
+                }
+                if (audioSwitchVolumeLowered) delay(320L)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+            } finally {
+                if (audioSwitchVolumeLowered && seq == audioSwitchSeq.get()) {
+                    kotlinx.coroutines.withContext(NonCancellable) {
+                        var completed = true
+                        for (i in 1..8) {
+                            if (seq != audioSwitchSeq.get()) { completed = false; break }
+                            val vol = currentVolumeLevel.toDouble() * (i / 8.0)
+                            withMpvLock(Unit) { v -> try { v.mpv.setPropertyDouble("volume", vol) } catch (_: Throwable) {} }
+                            delay(14L)
+                        }
+                        if (completed && seq == audioSwitchSeq.get()) audioSwitchVolumeLowered = false
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * Switches the audio track without a pop or a stall of the screen: the picker shows the new choice at once, the volume
@@ -5326,7 +5577,12 @@ class MpvPlayerController {
                     if ((try { view.mpv.getPropertyInt("secondary-sid") } catch (_: Throwable) { null }) != playbackSecondaryTrackId) {
                         view.mpv.setPropertyInt("secondary-sid", playbackSecondaryTrackId)
                     }
-                    subGuard.setPropertyBoolean("secondary-sub-visibility", true)
+                    // An ASS subtitle that may carry user edits but has no edited copy yet stays hidden until the secondary
+                    // sync (right after this) has attached the copy: no flash of the unedited look.
+                    val holdSecondary = advancedAssEnabled && advancedAssOverridesJson.isNotBlank() &&
+                        !secondaryIsEditedCopy && isTrackNativeAssSsa(secondaryTrackId)
+                    secondaryHeldForEdit = holdSecondary
+                    subGuard.setPropertyBoolean("secondary-sub-visibility", !holdSecondary)
                     // An edited ASS/SSA copy has its styles baked in: libass must use them, not the global override
                     val secondaryOverride = if (secondaryIsEditedCopy && advancedAssEnabled && isTrackNativeAssSsa(secondaryTrackId)) false
                         else effectiveOverrideForTrack(secondaryTrackId)

@@ -66,6 +66,7 @@ import com.example.ui.components.StyledIcon
 import com.example.ui.components.VideoItemCard
 import com.example.ui.components.VisibleFields
 import com.example.ui.components.shareOnlineLink
+import com.example.ui.components.shareOnlineLinks
 import com.example.ui.components.swipeLeftForActions
 import com.example.ui.theme.AccentGradient
 import com.example.ui.theme.AccentSkyBlue
@@ -340,6 +341,21 @@ fun MediaDetailScreen(
             )
             val stream = result.getOrNull()
             if (stream == null) showResolveError(result.exceptionOrNull()) else onOk(stream)
+        }
+    }
+
+    /** Same as [runResolve] for several episodes selected with the swipe toolbar: one busy job, one after the other. */
+    fun runResolveAll(label: String, list: List<DetailVideo>, onOk: (DetailVideo, com.example.util.media.MediaStream) -> Unit) {
+        runBusy(label) {
+            for (v in list) {
+                val result = MediaPlayback.resolve(
+                    context, plugin, v.link, v.type,
+                    v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1,
+                    requireWorking = true
+                )
+                val stream = result.getOrNull()
+                if (stream == null) showResolveError(result.exceptionOrNull()) else onOk(v, stream)
+            }
         }
     }
 
@@ -728,7 +744,9 @@ fun MediaDetailScreen(
         ) {
             val t = actionTarget ?: lastActionTarget
             if (t != null) {
-                val saved = remember(savedTick, t.link) { MediaLibraryStore.isSaved(context, plugin.value, t.link) }
+                // every action works on ALL selected episodes (one episode = the same as before)
+                val picks = actionState.items.toList().ifEmpty { listOf(t) }
+                val saved = remember(savedTick, picks) { picks.all { MediaLibraryStore.isSaved(context, plugin.value, it.link) } }
                 OnlineQuickActionBar(
                     isDark = isDark,
                     alphaRatio = (glassBlurTransparency / 100f).coerceIn(0.15f, 1.0f),
@@ -741,24 +759,31 @@ fun MediaDetailScreen(
                     },
                     onSaveToPlaylist = {
                         actionTarget = null
-                        runResolve("Adding to playlist…", t) { stream ->
-                            val item = MediaPlayback.toVideoItem(context, plugin, episodeName(t), t.poster, stream)
+                        runResolveAll("Adding to playlist…", picks) { v, stream ->
+                            val item = MediaPlayback.toVideoItem(context, plugin, episodeName(v), v.poster, stream)
                             MediaPlayback.addToPluginPlaylist(context, plugin, item)
                             Toast.makeText(context, "Added to the \"${plugin.name}\" playlist", Toast.LENGTH_SHORT).show()
                         }
                     },
                     onWatchLater = {
-                        val nowSaved = MediaLibraryStore.toggleWatchLater(
-                            context,
-                            MediaSavedVideo(
-                                pluginId = plugin.value,
-                                title = episodeName(t),
-                                pageTitle = title,
-                                poster = t.poster,
-                                link = t.link,
-                                type = t.type
-                            )
-                        )
+                        // all already saved -> remove them all, otherwise save the ones that are not saved yet
+                        val allSaved = picks.all { MediaLibraryStore.isSaved(context, plugin.value, it.link) }
+                        var nowSaved = false
+                        picks.forEach { v ->
+                            if (allSaved || !MediaLibraryStore.isSaved(context, plugin.value, v.link)) {
+                                nowSaved = MediaLibraryStore.toggleWatchLater(
+                                    context,
+                                    MediaSavedVideo(
+                                        pluginId = plugin.value,
+                                        title = episodeName(v),
+                                        pageTitle = title,
+                                        poster = v.poster,
+                                        link = v.link,
+                                        type = v.type
+                                    )
+                                )
+                            }
+                        }
                         Toast.makeText(context, if (nowSaved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
@@ -769,8 +794,18 @@ fun MediaDetailScreen(
                         if (page != null) {
                             shareOnlineLink(context, playerTitle(t), page)
                         } else {
-                            runResolve("Getting link…", t) { stream ->
-                                shareOnlineLink(context, playerTitle(t), stream.link)
+                            val links = ArrayList<Pair<String, String>>()
+                            runBusy("Getting link…") {
+                                for (v in picks) {
+                                    val result = MediaPlayback.resolve(
+                                        context, plugin, v.link, v.type,
+                                        v.title, if (isSeries) allVideos.indexOfFirst { it.link == v.link }.coerceAtLeast(0) else -1,
+                                        requireWorking = true
+                                    )
+                                    val stream = result.getOrNull()
+                                    if (stream == null) showResolveError(result.exceptionOrNull()) else links.add(playerTitle(v) to stream.link)
+                                }
+                                if (links.isNotEmpty()) shareOnlineLinks(context, links)
                             }
                         }
                     }
