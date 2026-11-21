@@ -397,35 +397,41 @@ class MpvPlayerController {
     @Volatile private var lastScrubDir = 0
     private var scrubUnmuteJob: kotlinx.coroutines.Job? = null
 
+    private var scrubAudioJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * mpv answers a property change only when its core thread is free, and during a seek that thread is busy: changing "mute" on the
+     * calling (touch / UI) thread made the finger gesture wait for the seek (the lag). Both changes therefore run on a background
+     * thread, one after the other, and the UI thread never waits for mpv.
+     */
     private fun muteForScrub() {
-        scrubUnmuteJob?.cancel()
-        if (scrubMuted) return
-        try {
-            val v = mpvView ?: return
-            scrubUserMuted = try { v.mpv.getPropertyBoolean("mute") == true } catch (_: Throwable) { false }
-            if (!scrubUserMuted) v.mpv.setPropertyBoolean("mute", true)
-            scrubMuted = true
-        } catch (_: Throwable) {}
+        if (scrubMuted) {
+            // a pending "sound back" from the previous scrub is cancelled: the finger moves again
+            scrubUnmuteJob?.cancel()
+            scrubUnmuteJob = null
+            return
+        }
+        scrubMuted = true
+        val previous = scrubAudioJob
+        scrubAudioJob = playerScope.launch(Dispatchers.Default) {
+            try { previous?.join() } catch (_: Throwable) {}
+            withMpvLock(Unit) { v ->
+                try {
+                    scrubUserMuted = v.mpv.getPropertyBoolean("mute") == true
+                    if (!scrubUserMuted) v.mpv.setPropertyBoolean("mute", true)
+                } catch (_: Throwable) {}
+            }
+        }
     }
 
-    /** After the exact seek has landed the sound comes back (never later than ~1.5 s, never over the user's own mute). */
+    /** The sound comes back a moment after the exact seek was sent (never over the user's own mute). No polling of mpv. */
     private fun unmuteAfterScrub() {
         if (!scrubMuted) return
         scrubUnmuteJob?.cancel()
-        scrubUnmuteJob = playerScope.launch(Dispatchers.Default) {
-            try {
-                var waited = 0L
-                delay(60L)
-                while (waited < 1500L) {
-                    val seeking = withMpvLock(false) { v -> try { v.mpv.getPropertyBoolean("seeking") == true } catch (_: Throwable) { false } }
-                    if (!seeking) break
-                    delay(30L); waited += 30L
-                }
-                delay(80L)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-            }
+        val previous = scrubAudioJob
+        val job = playerScope.launch(Dispatchers.Default) {
+            try { previous?.join() } catch (_: Throwable) {}
+            delay(450L)
             kotlinx.coroutines.withContext(NonCancellable) {
                 if (scrubMuted) {
                     scrubMuted = false
@@ -433,6 +439,8 @@ class MpvPlayerController {
                 }
             }
         }
+        scrubUnmuteJob = job
+        scrubAudioJob = job
     }
 
     private fun publishPolledPosition(realMs: Long, paused: Boolean) {
@@ -2653,8 +2661,9 @@ class MpvPlayerController {
             // move AGAINST the direction of travel is jitter: it must not send mpv back and forth between two key frames.
             val stepFromIssued = timeMs - lastScrubIssuedTargetMs
             val dir = if (stepFromIssued > 0L) 1 else if (stepFromIssued < 0L) -1 else 0
+            // only while the finger rests (nothing was sent for a moment); a finger that really moves back is always followed
             val jitter = scrubbing && lastScrubIssuedTargetMs >= 0L && dir != 0 && lastScrubDir != 0 && dir != lastScrubDir &&
-                kotlin.math.abs(stepFromIssued) < 1500L
+                kotlin.math.abs(stepFromIssued) < 1500L && now - lastScrubIssueAt > 150L
             if (!jitter && dir != 0 && kotlin.math.abs(stepFromIssued) >= SCRUB_MIN_STEP_MS) lastScrubDir = dir
             if (!scrubbing) lastScrubDir = 0
             if (scrubbing && lastScrubIssuedTargetMs >= 0L &&
