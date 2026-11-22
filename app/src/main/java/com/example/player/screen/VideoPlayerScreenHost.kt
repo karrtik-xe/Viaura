@@ -277,6 +277,8 @@ private fun VideoPlayerScreenImpl(
         entryRequestedMode == "SENSOR_LANDSCAPE" ||
         (entryRequestedMode == "VIDEO" && entryVideoIsWide)
     var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape) }
+    // The player slides in (landscape entry or taken back from the mini player): its controls then fade in softly.
+    val startedWithSlideIn = remember { entryFakeLandscape || miniAdopted != null }
     val entryFakeRotation = if (entryRequestedMode == "REVERSE_LANDSCAPE") -90f else 90f
 
     LaunchedEffect(isLandscape) {
@@ -317,6 +319,7 @@ private fun VideoPlayerScreenImpl(
         if (!entryFakeLandscape) return@LaunchedEffect
         val speed = uiState.animationSpeed.coerceIn(0.25f, 2f)
         kotlinx.coroutines.delay((420 / speed).toLong())
+        com.example.util.CrashReporter.breadcrumb("player fake-landscape hand-off (adopted=${miniAdopted != null})")
         activity?.window?.let { window ->
             val params = window.attributes
             params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
@@ -3297,7 +3300,20 @@ private fun VideoPlayerScreenImpl(
 
         @androidx.compose.runtime.Composable
         fun RenderVideoPlayerOverlay() {
-            if (!entryFakeLandscape) VideoPlayerOverlay(
+            if (!entryFakeLandscape) {
+                // After the slide-in (also when the video comes back from the mini player) the controls fade in quickly
+                // instead of popping in at once.
+                val controlsFade = remember { androidx.compose.animation.core.Animatable(if (startedWithSlideIn) 0f else 1f) }
+                LaunchedEffect(Unit) {
+                    if (controlsFade.value < 1f) {
+                        controlsFade.animateTo(
+                            1f,
+                            androidx.compose.animation.core.tween(240, easing = androidx.compose.animation.core.LinearOutSlowInEasing)
+                        )
+                    }
+                }
+                Box(modifier = Modifier.graphicsLayer { alpha = controlsFade.value }) {
+                    VideoPlayerOverlay(
                 glassSource = videoGlassSource,
                 glassCapture = @androidx.compose.runtime.DontMemoize { bmp, done ->
                     // no PixelCopy while the Back animation runs: it only costs frames there
@@ -4191,6 +4207,8 @@ private fun VideoPlayerScreenImpl(
                 videoWidth = realVideoWidth,
                 videoHeight = realVideoHeight
             )
+                }
+            }
         }
 
         @androidx.compose.runtime.Composable
@@ -4391,10 +4409,10 @@ private fun VideoPlayerScreenImpl(
                     // Opened from the mini player: while the player slides up (drawn landscape, native view not attached yet)
                     // the last picture of the video is shown, so it appears to continue from where the mini player was.
                     if (entryFakeLandscape && miniAdopted != null) {
-                        val entryFrame = controller.lastCapturedFrame.value
+                        val entryFrame by controller.lastCapturedFrame.collectAsState()
                         if (entryFrame != null) {
                             Image(
-                                bitmap = entryFrame.asImageBitmap(),
+                                bitmap = entryFrame!!.asImageBitmap(),
                                 contentDescription = "Video Entry Frame",
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize()

@@ -1161,6 +1161,34 @@ class MpvPlayerController {
      * Captures the live hardware surface buffer into state memory.
      * Used across screen rotation transitions to eliminate black screen flashes.
      */
+    /**
+     * Mini player -> full player: takes a fresh picture of what is on screen right now (never an older one, never an
+     * all-black one) so the player can show it while it slides in.
+     */
+    fun captureFreshFrameForEntry() {
+        _lastCapturedFrame.value = null
+        val view = mpvView ?: return
+        if (!view.hasLiveSurface()) return
+        try {
+            view.captureSurfaceFrame { bmp ->
+                if (bmp != null && !isMostlyBlack(bmp)) _lastCapturedFrame.value = bmp
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun isMostlyBlack(b: Bitmap): Boolean {
+        return try {
+            var bright = 0
+            val steps = 12
+            for (yi in 0 until steps) for (xi in 0 until steps) {
+                val c = b.getPixel((b.width - 1) * xi / (steps - 1), (b.height - 1) * yi / (steps - 1))
+                val lum = ((c shr 16) and 0xff) + ((c shr 8) and 0xff) + (c and 0xff)
+                if (lum > 48) bright++
+            }
+            bright < 4
+        } catch (_: Throwable) { false }
+    }
+
     fun captureCurrentFrame(onComplete: ((Bitmap?) -> Unit)? = null) {
         val view = mpvView
         if (view != null && view.hasLiveSurface()) {
@@ -1629,6 +1657,7 @@ class MpvPlayerController {
 
     fun attach(view: VideoPlayerMpvView, scope: CoroutineScope) {
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv attach view, file=${(pendingFilePath ?: currentFilePath)?.takeLast(40)}")
         mpvView = view
         controllerScope = scope
         if (advancedAssSyncPending) scheduleAdvancedAssSync(0L)
@@ -1676,6 +1705,7 @@ class MpvPlayerController {
      */
     fun resumePolling(scope: CoroutineScope) {
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv resumePolling (mini -> full)")
         controllerScope = scope
         startPolling(scope)
     }
@@ -1695,6 +1725,7 @@ class MpvPlayerController {
      * the video output re-init can be put right. [noDuck] = no short mute either (audio keeps playing through it).
      */
     fun markSeamlessHandOver(noDuck: Boolean, windowMs: Long = 4000L) {
+        com.example.util.CrashReporter.breadcrumb("mpv markSeamlessHandOver noDuck=$noDuck")
         // Persistent output: the view move never reaches mpv, nothing has to be held or put right.
         if (mpvView?.output != null) return
         val now = System.currentTimeMillis()
@@ -1855,6 +1886,7 @@ class MpvPlayerController {
 
     private fun onSurfaceCreated() {
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv surfaceCreated")
         isSurfaceReady = true
         val path = pendingFilePath ?: currentFilePath
         if (!path.isNullOrBlank() && mpvView != null) {
@@ -2065,6 +2097,7 @@ class MpvPlayerController {
      * once mpv reports the file as seekable; until then the caller's retry loop simply tries again.
      */
     private fun safeResumeSeek(v: VideoPlayerMpvView, sec: Double) {
+        com.example.util.CrashReporter.breadcrumb("mpv resume seek ${sec}s")
         val seekable = try { v.mpv.getPropertyBoolean("seekable") == true } catch (_: Throwable) { false }
         if (!seekable) return
         try {
@@ -2076,8 +2109,8 @@ class MpvPlayerController {
 
     private fun refreshSurfaceByReload() {
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv refreshSurfaceByReload")
         val now = System.currentTimeMillis()
-        if (now < handOverGuardUntil) return
         if (now - lastSurfaceRefreshTimestamp < 350L) {
             return
         }
@@ -2756,6 +2789,7 @@ class MpvPlayerController {
 
     private fun loadVideoInternal(filePath: String, startPositionMs: Long = 0L) {
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv loadfile start=${startPositionMs}ms path=${filePath.takeLast(40)}")
         subtitleSelectionGeneration.incrementAndGet()
         val view = mpvView ?: return
         _isBuffering.value = true
@@ -6720,6 +6754,7 @@ class MpvPlayerController {
         // Compose onDispose safety net. Without this guard the second call could destroy
         // an already-destroyed native surface.
         if (isReleased) return
+        com.example.util.CrashReporter.breadcrumb("mpv release()")
         val viewToDestroy: VideoPlayerMpvView? = synchronized(releaseGuard) {
             if (isReleased) return
             isReleased = true

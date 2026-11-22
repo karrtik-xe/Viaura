@@ -21,14 +21,52 @@ import java.util.Locale
  */
 object CrashReporter {
     private const val FILE_NAME = "last_crash.txt"
+    private const val CRUMB_FILE = "breadcrumbs.txt"
+    private const val CRUMB_MAX_BYTES = 24 * 1024
     private const val PREFS = "crash_reporter"
     private const val KEY_LAST_EXIT_TS = "last_exit_ts"
     @Volatile private var installed = false
+    @Volatile private var crumbFile: File? = null
+    private val crumbLock = Any()
+    private val crumbTime = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+    /**
+     * Writes one short line ("what the app was doing") straight to a small file. It is written with a plain unbuffered
+     * write, so it is already on disk when a native crash kills the process a moment later; the next start shows the last
+     * lines together with the crash, which tells what happened right before it.
+     */
+    fun breadcrumb(message: String) {
+        val f = crumbFile ?: return
+        try {
+            synchronized(crumbLock) {
+                if (f.length() > CRUMB_MAX_BYTES) {
+                    val keep = f.readBytes().let { it.copyOfRange(it.size / 2, it.size) }
+                    f.writeBytes(keep)
+                }
+                java.io.FileOutputStream(f, true).use { out ->
+                    out.write((crumbTime.format(Date()) + "  " + message + "\n").toByteArray())
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun readBreadcrumbs(app: Context): String {
+        return try {
+            val f = File(app.filesDir, CRUMB_FILE)
+            if (!f.isFile) return ""
+            val lines = f.readLines()
+            lines.takeLast(45).joinToString("\n")
+        } catch (_: Throwable) {
+            ""
+        }
+    }
 
     fun install(context: Context) {
         if (installed) return
         installed = true
         val app = context.applicationContext
+        crumbFile = File(app.filesDir, CRUMB_FILE)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             try {
@@ -41,6 +79,8 @@ object CrashReporter {
                     append("Device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                     append(" / Android ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n\n")
                     append(sw.toString())
+                    val crumbs = readBreadcrumbs(app)
+                    if (crumbs.isNotBlank()) append("\n\nLast actions:\n").append(crumbs)
                 }
                 File(app.filesDir, FILE_NAME).writeText(text.take(60_000))
             } catch (_: Throwable) {
@@ -52,6 +92,9 @@ object CrashReporter {
     /** The reason of the crash of the previous run, or null when there was none (or it was already shown). */
     fun consume(context: Context): String? {
         val app = context.applicationContext
+        // The last actions of the previous run; the file is emptied right away so it only ever describes ONE run.
+        val crumbs = readBreadcrumbs(app)
+        clearBreadcrumbs(app)
         try {
             val f = File(app.filesDir, FILE_NAME)
             if (f.isFile) {
@@ -62,7 +105,11 @@ object CrashReporter {
             }
         } catch (_: Throwable) {
         }
-        return nativeCrashOfPreviousRun(app)
+        return nativeCrashOfPreviousRun(app, crumbs)
+    }
+
+    private fun clearBreadcrumbs(app: Context) {
+        try { File(app.filesDir, CRUMB_FILE).delete() } catch (_: Throwable) {}
     }
 
     private fun markExitSeen(app: Context) {
@@ -75,24 +122,80 @@ object CrashReporter {
         }
     }
 
-    private fun nativeCrashOfPreviousRun(app: Context): String? {
+    /** Readable pieces of the system's native crash record (it is a binary tombstone): signal, library names, function names. */
+    private fun readTraceStrings(info: ApplicationExitInfo): String {
+        return try {
+            val bytes = info.traceInputStream?.use { it.readBytes() } ?: return ""
+            val out = StringBuilder()
+            val cur = StringBuilder()
+            val seen = HashSet<String>()
+            fun flush() {
+                if (cur.length >= 6) {
+                    val t = cur.toString()
+                    val interesting = t.contains("lib") || t.contains("Java_") || t.contains("SIG") || t.contains("mpv") ||
+                        t.contains("pc ") || t.contains("Abort") || t.contains("Fatal") || t.contains("signal") ||
+                        t.contains("kotlin") || t.contains("com.example") || t.contains("::") || t.contains("art")
+                    if (interesting && seen.add(t) && out.length < 6000) out.append(t.take(220)).append('\n')
+                }
+                cur.setLength(0)
+            }
+            for (b in bytes) {
+                val c = b.toInt() and 0xff
+                if (c in 32..126) cur.append(c.toChar()) else flush()
+            }
+            flush()
+            out.toString().trim()
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun nativeCrashOfPreviousRun(app: Context, crumbs: String): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         return try {
             val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val lastSeen = prefs.getLong(KEY_LAST_EXIT_TS, 0L)
             val am = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val newest = am.getHistoricalProcessExitReasons(app.packageName, 0, 1).firstOrNull() ?: return null
-            if (newest.timestamp <= lastSeen) return null
-            prefs.edit().putLong(KEY_LAST_EXIT_TS, newest.timestamp).apply()
-            val label = when (newest.reason) {
+            val exits = am.getHistoricalProcessExitReasons(app.packageName, 0, 6)
+            val newestTs = exits.firstOrNull()?.timestamp ?: return null
+            if (newestTs <= lastSeen) return null
+            prefs.edit().putLong(KEY_LAST_EXIT_TS, newestTs).apply()
+            // Several records can have piled up since the last look (the phone may also restart the app by itself): the
+            // newest one that is a real failure is the one to show. A normal exit (swipe away, back) is not a crash.
+            val failure = exits.firstOrNull { e ->
+                e.timestamp > lastSeen && when (e.reason) {
+                    ApplicationExitInfo.REASON_CRASH_NATIVE,
+                    ApplicationExitInfo.REASON_CRASH,
+                    ApplicationExitInfo.REASON_ANR,
+                    ApplicationExitInfo.REASON_SIGNALED,
+                    ApplicationExitInfo.REASON_INITIALIZATION_FAILURE,
+                    ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE,
+                    ApplicationExitInfo.REASON_LOW_MEMORY,
+                    ApplicationExitInfo.REASON_DEPENDENCY_DIED -> true
+                    else -> false
+                }
+            } ?: return null
+            val label = when (failure.reason) {
                 ApplicationExitInfo.REASON_CRASH_NATIVE -> "Native crash (libmpv / JNI)"
                 ApplicationExitInfo.REASON_ANR -> "App not responding (ANR)"
                 ApplicationExitInfo.REASON_CRASH -> "Crash"
-                else -> return null
+                ApplicationExitInfo.REASON_SIGNALED -> "App was killed by a signal"
+                ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "App failed to start"
+                ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "App was stopped for using too many resources"
+                ApplicationExitInfo.REASON_LOW_MEMORY -> "App was stopped because the phone ran out of memory"
+                else -> "App stopped by the system"
             }
-            val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(newest.timestamp))
-            "$label\nTime: $stamp\nDetails: ${newest.description ?: "-"}\n" +
-                "Device: ${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+            val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(failure.timestamp))
+            val trace = readTraceStrings(failure)
+            buildString {
+                append(label).append('\n')
+                append("Time: ").append(stamp).append('\n')
+                append("Details: ").append(failure.description ?: "-").append(" (status ").append(failure.status).append(")\n")
+                append("Device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                append(" / Android ").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")")
+                if (trace.isNotBlank()) append("\n\nSystem crash record:\n").append(trace)
+                if (crumbs.isNotBlank()) append("\n\nLast actions before it:\n").append(crumbs)
+            }.take(60_000)
         } catch (_: Throwable) {
             null
         }
