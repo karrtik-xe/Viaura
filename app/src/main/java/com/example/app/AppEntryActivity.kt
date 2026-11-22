@@ -206,8 +206,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Keeps the reason of a crash so it can be shown (and copied) on the next start.
         com.example.util.CrashReporter.install(applicationContext)
-        // Always read (also when the system restored the app from Recents after the crash). It is handed out only once.
-        val previousCrashReport = com.example.util.CrashReporter.consume(applicationContext)
+        val previousCrashReport = if (savedInstanceState == null) com.example.util.CrashReporter.consume(applicationContext) else null
         applyLaunchWindowBackground()
         com.example.util.DownloadStore.init(applicationContext)
         // Appearance extras: background animation, and Remove Card UI choices

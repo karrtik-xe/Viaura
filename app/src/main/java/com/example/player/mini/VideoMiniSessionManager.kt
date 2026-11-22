@@ -85,7 +85,6 @@ object VideoMiniPlayerManager {
 
     /** Called by the player screen when the user leaves it: playback goes on in the mini player. */
     fun park(context: Context, session: VideoMiniSession) {
-        com.example.util.CrashReporter.breadcrumb("mini park")
         if (pendingPark != null) flushPendingPark()
         appContext = context.applicationContext
         // Anything that was parked before (another video) is shut down first.
@@ -110,10 +109,8 @@ object VideoMiniPlayerManager {
 
     /** The full-screen player takes the session back (mini player tapped). Returns null if nothing matches. */
     fun takeForExpand(): VideoMiniSession? {
-        com.example.util.CrashReporter.breadcrumb("mini takeForExpand")
         flushPendingPark()
         val s = _session.value ?: return null
-        s.controller.captureFreshFrameForEntry()
         s.controller.markSeamlessHandOver(noDuck = true)
         stopWatchers()
         _session.value = null

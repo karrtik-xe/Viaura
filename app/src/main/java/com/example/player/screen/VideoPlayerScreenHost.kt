@@ -261,10 +261,6 @@ private fun VideoPlayerScreenImpl(
     // window is still portrait, the player slides in (bottom -> up) already drawn landscape
     // via a Compose rotation, and only afterwards is the real window orientation switched
     // (with the system rotation animation disabled), so the user never sees a rotate/flip.
-    // Video mini player: when this video was parked in the mini player, its controller + native view are taken back
-    // as they are (no reload, playback continues from the very same frame). Claimed here, before the entry animation
-    // state, because that state also shows the parked video's last picture while the player slides in.
-    val miniAdopted = remember { com.example.player.VideoMiniPlayerManager.claimFor(video) }
     val entryRequestedMode = uiState.playerSettings.orientation.uppercase()
     val entryVideoIsWide = remember(video?.path) {
         val m = Regex("(\\d+)\\s*[x\u00D7]\\s*(\\d+)").find(video?.resolution.orEmpty())
@@ -276,9 +272,7 @@ private fun VideoPlayerScreenImpl(
         entryRequestedMode == "REVERSE_LANDSCAPE" ||
         entryRequestedMode == "SENSOR_LANDSCAPE" ||
         (entryRequestedMode == "VIDEO" && entryVideoIsWide)
-    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape) }
-    // The player slides in (landscape entry or taken back from the mini player): its controls then fade in softly.
-    val startedWithSlideIn = remember { entryFakeLandscape || miniAdopted != null }
+    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape && !uiState.playerSettings.portraitChannelPlayer) }
     val entryFakeRotation = if (entryRequestedMode == "REVERSE_LANDSCAPE") -90f else 90f
 
     LaunchedEffect(isLandscape) {
@@ -319,7 +313,6 @@ private fun VideoPlayerScreenImpl(
         if (!entryFakeLandscape) return@LaunchedEffect
         val speed = uiState.animationSpeed.coerceIn(0.25f, 2f)
         kotlinx.coroutines.delay((420 / speed).toLong())
-        com.example.util.CrashReporter.breadcrumb("player fake-landscape hand-off (adopted=${miniAdopted != null})")
         activity?.window?.let { window ->
             val params = window.attributes
             params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
@@ -531,6 +524,7 @@ private fun VideoPlayerScreenImpl(
 
     // Video mini player: when this video was parked in the mini player, its controller + native view are taken back
     // as they are (no reload, playback continues from the very same frame).
+    val miniAdopted = remember { com.example.player.VideoMiniPlayerManager.claimFor(video) }
     val miniViewHolder = remember { arrayOfNulls<VideoPlayerMpvView>(1) }
     var miniParkRequested by remember { mutableStateOf(false) }
     var miniParked by remember { mutableStateOf(false) }
@@ -3300,20 +3294,7 @@ private fun VideoPlayerScreenImpl(
 
         @androidx.compose.runtime.Composable
         fun RenderVideoPlayerOverlay() {
-            if (!entryFakeLandscape) {
-                // After the slide-in (also when the video comes back from the mini player) the controls fade in quickly
-                // instead of popping in at once.
-                val controlsFade = remember { androidx.compose.animation.core.Animatable(if (startedWithSlideIn) 0f else 1f) }
-                LaunchedEffect(Unit) {
-                    if (controlsFade.value < 1f) {
-                        controlsFade.animateTo(
-                            1f,
-                            androidx.compose.animation.core.tween(240, easing = androidx.compose.animation.core.LinearOutSlowInEasing)
-                        )
-                    }
-                }
-                Box(modifier = Modifier.graphicsLayer { alpha = controlsFade.value }) {
-                    VideoPlayerOverlay(
+            if (!entryFakeLandscape) VideoPlayerOverlay(
                 glassSource = videoGlassSource,
                 glassCapture = @androidx.compose.runtime.DontMemoize { bmp, done ->
                     // no PixelCopy while the Back animation runs: it only costs frames there
@@ -4207,8 +4188,6 @@ private fun VideoPlayerScreenImpl(
                 videoWidth = realVideoWidth,
                 videoHeight = realVideoHeight
             )
-                }
-            }
         }
 
         @androidx.compose.runtime.Composable
@@ -4404,20 +4383,6 @@ private fun VideoPlayerScreenImpl(
                                 .fillMaxSize()
                                 .graphicsLayer(alpha = thumbAlpha)
                         )
-                    }
-
-                    // Opened from the mini player: while the player slides up (drawn landscape, native view not attached yet)
-                    // the last picture of the video is shown, so it appears to continue from where the mini player was.
-                    if (entryFakeLandscape && miniAdopted != null) {
-                        val entryFrame by controller.lastCapturedFrame.collectAsState()
-                        if (entryFrame != null) {
-                            Image(
-                                bitmap = entryFrame!!.asImageBitmap(),
-                                contentDescription = "Video Entry Frame",
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
                     }
 
                     val activeFreezeFrame = exitFreezeFrameBitmap ?: controller.lastCapturedFrame.value
@@ -5149,18 +5114,6 @@ private fun ChannelPlayerSection(
     val hidden = remember(watchUrl) {
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_VIDEO)
     }
-    // Feed layout (Sort & View of the online video folder) also decides how the recommended list under the player looks.
-    val recFeedLayout = remember(watchUrl) {
-        try {
-            com.example.ui.state.SettingsPreferencesManager.loadLayoutMode(context, "online_video") == com.example.ui.components.LayoutMode.YOUTUBE
-        } catch (_: Throwable) { false }
-    }
-    val recTrackByPath: Map<String, OnlineTrackResult> = remember(details, video) {
-        if (watchUrl != null) {
-            details?.related.orEmpty().filter { it.videoUrl !in hidden }
-                .associateBy { it.toOnlineVideoItem().path }
-        } else emptyMap()
-    }
     val recommended: List<VideoItem> = remember(details, playlist, video) {
         val list: List<VideoItem> = if (watchUrl != null) {
             val rel = details?.related.orEmpty().filter { it.videoUrl !in hidden }
@@ -5423,25 +5376,7 @@ private fun ChannelPlayerSection(
                 )
             }
             items(recommended, key = { "channel_rec_${it.path}" }) { item ->
-                val recTrack = if (recFeedLayout && item.isOnline) recTrackByPath[item.path] else null
-                if (recTrack != null) {
-                    com.example.ui.components.OnlineYouTubeVideoCard(
-                        video = recTrack,
-                        isDark = isDark,
-                        onClick = {
-                            com.example.util.OnlineVideoRecommender.recordOpened(
-                                context, OnlineVideoService.toWatchUrl(item.path), item.channelName.orEmpty(), item.displayName
-                            )
-                            onPlayItem(item)
-                        },
-                        onChannelClick = {
-                            val cu = recTrack.channelUrl
-                            if (!cu.isNullOrBlank()) {
-                                onOpenChannel(com.example.util.OnlineChannelResult(cu, recTrack.artist, recTrack.channelAvatarUrl, null, null))
-                            }
-                        }
-                    )
-                } else VideoItemCard(
+                VideoItemCard(
                     video = item,
                     isDark = isDark,
                     visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
