@@ -261,6 +261,11 @@ private fun VideoPlayerScreenImpl(
     // window is still portrait, the player slides in (bottom -> up) already drawn landscape
     // via a Compose rotation, and only afterwards is the real window orientation switched
     // (with the system rotation animation disabled), so the user never sees a rotate/flip.
+    // Video mini player: when this video was parked in the mini player, its controller + native view are taken back
+    // as they are (no reload, playback continues from the very same frame). Claimed here (before the entry animation
+    // state) because a taken-over session must NOT use the fake-landscape entry below: its native view has to be
+    // attached to the window from the first frame (see entryFakeLandscape).
+    val miniAdopted = remember { com.example.player.VideoMiniPlayerManager.claimFor(video) }
     val entryRequestedMode = uiState.playerSettings.orientation.uppercase()
     val entryVideoIsWide = remember(video?.path) {
         val m = Regex("(\\d+)\\s*[x\u00D7]\\s*(\\d+)").find(video?.resolution.orEmpty())
@@ -272,12 +277,28 @@ private fun VideoPlayerScreenImpl(
         entryRequestedMode == "REVERSE_LANDSCAPE" ||
         entryRequestedMode == "SENSOR_LANDSCAPE" ||
         (entryRequestedMode == "VIDEO" && entryVideoIsWide)
-    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape && !uiState.playerSettings.portraitChannelPlayer) }
+    // A video taken back from the mini player keeps its native mpv view; during the fake-landscape slide-in that view is not
+    // attached (the surface only exists after the hand-off), so mpv kept rendering into a destroyed surface and the app
+    // crashed when the same video was opened again. A taken-over session therefore skips the fake entry and rotates the
+    // window directly (jump-cut, no system rotation animation).
+    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape && miniAdopted == null) }
     val entryFakeRotation = if (entryRequestedMode == "REVERSE_LANDSCAPE") -90f else 90f
 
     LaunchedEffect(isLandscape) {
         if (isLandscape) {
             wasInLandscape = true
+            // Landscape reached: bring back the normal system rotation animation for later manual rotations.
+            if (!entryFakeLandscape) {
+                try {
+                    activity?.window?.let { window ->
+                        val params = window.attributes
+                        if (params.rotationAnimation == WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT) {
+                            params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_ROTATE
+                            window.attributes = params
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
         }
         onLandscapeChanged(isLandscape)
     }
@@ -300,6 +321,19 @@ private fun VideoPlayerScreenImpl(
         // opens the video in landscape right away, the pinned layout only exists in portrait).
         val requestedFinal = requested
         if (!entryFakeLandscape) {
+            val goingLandscape = requestedFinal == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                requestedFinal == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
+                requestedFinal == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            if (goingLandscape && configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
+                // Direct landscape: no visible portrait -> landscape turning animation.
+                try {
+                    activity?.window?.let { window ->
+                        val params = window.attributes
+                        params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
+                        window.attributes = params
+                    }
+                } catch (_: Throwable) {}
+            }
             activity?.requestedOrientation = requestedFinal
         }
         onDispose {
@@ -524,7 +558,6 @@ private fun VideoPlayerScreenImpl(
 
     // Video mini player: when this video was parked in the mini player, its controller + native view are taken back
     // as they are (no reload, playback continues from the very same frame).
-    val miniAdopted = remember { com.example.player.VideoMiniPlayerManager.claimFor(video) }
     val miniViewHolder = remember { arrayOfNulls<VideoPlayerMpvView>(1) }
     var miniParkRequested by remember { mutableStateOf(false) }
     var miniParked by remember { mutableStateOf(false) }
@@ -5114,6 +5147,18 @@ private fun ChannelPlayerSection(
     val hidden = remember(watchUrl) {
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_VIDEO)
     }
+    // Feed layout (Sort & View of the online video folder) also decides how the recommended list under the player looks.
+    val recFeedLayout = remember(watchUrl) {
+        try {
+            com.example.ui.state.SettingsPreferencesManager.loadLayoutMode(context, "online_video") == com.example.ui.components.LayoutMode.YOUTUBE
+        } catch (_: Throwable) { false }
+    }
+    val recTrackByPath: Map<String, OnlineTrackResult> = remember(details, video) {
+        if (watchUrl != null) {
+            details?.related.orEmpty().filter { it.videoUrl !in hidden }
+                .associateBy { it.toOnlineVideoItem().path }
+        } else emptyMap()
+    }
     val recommended: List<VideoItem> = remember(details, playlist, video) {
         val list: List<VideoItem> = if (watchUrl != null) {
             val rel = details?.related.orEmpty().filter { it.videoUrl !in hidden }
@@ -5376,7 +5421,25 @@ private fun ChannelPlayerSection(
                 )
             }
             items(recommended, key = { "channel_rec_${it.path}" }) { item ->
-                VideoItemCard(
+                val recTrack = if (recFeedLayout && item.isOnline) recTrackByPath[item.path] else null
+                if (recTrack != null) {
+                    com.example.ui.components.OnlineYouTubeVideoCard(
+                        video = recTrack,
+                        isDark = isDark,
+                        onClick = {
+                            com.example.util.OnlineVideoRecommender.recordOpened(
+                                context, OnlineVideoService.toWatchUrl(item.path), item.channelName.orEmpty(), item.displayName
+                            )
+                            onPlayItem(item)
+                        },
+                        onChannelClick = {
+                            val cu = recTrack.channelUrl
+                            if (!cu.isNullOrBlank()) {
+                                onOpenChannel(com.example.util.OnlineChannelResult(cu, recTrack.artist, recTrack.channelAvatarUrl, null, null))
+                            }
+                        }
+                    )
+                } else VideoItemCard(
                     video = item,
                     isDark = isDark,
                     visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
