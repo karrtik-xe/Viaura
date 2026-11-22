@@ -2059,8 +2059,25 @@ class MpvPlayerController {
         }
     }
 
+    /**
+     * Resume seek after a file was opened. A seek command sent while mpv has not finished opening the file / has no
+     * video output yet (re-opening a video that has a saved position) crashed inside libmpv, so the command is only sent
+     * once mpv reports the file as seekable; until then the caller's retry loop simply tries again.
+     */
+    private fun safeResumeSeek(v: VideoPlayerMpvView, sec: Double) {
+        val seekable = try { v.mpv.getPropertyBoolean("seekable") == true } catch (_: Throwable) { false }
+        if (!seekable) return
+        try {
+            v.mpv.command("seek", "$sec", "absolute+exact")
+        } catch (_: Throwable) {
+            try { v.mpv.command("seek", "$sec", "absolute") } catch (_: Throwable) {}
+        }
+    }
+
     private fun refreshSurfaceByReload() {
+        if (isReleased) return
         val now = System.currentTimeMillis()
+        if (now < handOverGuardUntil) return
         if (now - lastSurfaceRefreshTimestamp < 350L) {
             return
         }
@@ -2166,11 +2183,7 @@ class MpvPlayerController {
                                 isResumeSeekVerified = true
                                 _currentPositionMs.value = realPosMs
                             } else {
-                                try {
-                                    v.mpv.command("seek", "$sec", "absolute+exact")
-                                } catch (_: Throwable) {
-                                    v.mpv.command("seek", "$sec", "absolute")
-                                }
+                                safeResumeSeek(v, sec)
                             }
                             }
                         } catch (_: Throwable) {}
@@ -2913,11 +2926,7 @@ class MpvPlayerController {
                                 _currentPositionMs.value = realPosMs
                                 if (!onlineStreamMode) _isBuffering.value = false
                             } else {
-                                try {
-                                    v.mpv.command("seek", "$sec", "absolute+exact")
-                                } catch (_: Throwable) {
-                                    v.mpv.command("seek", "$sec", "absolute")
-                                }
+                                safeResumeSeek(v, sec)
                             }
                             }
                         } catch (_: Throwable) {}

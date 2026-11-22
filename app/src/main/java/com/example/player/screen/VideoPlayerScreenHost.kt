@@ -262,9 +262,8 @@ private fun VideoPlayerScreenImpl(
     // via a Compose rotation, and only afterwards is the real window orientation switched
     // (with the system rotation animation disabled), so the user never sees a rotate/flip.
     // Video mini player: when this video was parked in the mini player, its controller + native view are taken back
-    // as they are (no reload, playback continues from the very same frame). Claimed here (before the entry animation
-    // state) because a taken-over session must NOT use the fake-landscape entry below: its native view has to be
-    // attached to the window from the first frame (see entryFakeLandscape).
+    // as they are (no reload, playback continues from the very same frame). Claimed here, before the entry animation
+    // state, because that state also shows the parked video's last picture while the player slides in.
     val miniAdopted = remember { com.example.player.VideoMiniPlayerManager.claimFor(video) }
     val entryRequestedMode = uiState.playerSettings.orientation.uppercase()
     val entryVideoIsWide = remember(video?.path) {
@@ -277,28 +276,12 @@ private fun VideoPlayerScreenImpl(
         entryRequestedMode == "REVERSE_LANDSCAPE" ||
         entryRequestedMode == "SENSOR_LANDSCAPE" ||
         (entryRequestedMode == "VIDEO" && entryVideoIsWide)
-    // A video taken back from the mini player keeps its native mpv view; during the fake-landscape slide-in that view is not
-    // attached (the surface only exists after the hand-off), so mpv kept rendering into a destroyed surface and the app
-    // crashed when the same video was opened again. A taken-over session therefore skips the fake entry and rotates the
-    // window directly (jump-cut, no system rotation animation).
-    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape && miniAdopted == null) }
+    var entryFakeLandscape by remember { mutableStateOf(entryWantsLandscape && !isLandscape) }
     val entryFakeRotation = if (entryRequestedMode == "REVERSE_LANDSCAPE") -90f else 90f
 
     LaunchedEffect(isLandscape) {
         if (isLandscape) {
             wasInLandscape = true
-            // Landscape reached: bring back the normal system rotation animation for later manual rotations.
-            if (!entryFakeLandscape) {
-                try {
-                    activity?.window?.let { window ->
-                        val params = window.attributes
-                        if (params.rotationAnimation == WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT) {
-                            params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_ROTATE
-                            window.attributes = params
-                        }
-                    }
-                } catch (_: Throwable) {}
-            }
         }
         onLandscapeChanged(isLandscape)
     }
@@ -321,19 +304,6 @@ private fun VideoPlayerScreenImpl(
         // opens the video in landscape right away, the pinned layout only exists in portrait).
         val requestedFinal = requested
         if (!entryFakeLandscape) {
-            val goingLandscape = requestedFinal == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
-                requestedFinal == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
-                requestedFinal == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            if (goingLandscape && configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
-                // Direct landscape: no visible portrait -> landscape turning animation.
-                try {
-                    activity?.window?.let { window ->
-                        val params = window.attributes
-                        params.rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
-                        window.attributes = params
-                    }
-                } catch (_: Throwable) {}
-            }
             activity?.requestedOrientation = requestedFinal
         }
         onDispose {
@@ -4416,6 +4386,20 @@ private fun VideoPlayerScreenImpl(
                                 .fillMaxSize()
                                 .graphicsLayer(alpha = thumbAlpha)
                         )
+                    }
+
+                    // Opened from the mini player: while the player slides up (drawn landscape, native view not attached yet)
+                    // the last picture of the video is shown, so it appears to continue from where the mini player was.
+                    if (entryFakeLandscape && miniAdopted != null) {
+                        val entryFrame = controller.lastCapturedFrame.value
+                        if (entryFrame != null) {
+                            Image(
+                                bitmap = entryFrame.asImageBitmap(),
+                                contentDescription = "Video Entry Frame",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
 
                     val activeFreezeFrame = exitFreezeFrameBitmap ?: controller.lastCapturedFrame.value
