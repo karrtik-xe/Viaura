@@ -83,6 +83,8 @@ import com.example.ui.state.PlayerLayoutConfig
 import com.example.ui.state.PlayerSettings
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.focusRequester
 import com.example.ui.theme.isAppInDarkTheme
 import com.example.ui.theme.LocalAppFontFamily
