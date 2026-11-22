@@ -152,6 +152,9 @@ import com.example.ui.state.ControlsAnimationStyle
 import com.example.ui.state.GestureSensitivityMode
 import com.example.ui.state.HwAccelMode
 import com.example.ui.state.PlayerSettings
+import com.example.ui.components.detectVideoOutputCapabilities
+import com.example.ui.components.detectPassthroughCapabilities
+import com.example.ui.components.isWeakDeviceForSmoothMotion
 import com.example.ui.state.UiState
 import com.example.MainActivity
 import com.example.util.network.NetworkMonitor
@@ -2689,6 +2692,7 @@ private fun VideoPlayerScreenImpl(
             }
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             persistPlaybackPosition()
+            controller.resetFrameRateHint() // refresh rate back to normal when the player closes (or parks in the mini player)
             // Parked in the video mini player: it keeps playing there and is released by the mini player.
             if (!miniParked) controller.release()
         }
@@ -3018,6 +3022,66 @@ private fun VideoPlayerScreenImpl(
             else -> HwAccelMode.FORCE
         }
         controller.setDecoderChoice(decoderMode == DecoderMode.AUTO, manual)
+    }
+
+    // ---- HDR tone-mapping / smooth motion / deinterlace / auto frame rate / audio passthrough ----
+    // Each option is applied from the controller's background thread only when its value changes (never on the UI thread).
+    val outputCaps = remember { detectVideoOutputCapabilities(context) }
+    val weakPhone = remember { isWeakDeviceForSmoothMotion(context) }
+    val outPs = uiState.playerSettings
+    LaunchedEffect(outPs.hdrToneMapping, outPs.smoothMotion, outPs.deinterlaceMode) {
+        controller.setVideoOutputOptions(outPs.hdrToneMapping, outPs.smoothMotion, outPs.deinterlaceMode, outputCaps.displayHdr, weakPhone)
+    }
+    val inPipNow = com.example.util.PipModeState.isInPictureInPicture.value
+    LaunchedEffect(outPs.autoFrameRate, inPipNow, miniParked) {
+        controller.setAutoFrameRate(outPs.autoFrameRate && outputCaps.multipleRefreshRates, inPipNow || miniParked, activity)
+    }
+    var passthroughCaps by remember { mutableStateOf(detectPassthroughCapabilities(context)) }
+    DisposableEffect(Unit) {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+        val cb = object : android.media.AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out android.media.AudioDeviceInfo>?) { passthroughCaps = detectPassthroughCapabilities(context) }
+            override fun onAudioDevicesRemoved(removedDevices: Array<out android.media.AudioDeviceInfo>?) { passthroughCaps = detectPassthroughCapabilities(context) }
+        }
+        try { am?.registerAudioDeviceCallback(cb, null) } catch (_: Throwable) {}
+        onDispose { try { am?.unregisterAudioDeviceCallback(cb) } catch (_: Throwable) {} }
+    }
+    // Speaker / Bluetooth / no digital output: passthrough is simply not used (normal decoding), the saved choice stays
+    LaunchedEffect(outPs.audioPassthrough, passthroughCaps) {
+        controller.setAudioPassthrough(outPs.audioPassthrough && passthroughCaps.supported, passthroughCaps.mpvValue)
+    }
+    val passthroughFailures by controller.passthroughFailedEvents.collectAsState()
+    LaunchedEffect(passthroughFailures) {
+        if (passthroughFailures > 0 && uiState.playerSettings.audioPassthrough) {
+            val off = uiState.playerSettings.copy(audioPassthrough = false)
+            liveSubtitleSettings = liveSubtitleSettings.copy(audioPassthrough = false)
+            PlayerSettings.save(context, off)
+            onPlayerSettingsChange(off)
+            Toast.makeText(context, "Audio passthrough failed - using normal sound", Toast.LENGTH_LONG).show()
+        }
+    }
+    val toneMappingControl by controller.toneMappingControlAvailable.collectAsState()
+    val smoothMotionOn by controller.smoothMotionActive.collectAsState()
+
+    // ---- Cast (DLNA): the TV follows play / pause / seek of this player; the phone keeps a muted copy as the clock ----
+    DisposableEffect(controller) {
+        com.example.ui.screens.DlnaCast.onEnded = { controller.setCastMirrorMuted(false) }
+        com.example.ui.screens.DlnaCast.onRemotePlayState = { playing ->
+            if (playing != controller.isPlaying.value) {
+                com.example.ui.screens.DlnaCast.suppressEcho = true
+                try { if (playing) controller.play() else controller.pause() } finally { com.example.ui.screens.DlnaCast.suppressEcho = false }
+            }
+        }
+        onDispose {
+            com.example.ui.screens.DlnaCast.onRemotePlayState = null
+            com.example.ui.screens.DlnaCast.onEnded = null
+            if (com.example.ui.screens.DlnaCast.active != null) com.example.ui.screens.DlnaCast.stop()
+        }
+    }
+    val castMediaPath = currentVideo?.let { v -> v.path.ifBlank { v.uri.toString() } }
+    LaunchedEffect(castMediaPath) {
+        // a different video was opened: the old one is not cast any more
+        if (com.example.ui.screens.DlnaCast.active != null) com.example.ui.screens.DlnaCast.stop()
     }
 
     // Smart Auto Playback: tell the person when a video is demanding for this device or a fallback was used.
@@ -4072,6 +4136,26 @@ private fun VideoPlayerScreenImpl(
                 subtitleScale = subtitleScale,
                 subtitlePosition = subtitlePosition,
                 subtitleSettings = liveSubtitleSettings,
+                castMediaPath = castMediaPath,
+                onCastStarted = { controller.setCastMirrorMuted(true) },
+                toneMappingControlAvailable = toneMappingControl == true,
+                smoothMotionActive = smoothMotionOn,
+                onVideoOutputSettingsChange = @androidx.compose.runtime.DontMemoize { updated ->
+                    val merged = uiState.playerSettings.copy(
+                        hdrToneMapping = updated.hdrToneMapping,
+                        autoFrameRate = updated.autoFrameRate,
+                        deinterlaceMode = updated.deinterlaceMode,
+                        smoothMotion = updated.smoothMotion,
+                        audioPassthrough = updated.audioPassthrough
+                    )
+                    liveSubtitleSettings = liveSubtitleSettings.copy(
+                        hdrToneMapping = merged.hdrToneMapping, autoFrameRate = merged.autoFrameRate,
+                        deinterlaceMode = merged.deinterlaceMode, smoothMotion = merged.smoothMotion,
+                        audioPassthrough = merged.audioPassthrough
+                    )
+                    PlayerSettings.save(context, merged)
+                    onPlayerSettingsChange(merged)
+                },
                 onSubtitleSettingsChange = @androidx.compose.runtime.DontMemoize { updated ->
                     liveSubtitleSettings = updated
                     subtitleScale = updated.subtitleScale

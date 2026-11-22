@@ -2,11 +2,15 @@ package com.example.ui.components
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.UiModeManager
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.media.AudioAttributes
+import android.media.AudioTrack
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -536,5 +540,149 @@ internal fun detectHardwareInfo(context: Context): DetectedHardwareInfo {
             cpuCores = "${Runtime.getRuntime().availableProcessors()} cores",
             ramInfo = null
         )
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// VIDEO OUTPUT / AUDIO PASSTHROUGH / TV CAPABILITIES
+// The player settings (HDR tone-mapping, auto frame rate, smooth motion, audio passthrough) are only shown when the
+// phone really supports them. Everything here is read from Android; a failed check simply means "not supported".
+// ---------------------------------------------------------------------------------------------------------------------
+
+internal data class VideoOutputCapabilities(
+    /** The display reports at least one HDR type (HDR10, HDR10+, HLG, Dolby Vision). */
+    val displayHdr: Boolean,
+    /** Display.HdrCapabilities could be read at all (Android 7+). When false the HDR option is hidden. */
+    val hdrInfoAvailable: Boolean,
+    /** The refresh rates (Hz) of the modes that have the same resolution as the current mode, ascending. */
+    val refreshRates: List<Float>,
+    /** More than one refresh rate is offered, so matching the video's frame rate is possible. */
+    val multipleRefreshRates: Boolean,
+    /** Surface.setFrameRate (seamless) can be used (Android 11+). Older Android uses the display-mode fallback. */
+    val seamlessFrameRateApi: Boolean
+)
+
+internal fun detectVideoOutputCapabilities(context: Context): VideoOutputCapabilities {
+    val display = findDisplay(context)
+    var hdrTypes: IntArray? = null
+    var hdrInfo = false
+    try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            hdrTypes = display?.mode?.supportedHdrTypes
+            hdrInfo = display != null
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            @Suppress("DEPRECATION")
+            val caps = display?.hdrCapabilities
+            hdrTypes = caps?.supportedHdrTypes
+            hdrInfo = caps != null
+        }
+    } catch (_: Throwable) {
+        hdrInfo = false
+    }
+    val rates = ArrayList<Float>()
+    try {
+        val current = display?.mode
+        val modes = display?.supportedModes
+        if (current != null && modes != null) {
+            for (m in modes) {
+                if (m.physicalWidth == current.physicalWidth && m.physicalHeight == current.physicalHeight && m.refreshRate > 1f) {
+                    if (rates.none { kotlin.math.abs(it - m.refreshRate) < 0.5f }) rates.add(m.refreshRate)
+                }
+            }
+        }
+    } catch (_: Throwable) {
+    }
+    rates.sort()
+    return VideoOutputCapabilities(
+        displayHdr = hdrTypes != null && hdrTypes.isNotEmpty(),
+        hdrInfoAvailable = hdrInfo,
+        refreshRates = rates,
+        multipleRefreshRates = rates.size > 1,
+        seamlessFrameRateApi = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    )
+}
+
+/** What the current audio output can take as raw (undecoded) audio. [formats] uses mpv's audio-spdif names. */
+internal data class PassthroughCapabilities(val supported: Boolean, val formats: List<String>) {
+    /** Value for mpv's audio-spdif option, e.g. "ac3,eac3,dts,truehd". */
+    val mpvValue: String get() = formats.joinToString(",")
+}
+
+/**
+ * Passthrough is offered only when the phone or a connected HDMI / USB output really accepts the encoded stream
+ * (AudioTrack.isDirectPlaybackSupported on Android 10+, the output device's encoding list before that).
+ * Speaker, wired headphones and Bluetooth never qualify.
+ */
+internal fun detectPassthroughCapabilities(context: Context): PassthroughCapabilities {
+    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        ?: return PassthroughCapabilities(false, emptyList())
+    val outputs: Array<AudioDeviceInfo> = try {
+        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+    } catch (_: Throwable) {
+        emptyArray()
+    }
+    fun isDigitalOut(d: AudioDeviceInfo): Boolean {
+        val t = d.type
+        if (t == AudioDeviceInfo.TYPE_HDMI || t == AudioDeviceInfo.TYPE_HDMI_ARC || t == AudioDeviceInfo.TYPE_USB_DEVICE ||
+            t == AudioDeviceInfo.TYPE_LINE_DIGITAL || t == AudioDeviceInfo.TYPE_USB_HEADSET
+        ) return true
+        return Build.VERSION.SDK_INT >= 34 && t == AudioDeviceInfo.TYPE_HDMI_EARC
+    }
+    val digital = outputs.filter { isDigitalOut(it) }
+    if (digital.isEmpty()) return PassthroughCapabilities(false, emptyList())
+
+    val candidates = listOf(
+        "ac3" to AudioFormat.ENCODING_AC3,
+        "eac3" to AudioFormat.ENCODING_E_AC3,
+        "dts" to AudioFormat.ENCODING_DTS,
+        "dts-hd" to AudioFormat.ENCODING_DTS_HD,
+        "truehd" to AudioFormat.ENCODING_DOLBY_TRUEHD
+    )
+    val found = ArrayList<String>()
+    for ((name, encoding) in candidates) {
+        val ok = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val format = AudioFormat.Builder()
+                    .setEncoding(encoding)
+                    .setSampleRate(48000)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
+                    .build()
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build()
+                AudioTrack.isDirectPlaybackSupported(format, attrs)
+            } else {
+                digital.any { d -> d.encodings.contains(encoding) }
+            }
+        } catch (_: Throwable) {
+            false
+        }
+        if (ok) found.add(name)
+    }
+    return PassthroughCapabilities(found.isNotEmpty(), found)
+}
+
+/** Smooth motion is never switched on for phones that would struggle (low RAM / few CPU cores). */
+internal fun isWeakDeviceForSmoothMotion(context: Context): Boolean {
+    return try {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val lowRam = am?.isLowRamDevice == true
+        lowRam || Runtime.getRuntime().availableProcessors() < 6
+    } catch (_: Throwable) {
+        true
+    }
+}
+
+/** True on Android TV / Google TV / leanback boxes. The D-pad behaviour is only active there; phones are not affected. */
+internal fun isTelevisionDevice(context: Context): Boolean {
+    return try {
+        val ui = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+        ui?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
+            context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+            context.packageManager.hasSystemFeature("android.software.leanback_only")
+    } catch (_: Throwable) {
+        false
     }
 }

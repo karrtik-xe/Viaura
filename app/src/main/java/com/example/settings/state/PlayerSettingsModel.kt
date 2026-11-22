@@ -108,6 +108,14 @@ data class PlayerSettings(
     val videoTint: Int = 0,
     val videoDeband: Boolean = false,
 
+    // Video output & passthrough options. Everything is OFF / AUTO by default so playback stays exactly as before.
+    // hdrToneMapping: AUTO | OFF | BT2390 | MOBIUS | HABLE   deinterlaceMode: AUTO | ON | OFF
+    val hdrToneMapping: String = "AUTO",
+    val autoFrameRate: Boolean = false,
+    val deinterlaceMode: String = "AUTO",
+    val smoothMotion: Boolean = false,
+    val audioPassthrough: Boolean = false,
+
     // Gesture settings
     val brightnessGestures: Boolean = true,
     val volumeGestures: Boolean = true,
@@ -281,6 +289,11 @@ data class PlayerSettings(
                     videoTemperature = o.optInt("videoTemperature", 0).coerceIn(-100, 100),
                     videoTint = o.optInt("videoTint", 0).coerceIn(-100, 100),
                     videoDeband = o.optBoolean("videoDeband", false),
+                    hdrToneMapping = o.optString("hdrToneMapping", "AUTO"),
+                    autoFrameRate = o.optBoolean("autoFrameRate", false),
+                    deinterlaceMode = o.optString("deinterlaceMode", "AUTO"),
+                    smoothMotion = o.optBoolean("smoothMotion", false),
+                    audioPassthrough = o.optBoolean("audioPassthrough", false),
                     brightnessGestures = o.optBoolean("brightnessGestures", true),
                     volumeGestures = o.optBoolean("volumeGestures", true),
                     pinchToZoom = o.optBoolean("pinchToZoom", true),
@@ -436,6 +449,11 @@ data class PlayerSettings(
             o.put("videoTemperature", value.videoTemperature)
             o.put("videoTint", value.videoTint)
             o.put("videoDeband", value.videoDeband)
+            o.put("hdrToneMapping", value.hdrToneMapping)
+            o.put("autoFrameRate", value.autoFrameRate)
+            o.put("deinterlaceMode", value.deinterlaceMode)
+            o.put("smoothMotion", value.smoothMotion)
+            o.put("audioPassthrough", value.audioPassthrough)
             o.put("brightnessGestures", value.brightnessGestures)
             o.put("volumeGestures", value.volumeGestures)
             o.put("pinchToZoom", value.pinchToZoom)

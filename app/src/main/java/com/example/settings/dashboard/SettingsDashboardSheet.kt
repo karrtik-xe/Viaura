@@ -3275,6 +3275,60 @@ HorizontalPager(
                             }
                         }
 
+                        val appCtxForAudio = androidx.compose.ui.platform.LocalContext.current
+                        // SECTION 6: AUDIO PASSTHROUGH (only when the phone / connected HDMI-USB output really supports it)
+                        val passthroughOut = androidx.compose.runtime.remember { com.example.ui.components.detectPassthroughCapabilities(appCtxForAudio) }
+                        if (passthroughOut.supported) {
+                            Spacer(modifier = Modifier.height(20.dp))
+                            Text(
+                                text = "AUDIO PASSTHROUGH",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = secondaryText,
+                                letterSpacing = 0.5.sp
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(cardBg)
+                                    .border(1.dp, borderColor, RoundedCornerShape(20.dp))
+                                    .padding(16.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Audio passthrough (AC3, EAC3, DTS, TrueHD)",
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = primaryText
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "Sends the original sound to your TV / receiver. Equalizer and volume boost do not work while this is on. If it fails, normal sound is used.",
+                                            fontSize = 12.sp,
+                                            color = secondaryText,
+                                            lineHeight = 16.sp
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    ViauraSwitch(
+                                        checked = uiState.playerSettings.audioPassthrough,
+                                        onCheckedChange = { onPlayerSettingsChange(uiState.playerSettings.copy(audioPassthrough = it)) },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.White,
+                                            checkedTrackColor = AccentSkyBlue
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(24.dp))
                         } // end SettingsChunk
                     }

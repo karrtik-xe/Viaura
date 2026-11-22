@@ -220,6 +220,11 @@ object ViauraSettingsXmlManager {
         writeSetting("videoTemperature", p.videoTemperature)
         writeSetting("videoTint", p.videoTint)
         writeSetting("videoDeband", p.videoDeband)
+        writeSetting("hdrToneMapping", p.hdrToneMapping)
+        writeSetting("autoFrameRate", p.autoFrameRate)
+        writeSetting("deinterlaceMode", p.deinterlaceMode)
+        writeSetting("smoothMotion", p.smoothMotion)
+        writeSetting("audioPassthrough", p.audioPassthrough)
         serializer.endTag(null, "Decoder")
 
         // 6. GESTURES
@@ -575,6 +580,11 @@ object ViauraSettingsXmlManager {
                     videoTemperature = getInt("videoTemperature", basePlayer.videoTemperature, -100, 100),
                     videoTint = getInt("videoTint", basePlayer.videoTint, -100, 100),
                     videoDeband = getBool("videoDeband", basePlayer.videoDeband),
+                    hdrToneMapping = getStr("hdrToneMapping", basePlayer.hdrToneMapping),
+                    autoFrameRate = getBool("autoFrameRate", basePlayer.autoFrameRate),
+                    deinterlaceMode = getStr("deinterlaceMode", basePlayer.deinterlaceMode),
+                    smoothMotion = getBool("smoothMotion", basePlayer.smoothMotion),
+                    audioPassthrough = getBool("audioPassthrough", basePlayer.audioPassthrough),
 
                     // Gestures
                     brightnessGestures = getBool("brightnessGestures", basePlayer.brightnessGestures),

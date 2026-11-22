@@ -1226,6 +1226,370 @@ class MpvPlayerController {
         } catch (_: Throwable) {}
     }
 
+    // =================================================================================================================
+    // Video output options (HDR tone-mapping, smooth motion, deinterlace, auto frame rate) and audio passthrough.
+    // Every mpv property below is written from a background coroutine under withMpvLock (never from the UI / touch
+    // thread), only when its value really differs, and none of it touches the decoder, hwdec or the vf chain.
+    // All options default to OFF / AUTO, so a video plays exactly as before until the person turns something on.
+    // =================================================================================================================
+    @Volatile private var optToneMapping: String = "AUTO"
+    @Volatile private var optSmoothMotion: Boolean = false
+    @Volatile private var optDeinterlace: String = "AUTO"
+    @Volatile private var optDisplayHdr: Boolean = false
+    @Volatile private var optWeakDevice: Boolean = false
+    @Volatile private var optPassthrough: Boolean = false
+    @Volatile private var optPassthroughFormats: String = ""
+    @Volatile private var optAutoFrameRate: Boolean = false
+    @Volatile private var optFrameRateSuspended: Boolean = false
+    private var origToneMapping: String? = null
+    private var origVideoSync: String? = null
+    private var interpolationOn: Boolean = false
+    private var deinterlaceAutoOn: Boolean = false
+    private var appliedDeinterlaceMode: String = "AUTO"
+    @Volatile private var smoothTrippedForPath: String? = null
+    private var smoothMonitorJob: Job? = null
+    private var passthroughWatchJob: Job? = null
+    @Volatile private var outputReadyForPath: String? = null
+    @Volatile private var frameRateApplied: Float = 0f
+    private var frameRateActivity: java.lang.ref.WeakReference<android.app.Activity>? = null
+
+    private val _toneMappingControl = MutableStateFlow<Boolean?>(null)
+    /** null = not checked yet, true = mpv accepts tone-mapping changes, false = it does not (the option is then hidden). */
+    val toneMappingControlAvailable: StateFlow<Boolean?> = _toneMappingControl.asStateFlow()
+    private val _smoothMotionActive = MutableStateFlow(false)
+    /** True while smooth motion is really running (it switches itself off for 4K / heavy videos or when frames drop). */
+    val smoothMotionActive: StateFlow<Boolean> = _smoothMotionActive.asStateFlow()
+    private val _passthroughActive = MutableStateFlow(false)
+    /** True while the sound really goes out as raw AC3 / EAC3 / DTS / TrueHD. */
+    val passthroughActive: StateFlow<Boolean> = _passthroughActive.asStateFlow()
+    private val _passthroughFailedEvents = MutableStateFlow(0)
+    /** Counts the times passthrough failed and the player went back to normal decoding by itself. */
+    val passthroughFailedEvents: StateFlow<Int> = _passthroughFailedEvents.asStateFlow()
+
+    /** Sets a string property and reads it back; true when mpv now really has [value]. Only writes when it differs. */
+    private fun mpvSetVerified(v: VideoPlayerMpvView, name: String, value: String): Boolean {
+        return try {
+            if (v.mpv.getPropertyString(name) == value) return true
+            v.mpv.setPropertyString(name, value)
+            v.mpv.getPropertyString(name) == value
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun setVideoOutputOptions(toneMapping: String, smoothMotion: Boolean, deinterlace: String, displayHdr: Boolean, weakDevice: Boolean) {
+        optToneMapping = toneMapping
+        optSmoothMotion = smoothMotion
+        optDeinterlace = deinterlace
+        optDisplayHdr = displayHdr
+        optWeakDevice = weakDevice
+        scheduleVideoOutputApply(0L)
+    }
+
+    private fun scheduleVideoOutputApply(delayMs: Long) {
+        if (isReleased) return
+        playerScope.launch(Dispatchers.Default) {
+            try {
+                if (delayMs > 0L) delay(delayMs)
+                withMpvLock(Unit) { v -> applyVideoOutputNow(v) }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** Called once per video (from the poll loop) as soon as the picture size is known. */
+    private fun onVideoReadyForOutputOptions() {
+        val path = currentFilePath ?: return
+        if (outputReadyForPath == path) return
+        outputReadyForPath = path
+        scheduleVideoOutputApply(0L)
+        scheduleVideoOutputApply(1500L) // the first frame's "interlaced" flag is only there a moment later
+        scheduleFrameRateMatch()
+        if (optPassthrough) schedulePassthroughWatchdog()
+    }
+
+    private fun applyVideoOutputNow(v: VideoPlayerMpvView) {
+        if (isReleased) return
+        // 1) HDR / Dolby Vision tone-mapping (a render option only: no decoder or filter change)
+        try {
+            if (origToneMapping == null) origToneMapping = v.mpv.getPropertyString("tone-mapping")
+            val orig = origToneMapping
+            if (orig == null) {
+                _toneMappingControl.value = false
+            } else {
+                _toneMappingControl.value = true
+                val wanted = when (optToneMapping) {
+                    "OFF" -> "clip"
+                    "BT2390" -> "bt.2390"
+                    "MOBIUS" -> "mobius"
+                    "HABLE" -> "hable"
+                    // Auto: an HDR screen gets the picture untouched (mpv's own default); an SDR screen gets tone-mapping so it is not dull / dark
+                    else -> if (optDisplayHdr) orig else "bt.2390"
+                }
+                if (!mpvSetVerified(v, "tone-mapping", wanted) && optToneMapping == "AUTO" && !optDisplayHdr) {
+                    mpvSetVerified(v, "tone-mapping", "mobius")
+                }
+            }
+        } catch (_: Throwable) {
+            _toneMappingControl.value = false
+        }
+
+        // 2) Smooth motion (interpolation + display-resample), only for light videos on capable phones
+        try {
+            val path = currentFilePath
+            val w = v.mpv.getPropertyInt("video-params/w") ?: 0
+            val h = v.mpv.getPropertyInt("video-params/h") ?: 0
+            val fps = v.mpv.getPropertyDouble("container-fps") ?: v.mpv.getPropertyDouble("estimated-vf-fps") ?: 0.0
+            val videoKnown = w > 0 && h > 0
+            val light = videoKnown && w <= 1920 && h <= 1088 && fps <= 35.0
+            val allow = optSmoothMotion && !optWeakDevice && light && smoothTrippedForPath != path
+            if (allow) {
+                if (!interpolationOn) {
+                    origVideoSync = v.mpv.getPropertyString("video-sync") ?: "audio"
+                    mpvSetVerified(v, "video-sync", "display-resample")
+                    mpvSetVerified(v, "interpolation", "yes")
+                    interpolationOn = true
+                    _smoothMotionActive.value = true
+                    startSmoothMotionMonitor()
+                }
+            } else if (interpolationOn && (videoKnown || !optSmoothMotion)) {
+                stopSmoothMotion(v)
+            }
+        } catch (_: Throwable) {}
+
+        // 3) Deinterlace
+        try {
+            var cur = v.mpv.getPropertyString("deinterlace") ?: "no"
+            if (optDeinterlace == "AUTO" && appliedDeinterlaceMode != "AUTO" && cur == "yes") {
+                v.mpv.setPropertyString("deinterlace", "no")
+                cur = "no"
+            }
+            appliedDeinterlaceMode = optDeinterlace
+            when (optDeinterlace) {
+                "ON" -> {
+                    deinterlaceAutoOn = false
+                    if (cur != "yes") v.mpv.setPropertyString("deinterlace", "yes")
+                }
+                "OFF" -> {
+                    deinterlaceAutoOn = false
+                    if (cur != "no") v.mpv.setPropertyString("deinterlace", "no")
+                }
+                else -> {
+                    // Auto: only an interlaced picture (old TV recordings) gets deinterlaced; everything else is untouched
+                    val interlaced = try { v.mpv.getPropertyBoolean("video-frame-info/interlaced") } catch (_: Throwable) { null }
+                    if (interlaced == true && cur != "yes") {
+                        v.mpv.setPropertyString("deinterlace", "yes")
+                        deinterlaceAutoOn = true
+                    } else if (interlaced == false && deinterlaceAutoOn && cur == "yes") {
+                        v.mpv.setPropertyString("deinterlace", "no")
+                        deinterlaceAutoOn = false
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun stopSmoothMotion(v: VideoPlayerMpvView) {
+        smoothMonitorJob?.cancel()
+        smoothMonitorJob = null
+        mpvSetVerified(v, "interpolation", "no")
+        mpvSetVerified(v, "video-sync", origVideoSync ?: "audio")
+        interpolationOn = false
+        _smoothMotionActive.value = false
+    }
+
+    /** Smooth motion turns itself off for this video when frames keep dropping (phone too slow for it). */
+    private fun startSmoothMotionMonitor() {
+        smoothMonitorJob?.cancel()
+        smoothMonitorJob = playerScope.launch(Dispatchers.Default) {
+            var last = -1
+            var bad = 0
+            while (!isReleased) {
+                delay(2000L)
+                var trip = false
+                withMpvLock(Unit) { v ->
+                    try {
+                        if (v.mpv.getPropertyBoolean("pause") == true) {
+                            last = -1
+                        } else {
+                            val drops = (v.mpv.getPropertyInt("frame-drop-count") ?: 0) + (v.mpv.getPropertyInt("decoder-frame-drop-count") ?: 0)
+                            if (last >= 0 && drops - last >= 8) bad++ else if (bad > 0) bad--
+                            last = drops
+                            if (bad >= 3) trip = true
+                        }
+                    } catch (_: Throwable) {}
+                }
+                if (trip) {
+                    smoothTrippedForPath = currentFilePath
+                    withMpvLock(Unit) { v -> try { stopSmoothMotion(v) } catch (_: Throwable) {} }
+                    break
+                }
+            }
+        }
+    }
+
+    /**
+     * Auto frame rate: asks the display to run at (a multiple of) the video's frame rate. [suspended] is true in Picture-in-Picture
+     * and in the mini player, where the refresh rate goes back to normal. Android 11+ uses Surface.setFrameRate with "only if
+     * seamless" (no blink); older Android uses a same-resolution display mode through the activity window.
+     */
+    fun setAutoFrameRate(enabled: Boolean, suspended: Boolean, activity: android.app.Activity?) {
+        optAutoFrameRate = enabled
+        optFrameRateSuspended = suspended
+        if (activity != null) frameRateActivity = java.lang.ref.WeakReference(activity)
+        scheduleFrameRateMatch()
+    }
+
+    private fun scheduleFrameRateMatch() {
+        if (isReleased) return
+        playerScope.launch(Dispatchers.Default) {
+            try {
+                var fps = 0.0
+                withMpvLock(Unit) { v ->
+                    fps = v.mpv.getPropertyDouble("container-fps") ?: v.mpv.getPropertyDouble("estimated-vf-fps") ?: 0.0
+                }
+                val target = if (optAutoFrameRate && !optFrameRateSuspended && fps in 10.0..120.0) fps.toFloat() else 0f
+                applyFrameRateHint(target)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    /** Puts the refresh rate back to normal right now (no mpv call, safe on the UI thread). Used when the player closes. */
+    fun resetFrameRateHint() {
+        optAutoFrameRate = false
+        try { applyFrameRateHint(0f) } catch (_: Throwable) {}
+    }
+
+    private fun applyFrameRateHint(rate: Float) {
+        if (kotlin.math.abs(rate - frameRateApplied) < 0.01f) return
+        val view = mpvView ?: return
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            val surface = try { view.output?.surface ?: view.holder.surface } catch (_: Throwable) { null }
+            if (surface == null || !surface.isValid) return
+            try {
+                val compat = if (rate > 0f) android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE else android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    surface.setFrameRate(rate, compat, android.view.Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+                } else {
+                    surface.setFrameRate(rate, compat)
+                }
+                frameRateApplied = rate
+            } catch (_: Throwable) {}
+        } else {
+            val act = frameRateActivity?.get() ?: return
+            val modeId = if (rate <= 0f) 0 else pickLegacyDisplayModeId(act, rate)
+            if (rate > 0f && modeId == 0) return
+            frameRateApplied = rate
+            act.runOnUiThread {
+                try {
+                    val lp = act.window.attributes
+                    if (lp.preferredDisplayModeId != modeId) {
+                        lp.preferredDisplayModeId = modeId
+                        act.window.attributes = lp
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    /** Android 8-10: the display mode (same resolution) whose refresh rate is the lowest exact multiple of [fps]; 0 = none. */
+    private fun pickLegacyDisplayModeId(act: android.app.Activity, fps: Float): Int {
+        return try {
+            @Suppress("DEPRECATION")
+            val d = act.windowManager.defaultDisplay
+            val cur = d.mode
+            var best = 0
+            var bestScore = Float.MAX_VALUE
+            for (m in d.supportedModes) {
+                if (m.physicalWidth != cur.physicalWidth || m.physicalHeight != cur.physicalHeight) continue
+                val mult = m.refreshRate / fps
+                val n = kotlin.math.round(mult)
+                if (n < 1f) continue
+                val err = kotlin.math.abs(mult - n)
+                val score = err * 100f + n
+                if (err < 0.03f && score < bestScore) {
+                    bestScore = score
+                    best = m.modeId
+                }
+            }
+            best
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
+    /**
+     * Audio passthrough (AC3 / EAC3 / DTS / TrueHD). [formats] is mpv's audio-spdif list that the output really supports; empty = off.
+     * The change runs as a seamless change (short volume fade), equalizer / volume boost filters are removed while it is on, and if the
+     * sound output fails afterwards the player returns to normal decoding by itself (see passthroughFailedEvents).
+     */
+    fun setAudioPassthrough(enabled: Boolean, formats: String) {
+        val want = enabled && formats.isNotBlank()
+        if (want == optPassthrough && (!want || formats == optPassthroughFormats)) return
+        optPassthrough = want
+        optPassthroughFormats = if (want) formats else ""
+        updateAudioFilters(immediate = true)
+        runSeamlessChange("audio-spdif") { applyAudioPassthroughNow() }
+        schedulePassthroughWatchdog()
+    }
+
+    private fun applyAudioPassthroughNow() {
+        val v = mpvView ?: return
+        val target = if (optPassthrough) optPassthroughFormats else ""
+        try {
+            if ((v.mpv.getPropertyString("audio-spdif") ?: "") != target) v.mpv.setPropertyString("audio-spdif", target)
+        } catch (_: Throwable) {}
+    }
+
+    private fun schedulePassthroughWatchdog() {
+        passthroughWatchJob?.cancel()
+        if (!optPassthrough) {
+            _passthroughActive.value = false
+            return
+        }
+        passthroughWatchJob = playerScope.launch(Dispatchers.Default) {
+            delay(3000L)
+            var failed = false
+            withMpvLock(Unit) { v ->
+                try {
+                    _passthroughActive.value = (v.mpv.getPropertyString("audio-params/format") ?: "").startsWith("spdif")
+                    val paused = v.mpv.getPropertyBoolean("pause") ?: true
+                    val aid = v.mpv.getPropertyString("aid") ?: "no"
+                    // sound is expected (a track is selected, the video plays) but no audio output exists: passthrough failed
+                    if (!paused && aid != "no" && v.mpv.getPropertyString("current-ao") == null) failed = true
+                } catch (_: Throwable) {}
+            }
+            if (failed) {
+                optPassthrough = false
+                optPassthroughFormats = ""
+                _passthroughActive.value = false
+                updateAudioFilters(immediate = true)
+                runSeamlessChange("audio-spdif") { applyAudioPassthroughNow() }
+                _passthroughFailedEvents.value = _passthroughFailedEvents.value + 1
+            }
+        }
+    }
+
+    /** The video starts with the passthrough option already in place (no audio output restart after it has begun). */
+    private fun applyPassthroughBeforeLoad(view: VideoPlayerMpvView) {
+        try {
+            val target = if (optPassthrough) optPassthroughFormats else ""
+            if ((view.mpv.getPropertyString("audio-spdif") ?: "") != target) view.mpv.setPropertyString("audio-spdif", target)
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * Cast: while the TV plays the video, the phone keeps the same video running muted as the clock, so the seek bar, play / pause
+     * and seeking of the normal player keep working. Turning it off gives the phone its sound back.
+     */
+    fun setCastMirrorMuted(muted: Boolean) {
+        if (isReleased) return
+        playerScope.launch(Dispatchers.Default) {
+            try {
+                withMpvLock(Unit) { v -> try { v.mpv.setPropertyBoolean("mute", muted) } catch (_: Throwable) {} }
+            } catch (_: Throwable) {}
+        }
+    }
+
     fun setHwAccelMode(mode: HwAccelMode) {
         currentHwMode = mode
         val view = mpvView ?: return
@@ -2195,6 +2559,7 @@ class MpvPlayerController {
                         if (vw > 0 && vh > 0) {
                             if (_videoWidth.value != vw) _videoWidth.value = vw
                             if (_videoHeight.value != vh) _videoHeight.value = vh
+                            onVideoReadyForOutputOptions()
                         }
 
                         // Performance Monitor (twice per second is plenty): dropped frames & hardware acceleration status
@@ -2440,6 +2805,7 @@ class MpvPlayerController {
             streamHost = if (directStreamMode) try { android.net.Uri.parse(filePath).host?.lowercase() } catch (_: Throwable) { null } else null
             bypassProxyOption = if (proxyCandidate != null && streamHost?.let { streamHostUsesProxy[it] } == true) proxyCandidate else null
             smartOnNewFile(view)
+            applyPassthroughBeforeLoad(view)
             applyStreamingProfile(view, onlineStreamMode)
             applyStreamRequestOptions(view, filePath)
             try { view.mpv.setPropertyString("hls-bitrate", if (directStreamMode) hlsBitrate else if (webLinkMode) "no" else "max") } catch (_: Throwable) {}
@@ -2625,6 +2991,7 @@ class MpvPlayerController {
 
     fun play() {
         _isPlaying.value = true
+        com.example.ui.screens.DlnaCast.onLocalPlayPause(true)
         try {
             mpvView?.mpv?.setPropertyBoolean("pause", false)
         } catch (t: Throwable) {
@@ -2634,6 +3001,7 @@ class MpvPlayerController {
 
     fun pause() {
         _isPlaying.value = false
+        com.example.ui.screens.DlnaCast.onLocalPlayPause(false)
         try {
             mpvView?.mpv?.setPropertyBoolean("pause", true)
         } catch (t: Throwable) {
@@ -2647,6 +3015,7 @@ class MpvPlayerController {
 
     fun seekTo(timeMs: Long) {
         val target = liveAdjustedSeek(timeMs) ?: return
+        com.example.ui.screens.DlnaCast.onLocalSeek(target)
         seekToInternal(target)
     }
 
@@ -2861,7 +3230,8 @@ class MpvPlayerController {
                 filterList.add("lavfi=[alimiter=limit=0.98:attack=5:release=50:asc=false]")
             }
 
-            val afString = filterList.joinToString(",")
+            // Passthrough sends the raw stream to the receiver: any audio filter would force decoding, so none is used while it is on
+            val afString = if (optPassthrough) "" else filterList.joinToString(",")
             if (afString == lastAppliedAudioFilters) {
                 return
             }

@@ -963,12 +963,16 @@ fun VideoSettingSelectionPanel(
     isLandscape: Boolean,
     glassBlurTransparency: Float = 85f,
     onOpenManualAdjustments: () -> Unit,
+    playerSettings: com.example.ui.state.PlayerSettings = com.example.ui.state.PlayerSettings(),
+    onPlayerSettingsChange: (com.example.ui.state.PlayerSettings) -> Unit = {},
+    toneMappingControlAvailable: Boolean = false,
+    smoothMotionActive: Boolean = false,
     onDismissRequest: () -> Unit
 ) {
     PlayerGlassModalSheet(
         panelKey = "video_setting_filter",
         isLandscape = isLandscape,
-        heightFraction = 0.56f,
+        heightFraction = 0.7f,
         glassBlurTransparency = glassBlurTransparency,
         onDismissRequest = onDismissRequest,
         headerStartContent = {
@@ -1075,7 +1079,127 @@ fun VideoSettingSelectionPanel(
                     }
                 }
             }
+            VideoOutputOptionsSection(
+                settings = playerSettings,
+                onChange = onPlayerSettingsChange,
+                toneMappingControlAvailable = toneMappingControlAvailable,
+                smoothMotionActive = smoothMotionActive
+            )
         }
+    }
+}
+
+/** One row of option chips (same chip look as the filter presets). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun OutputOptionChips(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        options.forEach { (value, label) ->
+            val isSelected = value == selected
+            Box(
+                modifier = Modifier
+                    .height(36.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (isSelected) AccentGradient else SolidColor(SheetButtonBgColor))
+                    .border(1.dp, if (isSelected) Color(0x40FFFFFF) else SheetButtonBorderColor, RoundedCornerShape(12.dp))
+                    .cardBounceClick(scaleDown = 0.93f) { onSelect(value) }
+                    .padding(horizontal = 14.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = label,
+                    fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                    color = if (isSelected) Color.White else SheetButtonTextColor,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OutputSwitchRow(title: String, note: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(SheetButtonBgColor)
+            .border(1.dp, SheetButtonBorderColor, RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled) { onChange(!checked) }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).graphicsLayer { alpha = if (enabled) 1f else 0.5f }) {
+            Text(text = title, color = SheetButtonTextColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = note, color = Neutral.S475569, fontSize = 12.sp)
+        }
+        ViauraSwitch(
+            checked = checked && enabled,
+            onCheckedChange = { if (enabled) onChange(it) },
+            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = ActiveHighlightColor)
+        )
+    }
+}
+
+/**
+ * Player > Video setting: HDR tone-mapping, auto frame rate, deinterlace and smooth motion. Each option is shown only when the
+ * phone supports it (HDR info + mpv control, several refresh rates); everything defaults to Auto / Off.
+ */
+@Composable
+private fun VideoOutputOptionsSection(
+    settings: com.example.ui.state.PlayerSettings,
+    onChange: (com.example.ui.state.PlayerSettings) -> Unit,
+    toneMappingControlAvailable: Boolean,
+    smoothMotionActive: Boolean
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val caps = remember { detectVideoOutputCapabilities(context) }
+    val weakPhone = remember { isWeakDeviceForSmoothMotion(context) }
+    val showHdr = caps.hdrInfoAvailable && toneMappingControlAvailable
+
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (showHdr) {
+            Text(text = "HDR / Dolby Vision tone-mapping", color = NormalItemColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(
+                text = if (caps.displayHdr) "Auto plays HDR as it is on this HDR screen." else "Auto tone-maps HDR so it is not dull or dark on this screen.",
+                color = Neutral.S475569, fontSize = 12.sp
+            )
+            OutputOptionChips(
+                options = listOf("AUTO" to "Auto", "OFF" to "Off", "BT2390" to "bt.2390", "MOBIUS" to "mobius", "HABLE" to "hable"),
+                selected = settings.hdrToneMapping,
+                onSelect = { onChange(settings.copy(hdrToneMapping = it)) }
+            )
+        }
+        if (caps.multipleRefreshRates) {
+            OutputSwitchRow(
+                title = "Auto frame rate",
+                note = "Matches the screen refresh rate to the video (24 / 25 / 30 / 60 fps) to reduce judder",
+                checked = settings.autoFrameRate,
+                enabled = true,
+                onChange = { onChange(settings.copy(autoFrameRate = it)) }
+            )
+        }
+        Text(text = "Deinterlace", color = NormalItemColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        OutputOptionChips(
+            options = listOf("AUTO" to "Auto", "ON" to "On", "OFF" to "Off"),
+            selected = settings.deinterlaceMode,
+            onSelect = { onChange(settings.copy(deinterlaceMode = it)) }
+        )
+        OutputSwitchRow(
+            title = "Smooth motion",
+            note = if (weakPhone) "Not available on this phone"
+            else if (settings.smoothMotion && !smoothMotionActive) "Uses more battery and GPU. Off for this video (4K / heavy / dropping frames)"
+            else "Uses more battery and GPU. Turns itself off for 4K and heavy videos",
+            checked = settings.smoothMotion,
+            enabled = !weakPhone,
+            onChange = { onChange(settings.copy(smoothMotion = it)) }
+        )
     }
 }
 
@@ -1750,6 +1874,8 @@ fun AudioEqualizerPanel(
     fullScreenPortrait: Boolean = false,
     /** Audio player: same side panel as the video player (portrait + landscape), hosted in its own dialog window. */
     audioPlayerSide: Boolean = false,
+    /** Audio passthrough is on: the equalizer and volume boost cannot work, a short note says so. */
+    passthroughNote: Boolean = false,
     onDismissRequest: () -> Unit
 ) {
     val actualLandscape = androidx.compose.ui.platform.LocalConfiguration.current.orientation ==
@@ -1801,6 +1927,13 @@ fun AudioEqualizerPanel(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            if (passthroughNote) {
+                Text(
+                    text = "Audio passthrough is on: equalizer and volume boost do not work.",
+                    color = Neutral.S475569,
+                    fontSize = 12.sp
+                )
+            }
             // 1. Presets Chip Row (Horizontally Scrollable Pill Chips)
             Row(
                 modifier = Modifier

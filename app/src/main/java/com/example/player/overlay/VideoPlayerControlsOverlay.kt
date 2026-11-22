@@ -81,6 +81,9 @@ import com.example.ui.state.GestureSensitivityMode
 import com.example.ui.state.PlayerControlId
 import com.example.ui.state.PlayerLayoutConfig
 import com.example.ui.state.PlayerSettings
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.focus.focusRequester
 import com.example.ui.theme.isAppInDarkTheme
 import com.example.ui.theme.LocalAppFontFamily
 import androidx.compose.foundation.Canvas
@@ -484,6 +487,13 @@ fun VideoPlayerOverlay(
     playerSettings: com.example.ui.state.PlayerSettings = com.example.ui.state.PlayerSettings(),
     subtitleSettings: com.example.ui.state.PlayerSettings = playerSettings,
     onSubtitleSettingsChange: (com.example.ui.state.PlayerSettings) -> Unit = {},
+    // Cast (DLNA): the media to send to a TV, and what to do once the TV took over
+    castMediaPath: String? = null,
+    onCastStarted: () -> Unit = {},
+    // Video settings: HDR tone-mapping / auto frame rate / deinterlace / smooth motion (saved + applied by the player screen)
+    onVideoOutputSettingsChange: (com.example.ui.state.PlayerSettings) -> Unit = {},
+    toneMappingControlAvailable: Boolean = false,
+    smoothMotionActive: Boolean = false,
     onLoadAdvancedAssSource: (suspend (Int) -> com.example.player.AdvancedAssSource?)? = null,
     onLoadRawSubtitleSource: (suspend (Int) -> com.example.player.RawSubtitleSource?)? = null,
     onRawSubtitlePreview: (String?, String?) -> Unit = { _, _ -> },
@@ -508,6 +518,7 @@ fun VideoPlayerOverlay(
 
         // Auto-hide controls timer
         var areControlsVisible by remember { mutableStateOf(true) }
+        var showCastSheet by remember { mutableStateOf(false) }
         var lastInteractionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
         // Liquid Glass: keep the blurred video copy fresh only while the controls are on screen
@@ -800,8 +811,42 @@ fun VideoPlayerOverlay(
     val updatedHandlePlayPauseToggle by rememberUpdatedState(handlePlayPauseToggle)
     val updatedNotifyAction by rememberUpdatedState(notifyAction)
 
+    // Android TV / D-pad (only on a TV; phones are not affected). While the controls are hidden: OK = play / pause,
+    // left / right = seek, up / down = show the controls. While they are shown (or a panel is open) the D-pad moves the
+    // focus between the buttons as usual and Back works as before.
+    val isTvDevice = remember { com.example.ui.components.isTelevisionDevice(context) }
+    val tvRootFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(isTvDevice, areControlsVisible, anyDialogOpen) {
+        if (isTvDevice && !areControlsVisible && !anyDialogOpen) {
+            try { tvRootFocus.requestFocus() } catch (_: Throwable) {}
+        }
+    }
+    val tvKeyModifier = if (!isTvDevice) Modifier else Modifier
+        .focusRequester(tvRootFocus)
+        .onPreviewKeyEvent { ev ->
+            if (ev.type != androidx.compose.ui.input.key.KeyEventType.KeyDown || areControlsVisible || anyDialogOpen) return@onPreviewKeyEvent false
+            when (ev.key) {
+                androidx.compose.ui.input.key.Key.DirectionCenter, androidx.compose.ui.input.key.Key.Enter,
+                androidx.compose.ui.input.key.Key.NumPadEnter, androidx.compose.ui.input.key.Key.MediaPlayPause -> {
+                    handlePlayPauseToggle(); true
+                }
+                androidx.compose.ui.input.key.Key.DirectionLeft -> {
+                    notifyInteraction(); onSeekTo((currentPositionMs - 10_000L).coerceAtLeast(0L)); true
+                }
+                androidx.compose.ui.input.key.Key.DirectionRight -> {
+                    val end = if (durationMs > 0L) durationMs else Long.MAX_VALUE
+                    notifyInteraction(); onSeekTo((currentPositionMs + 10_000L).coerceAtMost(end)); true
+                }
+                androidx.compose.ui.input.key.Key.DirectionUp, androidx.compose.ui.input.key.Key.DirectionDown -> {
+                    areControlsVisible = true; notifyInteraction(); true
+                }
+                else -> false
+            }
+        }
+        .focusable()
+
     Box(
-        modifier = modifier.fillMaxSize()
+        modifier = modifier.fillMaxSize().then(tvKeyModifier)
     ) {
             // -------------------------------------------------------------
             // DEDICATED BACKGROUND GESTURE SURFACE
@@ -1777,7 +1822,9 @@ fun VideoPlayerOverlay(
                         contentDescription = "Cast",
                         onClick = {
                             notifyInteraction()
-                            openSystemCastPicker(context) { msg -> notifyAction(msg) }
+                            // No Wi-Fi: the old system screen mirroring opens straight away; otherwise TVs are searched first
+                            if (DlnaCast.hasWifi(context)) showCastSheet = true
+                            else openSystemCastPicker(context) { msg -> notifyAction(msg) }
                         }
                     )
                 }
@@ -2816,6 +2863,18 @@ fun VideoPlayerOverlay(
         // =============================================================
         // GLASSMORPHIC SELECTION PANELS & SHEETS (STRICT HIERARCHY / CLEAN LAYERING)
         // =============================================================
+        if (showCastSheet) {
+            CastDeviceSheet(
+                mediaPath = castMediaPath,
+                mediaTitle = videoTitle,
+                positionProvider = { currentPositionMs },
+                isLandscape = isLandscape,
+                glassBlurTransparency = glassBlurTransparency,
+                onCastStarted = onCastStarted,
+                onSystemMirroring = { openSystemCastPicker(context) { msg -> notifyAction(msg) } },
+                onDismiss = { showCastSheet = false }
+            )
+        }
         CompositionLocalProvider(com.example.ui.components.LocalForcePanelDialog provides inChannelCard) {
         when (activePanel) {
             PlayerPanelType.SUBTITLE_TRACK -> {
@@ -2934,6 +2993,7 @@ fun VideoPlayerOverlay(
             PlayerPanelType.EQUALIZER -> {
                 AudioEqualizerPanel(
                     isLandscape = isLandscape,
+                    passthroughNote = playerSettings.audioPassthrough,
                     glassBlurTransparency = glassBlurTransparency,
                     equalizerEnabled = equalizerEnabled,
                     onToggleEqualizer = onToggleEqualizer,
@@ -3057,6 +3117,10 @@ fun VideoPlayerOverlay(
                     onOpenManualAdjustments = {
                         openPanel(PlayerPanelType.MANUAL_VIDEO_ADJUSTMENT)
                     },
+                    playerSettings = playerSettings,
+                    onPlayerSettingsChange = onVideoOutputSettingsChange,
+                    toneMappingControlAvailable = toneMappingControlAvailable,
+                    smoothMotionActive = smoothMotionActive,
                     onDismissRequest = { dismissCurrentPanel() }
                 )
             }
