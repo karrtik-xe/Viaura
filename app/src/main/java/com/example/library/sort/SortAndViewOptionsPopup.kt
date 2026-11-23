@@ -392,31 +392,33 @@ fun SortAndViewOptionsPopup(
                         thickness = 1.dp
                     )
 
-                    // 3. SECTION: LAYOUT
+                    // 3. SECTION: LAYOUT (Online audio has its own home / list: no List / Grid choice there)
+                    if (!isOnlineAudioFolder) {
                     Text(
-                        text = "Layout",
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = primaryText
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    LayoutPillToggle(
-                        selectedLayout = layoutMode,
-                        accentBlue = accentBlue,
-                        activeBg = activeTintBg,
-                        borderColor = pillBorderColor,
-                        primaryText = primaryText,
-                        onSelectLayout = onLayoutModeChange,
-                        showYoutube = isOnlineVideoFolder
-                    )
-
-                    HorizontalDivider(
-                        modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
-                        color = dividerColor,
-                        thickness = 1.dp
-                    )
+                            text = "Layout",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = primaryText
+                        )
+    
+                        Spacer(modifier = Modifier.height(10.dp))
+    
+                        LayoutPillToggle(
+                            selectedLayout = layoutMode,
+                            accentBlue = accentBlue,
+                            activeBg = activeTintBg,
+                            borderColor = pillBorderColor,
+                            primaryText = primaryText,
+                            onSelectLayout = onLayoutModeChange,
+                            showYoutube = isOnlineVideoFolder
+                        )
+    
+                        HorizontalDivider(
+                            modifier = Modifier.padding(top = 12.dp, bottom = 12.dp),
+                            color = dividerColor,
+                            thickness = 1.dp
+                        )
+                    }
 
                     // 4. SECTION: FIELDS (Expandable)
                     Row(

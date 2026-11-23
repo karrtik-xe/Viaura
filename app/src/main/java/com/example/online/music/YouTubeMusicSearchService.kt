@@ -788,6 +788,36 @@ object OnlineMusicService {
         }
     }
 
+    /**
+     * YouTube Music playlists ([albums] = false) or albums / EPs ([albums] = true) for a text, for the online music home.
+     * Returns an empty list when nothing is found or the network fails.
+     */
+    suspend fun searchHomePlaylists(query: String, albums: Boolean, limit: Int = 10): List<OnlineHomePlaylist> = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val service = ServiceList.YouTube
+            val filter = if (albums) "music_albums" else "music_playlists"
+            val handler = service.searchQHFactory.fromQuery(query, listOf(filter), "")
+            val extractor = service.getSearchExtractor(handler)
+            extractor.fetchPage()
+            extractor.initialPage.items.filterIsInstance<PlaylistInfoItem>().take(limit).mapNotNull { p ->
+                val name = p.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                OnlineHomePlaylist(
+                    url = p.url,
+                    name = name,
+                    thumbnailUrl = extractBestThumbnailUrl(p.thumbnails, null),
+                    owner = (p.uploaderName ?: "").cleanUploaderName(),
+                    songCount = p.streamCount.coerceAtLeast(0L),
+                    isAlbum = albums
+                )
+            }
+        } catch (t: CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
     suspend fun fetchPlaylistTracks(playlistUrl: String): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
         try {
             ensureInit()
@@ -1133,6 +1163,15 @@ object OnlineMusicService {
 /**
  * Representation of an external shared playlist (YouTube Music, Spotify, YouTube).
  */
+data class OnlineHomePlaylist(
+    val url: String,
+    val name: String,
+    val thumbnailUrl: String?,
+    val owner: String,
+    val songCount: Long,
+    val isAlbum: Boolean
+)
+
 data class OnlinePlaylistDetail(
     val playlistUrl: String,
     val title: String,

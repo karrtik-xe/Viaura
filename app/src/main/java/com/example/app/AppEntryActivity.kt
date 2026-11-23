@@ -824,6 +824,7 @@ class MainActivity : ComponentActivity() {
                 val pl = com.example.util.OnlineMusicService.fetchPlaylistDetails(extractedUrl)
                 withContext(Dispatchers.Main) {
                     if (pl != null && pl.tracks.isNotEmpty()) {
+                        com.example.ui.components.OnlineMusicHomeStats.recordPlaylist(applicationContext, pl)
                         viewModel.openSharedPlaylist(pl)
                     } else {
                         android.widget.Toast.makeText(applicationContext, "Could not load playlist from link", android.widget.Toast.LENGTH_LONG).show()
