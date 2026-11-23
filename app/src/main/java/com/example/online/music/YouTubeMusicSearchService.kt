@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request as OkRequest
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.ServiceList
@@ -818,6 +819,140 @@ object OnlineMusicService {
         }
     }
 
+    // ------------------------------------------------------------------------------------------------------------
+    // Channel "Posts" (community posts). The extractor library has no posts tab, so they are read from YouTube's own
+    // browse request. Any failure just means "no posts" - it never affects the rest of the channel page.
+    // ------------------------------------------------------------------------------------------------------------
+    private val channelIdCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun resolveChannelId(channelUrl: String): String? {
+        Regex("/channel/(UC[\\w-]{20,})").find(channelUrl)?.let { return it.groupValues[1] }
+        channelIdCache[channelUrl]?.let { return it }
+        return try {
+            ensureInit()
+            val ex = ServiceList.YouTube.getChannelExtractor(channelUrl)
+            ex.fetchPage()
+            ex.id?.also { channelIdCache[channelUrl] = it }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun innertubeBrowse(body: JSONObject): JSONObject? {
+        return try {
+            val client = JSONObject().put("clientName", "WEB").put("clientVersion", "2.20250101.01.00").put("hl", "en").put("gl", "US")
+            body.put("context", JSONObject().put("client", client))
+            val req = OkRequest.Builder()
+                .url("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .header("Origin", "https://www.youtube.com")
+                .header("X-YouTube-Client-Name", "1")
+                .header("X-YouTube-Client-Version", "2.20250101.01.00")
+                .header("Cookie", "SOCS=CAI")
+                .post(body.toString().toRequestBody("application/json".toMediaTypeOrNull()))
+                .build()
+            httpClient.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) null else JSONObject(r.body?.string() ?: return@use null)
+            }
+        } catch (t: CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun collectKey(node: Any?, key: String, out: MutableList<JSONObject>) {
+        when (node) {
+            is JSONObject -> {
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = node.opt(k)
+                    if (k == key && v is JSONObject) out.add(v) else collectKey(v, key, out)
+                }
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectKey(node.opt(i), key, out)
+        }
+    }
+
+    private fun runsText(o: JSONObject?): String {
+        if (o == null) return ""
+        o.optString("simpleText").takeIf { it.isNotBlank() }?.let { return it }
+        val runs = o.optJSONArray("runs") ?: return ""
+        return (0 until runs.length()).joinToString("") { runs.optJSONObject(it)?.optString("text").orEmpty() }
+    }
+
+    private fun lastThumbUrl(o: JSONObject?): String? {
+        val arr = o?.optJSONArray("thumbnails") ?: return null
+        return if (arr.length() == 0) null else arr.optJSONObject(arr.length() - 1)?.optString("url")?.takeIf { it.isNotBlank() }
+    }
+
+    private fun parsePost(r: JSONObject): OnlineChannelPost? {
+        val id = r.optString("postId").ifBlank { return null }
+        var text = runsText(r.optJSONObject("contentText"))
+        var image: String? = null
+        var videoId: String? = null
+        var videoTitle: String? = null
+        var videoThumb: String? = null
+        val att = r.optJSONObject("backstageAttachment")
+        if (att != null) {
+            image = lastThumbUrl(att.optJSONObject("backstageImageRenderer")?.optJSONObject("image"))
+            att.optJSONObject("postMultiImageRenderer")?.optJSONArray("images")?.optJSONObject(0)
+                ?.optJSONObject("backstageImageRenderer")?.optJSONObject("image")?.let { image = image ?: lastThumbUrl(it) }
+            att.optJSONObject("videoRenderer")?.let { v ->
+                videoId = v.optString("videoId").takeIf { it.isNotBlank() }
+                videoTitle = runsText(v.optJSONObject("title"))
+                videoThumb = lastThumbUrl(v.optJSONObject("thumbnail"))
+            }
+            att.optJSONObject("pollRenderer")?.optJSONArray("choices")?.let { ch ->
+                val lines = (0 until ch.length()).map { runsText(ch.optJSONObject(it)?.optJSONObject("text")) }.filter { it.isNotBlank() }
+                if (lines.isNotEmpty()) text = text + "\n" + lines.joinToString("\n") { "\u2022 $it" }
+            }
+        }
+        if (text.isBlank() && image == null && videoId == null) return null
+        return OnlineChannelPost(
+            id = id,
+            text = text.trim(),
+            dateText = runsText(r.optJSONObject("publishedTimeText")),
+            likesText = r.optJSONObject("voteCount")?.let { runsText(it) }.orEmpty().ifBlank { r.optString("voteCount") },
+            imageUrl = image,
+            videoUrl = videoId?.let { canonicalWatchUrl(it) },
+            videoTitle = videoTitle,
+            videoThumbnailUrl = videoThumb
+        )
+    }
+
+    private fun parsePostPage(root: JSONObject): OnlineChannelPostPage {
+        val renderers = mutableListOf<JSONObject>()
+        collectKey(root, "backstagePostRenderer", renderers)
+        val posts = renderers.mapNotNull { try { parsePost(it) } catch (_: Throwable) { null } }
+        val cmds = mutableListOf<JSONObject>()
+        collectKey(root, "continuationCommand", cmds)
+        val token = cmds.lastOrNull()?.optString("token")?.takeIf { it.isNotBlank() }
+        return OnlineChannelPostPage(posts.distinctBy { it.id }, token)
+    }
+
+    /** One page of a channel's posts. Pass the page's [continuation] to get the next one (null = first page). */
+    suspend fun fetchChannelPosts(channelUrl: String, continuation: String? = null): OnlineChannelPostPage = withContext(Dispatchers.IO) {
+        try {
+            if (continuation != null) {
+                val root = innertubeBrowse(JSONObject().put("continuation", continuation)) ?: return@withContext OnlineChannelPostPage(emptyList(), null)
+                return@withContext parsePostPage(root)
+            }
+            val id = resolveChannelId(channelUrl) ?: return@withContext OnlineChannelPostPage(emptyList(), null)
+            for (params in listOf("EgVwb3N0c_IGBAoCSgA=", "Egpjb21tdW5pdHnyBgQKAkoA")) {
+                val root = innertubeBrowse(JSONObject().put("browseId", id).put("params", params)) ?: continue
+                val page = parsePostPage(root)
+                if (page.posts.isNotEmpty()) return@withContext page
+            }
+            OnlineChannelPostPage(emptyList(), null)
+        } catch (t: CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            OnlineChannelPostPage(emptyList(), null)
+        }
+    }
+
     suspend fun fetchPlaylistTracks(playlistUrl: String): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
         try {
             ensureInit()
@@ -1163,6 +1298,19 @@ object OnlineMusicService {
 /**
  * Representation of an external shared playlist (YouTube Music, Spotify, YouTube).
  */
+data class OnlineChannelPost(
+    val id: String,
+    val text: String,
+    val dateText: String,
+    val likesText: String,
+    val imageUrl: String?,
+    val videoUrl: String?,
+    val videoTitle: String?,
+    val videoThumbnailUrl: String?
+)
+
+data class OnlineChannelPostPage(val posts: List<OnlineChannelPost>, val continuation: String?)
+
 data class OnlineHomePlaylist(
     val url: String,
     val name: String,

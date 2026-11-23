@@ -170,7 +170,10 @@ fun ChannelDetailScreen(
     var searchQuery by remember { mutableStateOf("") }
     var showSortAndViewDialog by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
-    var layoutMode by remember { mutableStateOf(LayoutMode.LIST) }
+    // The channel's videos use the layout chosen for Online videos (List / Grid / Feed); audio channels are always a list
+    var layoutMode by remember {
+        mutableStateOf(if (isAudioMode) LayoutMode.LIST else com.example.ui.state.SettingsPreferencesManager.loadLayoutMode(context, "online_video"))
+    }
     var sortField by remember { mutableStateOf(SortField.DATE) }
     var sortDirection by remember { mutableStateOf(SortDirection.DESCENDING) }
     var visibleFields by remember { mutableStateOf(com.example.ui.state.SettingsPreferencesManager.sanitizeOnlineVideoFields(VisibleFields(showThumbnails = true, showDuration = true, showDate = true, showProgressBar = true))) }
@@ -619,7 +622,11 @@ fun ChannelDetailScreen(
 
                             when (selectedSectionId) {
                                 "posts" -> {
-                                    EmptySectionMessage("Posts are not available for this channel", primaryText)
+                                    ChannelPostsTab(
+                                        channelUrl = channel?.channelUrl,
+                                        isDark = isDark,
+                                        onPlayVideo = onPlayVideo
+                                    )
                                 }
                                 "playlists" -> {
                                     val playlist = expandedPlaylist
@@ -671,6 +678,37 @@ fun ChannelDetailScreen(
                                             else "No tracks found for this channel",
                                             primaryText
                                         )
+                                    } else if (layoutMode == LayoutMode.YOUTUBE && !isAudioMode && onPlayVideo != null) {
+                                        // Feed: full-width YouTube-style cards, same as Online videos
+                                        LazyColumn(
+                                            state = listState,
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentPadding = PaddingValues(top = 4.dp, bottom = 84.dp),
+                                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            items(items = sortedTracks, key = { "channel_track_feed_${it.videoUrl}" }) { track ->
+                                                val vItem = remember(track) { track.toOnlineVideoItem() }
+                                                Box(Modifier.swipeLeftForActions(selected = actionState.contains(track)) { actionTarget = track }) {
+                                                    com.example.ui.components.OnlineYouTubeVideoCard(
+                                                        video = track,
+                                                        isDark = isDark,
+                                                        onClick = {
+                                                            actionTarget = null
+                                                            com.example.util.OnlineVideoRecommender.recordOpened(context, track.videoUrl, track.artist, track.title)
+                                                            onPlayVideo.invoke(vItem, sortedTracks.map { it.toOnlineVideoItem() })
+                                                        },
+                                                        onChannelClick = {}
+                                                    )
+                                                }
+                                            }
+                                            if (isLoadingMore) {
+                                                item {
+                                                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                                                        ViauraExpressiveLoadingIndicator(size = 32.dp, isDark = isDark)
+                                                    }
+                                                }
+                                            }
+                                        }
                                     } else if (layoutMode == LayoutMode.GRID) {
                                         LazyVerticalGrid(
                                             columns = GridCells.Fixed(2),
@@ -808,7 +846,10 @@ fun ChannelDetailScreen(
                         glassBlurTransparency = uiState?.glassBlurTransparency ?: 75f,
                         onSortFieldChange = { sortField = it },
                         onSortDirectionChange = { sortDirection = it },
-                        onLayoutModeChange = { layoutMode = it },
+                        onLayoutModeChange = {
+                            layoutMode = it
+                            if (!isAudioMode) com.example.ui.state.SettingsPreferencesManager.saveLayoutMode(context, it, "online_video")
+                        },
                         onVisibleFieldsChange = { visibleFields = com.example.ui.state.SettingsPreferencesManager.sanitizeOnlineVideoFields(it) },
                         onViewModeChange = {},
                         onDismiss = { showSortAndViewDialog = false }
@@ -1203,6 +1244,127 @@ internal fun ChannelTabsRow(
         }
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(borderColor))
         Spacer(modifier = Modifier.height(6.dp))
+    }
+}
+
+/** The channel's "Posts" tab: every community post (text, picture, attached video, poll), loaded page after page. */
+@Composable
+private fun ChannelPostsTab(
+    channelUrl: String?,
+    isDark: Boolean,
+    onPlayVideo: ((VideoItem, List<VideoItem>) -> Unit)?
+) {
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
+    val borderColor = if (isDark) DarkGlassBorder else LightGlassBorder
+    val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
+    val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
+    var posts by remember(channelUrl) { mutableStateOf<List<com.example.util.OnlineChannelPost>>(emptyList()) }
+    var token by remember(channelUrl) { mutableStateOf<String?>(null) }
+    var loading by remember(channelUrl) { mutableStateOf(true) }
+    var loadedOnce by remember(channelUrl) { mutableStateOf(false) }
+    LaunchedEffect(channelUrl) {
+        loading = true
+        val page = if (channelUrl.isNullOrBlank()) null else OnlineMusicService.fetchChannelPosts(channelUrl, null)
+        posts = page?.posts.orEmpty()
+        token = page?.continuation
+        loading = false
+        loadedOnce = true
+    }
+    val listState = rememberLazyListState()
+    val nearEnd by remember {
+        derivedStateOf {
+            val total = listState.layoutInfo.totalItemsCount
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 0 && last >= total - 3
+        }
+    }
+    // keeps loading the next page while the end of the list is on screen: all posts of the channel end up loaded
+    LaunchedEffect(nearEnd, token, loading) {
+        val t = token
+        val url = channelUrl
+        if (nearEnd && t != null && !loading && !url.isNullOrBlank()) {
+            loading = true
+            val page = OnlineMusicService.fetchChannelPosts(url, t)
+            val known = posts.map { it.id }.toSet()
+            val fresh = page.posts.filter { it.id !in known }
+            posts = posts + fresh
+            token = if (fresh.isEmpty()) null else page.continuation
+            loading = false
+        }
+    }
+    if (loading && posts.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            ViauraExpressiveLoadingIndicator(size = 40.dp, isDark = isDark)
+        }
+        return
+    }
+    if (loadedOnce && posts.isEmpty()) {
+        EmptySectionMessage("Posts are not available for this channel", primaryText)
+        return
+    }
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 84.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        items(items = posts, key = { "channel_post_${it.id}" }) { post ->
+            val shape = RoundedCornerShape(16.dp)
+            Column(
+                modifier = Modifier.fillMaxWidth().clip(shape).background(surfaceColor)
+                    .border(1.dp, borderColor, shape).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val meta = listOf(post.dateText, post.likesText.takeIf { it.isNotBlank() }?.let { "\uD83D\uDC4D $it" }.orEmpty()).filter { it.isNotBlank() }.joinToString("  \u2022  ")
+                if (meta.isNotBlank()) Text(meta, color = secondaryText, fontSize = 12.sp)
+                if (post.text.isNotBlank()) Text(post.text, color = primaryText, fontSize = 15.sp, lineHeight = 21.sp)
+                val img = post.imageUrl
+                if (!img.isNullOrBlank()) {
+                    var bmp by remember(img) { mutableStateOf<Bitmap?>(null) }
+                    LaunchedEffect(img) { bmp = loadRemoteAudioThumbnail(img, targetSizePx = 900) }
+                    val b = bmp
+                    if (b != null) {
+                        Image(
+                            bitmap = b.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxWidth().aspectRatio((b.width.toFloat() / b.height.coerceAtLeast(1)).coerceIn(0.6f, 2.2f)).clip(RoundedCornerShape(12.dp))
+                        )
+                    }
+                }
+                val vUrl = post.videoUrl
+                if (vUrl != null && onPlayVideo != null) {
+                    val track = remember(post.id) {
+                        OnlineTrackResult(videoUrl = vUrl, title = post.videoTitle.orEmpty(), artist = "", durationSec = 0L, thumbnailUrl = post.videoThumbnailUrl)
+                    }
+                    var vthumb by remember(post.id) { mutableStateOf<Bitmap?>(null) }
+                    LaunchedEffect(post.videoThumbnailUrl) {
+                        val u = post.videoThumbnailUrl
+                        if (!u.isNullOrBlank()) vthumb = loadRemoteAudioThumbnail(u, targetSizePx = 500)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            .background(if (isDark) Color(0x22FFFFFF) else Color(0x11000000))
+                            .clickable {
+                                val item = track.toOnlineVideoItem()
+                                onPlayVideo.invoke(item, listOf(item))
+                            }.padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.width(120.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(if (isDark) Neutral.D1E293B else Neutral.E2E8F0)) {
+                            vthumb?.let { Image(bitmap = it.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text(post.videoTitle.orEmpty(), color = primaryText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+        if (loading) {
+            item(key = "channel_posts_loading") {
+                Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                    ViauraExpressiveLoadingIndicator(size = 32.dp, isDark = isDark)
+                }
+            }
+        }
     }
 }
 

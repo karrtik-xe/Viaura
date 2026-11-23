@@ -64,6 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.player.AudioPlaybackManager
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.graphics.asImageBitmap
@@ -285,7 +287,11 @@ fun OnlineMusicPanel(
             try {
                 if (reset) { home.sections.clear(); home.usedKeys.clear(); home.batch = 0 }
                 // the taste based feed is loaded first (loadFeed): its songs fill the speed dial and the song mixes
-                val pool = kotlinx.coroutines.withTimeoutOrNull(9000L) { snapshotFlow { results }.first { it.isNotEmpty() } } ?: emptyList()
+                val startGen = st.generation
+                var waited = 0L
+                // a refresh waits (max 9 s) for the NEW taste feed instead of reusing the old one
+                while (waited < 9000L && (results.isEmpty() || (reset && st.generation == startGen))) { delay(300L); waited += 300L }
+                val pool = results
                 val first = withContext(Dispatchers.IO) { OmHomeBuilder.firstBatch(context, pool, home.usedKeys) }
                 home.sections.addAll(first)
                 home.batch = 1
@@ -315,6 +321,15 @@ fun OnlineMusicPanel(
     }
     LaunchedEffect(isFeedMode) {
         if (isFeedMode && home.sections.isEmpty()) loadHome(false)
+    }
+    // A song was played / a playlist opened: the whole home (speed dial, mixes, rows) is rebuilt around the new taste
+    LaunchedEffect(isFeedMode, home.stale) {
+        if (isFeedMode && home.stale && home.sections.isNotEmpty()) {
+            delay(1500L)
+            home.stale = false
+            loadFeed()
+            loadHome(true)
+        }
     }
 
     fun executeSearch(q: String) {
@@ -1101,6 +1116,8 @@ internal sealed class OmHomeSection(val key: String) {
 internal object OnlineMusicHomeState {
     val sections = androidx.compose.runtime.mutableStateListOf<OmHomeSection>()
     var loading by mutableStateOf(false)
+    /** Set when a song is played / a playlist is opened: the home is rebuilt around the new taste. */
+    var stale by mutableStateOf(false)
     var batch = 0
     val usedKeys = mutableSetOf<String>()
 }
@@ -1130,14 +1147,29 @@ internal object OnlineMusicHomeStats {
             }
             prefs(c).edit().putString("songs", songs.toString()).apply()
         } catch (_: Throwable) {}
+        OnlineMusicHomeState.stale = true
     }
 
-    /** Most repeated songs first (only songs played more than once come before the single plays). */
+    /** The songs played last (newest first): what the listener is into right now. */
+    fun recent(c: android.content.Context, limit: Int): List<OnlineTrackResult> =
+        sorted(c, compareByDescending<Pair<String, org.json.JSONObject>> { it.second.optLong("last") }, limit)
+
+    /** The 3 newest songs first (so a song just played is in the speed dial at once), then the most repeated ones. */
     fun topSongs(c: android.content.Context, limit: Int): List<OnlineTrackResult> {
+        val newest = recent(c, 3)
+        val rest = sorted(
+            c,
+            compareByDescending<Pair<String, org.json.JSONObject>> { it.second.optInt("count") }.thenByDescending { it.second.optLong("last") },
+            limit + 3
+        ).filter { r -> newest.none { it.videoUrl == r.videoUrl } }
+        return (newest + rest).take(limit)
+    }
+
+    private fun sorted(c: android.content.Context, order: Comparator<Pair<String, org.json.JSONObject>>, limit: Int): List<OnlineTrackResult> {
         return try {
             val songs = read(c, "songs")
             songs.keys().asSequence().toList().map { k -> k to songs.getJSONObject(k) }
-                .sortedWith(compareByDescending<Pair<String, org.json.JSONObject>> { it.second.optInt("count") }.thenByDescending { it.second.optLong("last") })
+                .sortedWith(order)
                 .take(limit)
                 .map { (k, o) ->
                     OnlineTrackResult(
@@ -1161,6 +1193,7 @@ internal object OnlineMusicHomeStats {
             pls.put(d.playlistUrl, o)
             prefs(c).edit().putString("playlists", pls.toString()).apply()
         } catch (_: Throwable) {}
+        OnlineMusicHomeState.stale = true
     }
 
     fun playlists(c: android.content.Context, limit: Int): List<OmHomeTile> {
@@ -1184,6 +1217,7 @@ private val OM_CATEGORIES = listOf(
     "Punjabi", "Hindi", "Phonk", "Lo-fi", "Hip hop", "Bollywood", "EDM", "Pop", "K-pop", "Latin", "Rock", "Workout",
     "Romantic", "Sad", "Party", "Devotional", "Haryanvi", "Tamil", "Telugu", "Retro", "Rap", "Jazz", "Chill", "Gaming"
 )
+private val OM_LIKED = listOf("Phonk", "English songs", "Hindi songs", "Old Hindi songs")
 private val OM_MOODS = listOf("Energise", "Chill", "Workout", "Romance", "Party", "Focus", "Feel good", "Late night")
 
 private object OmHomeBuilder {
@@ -1231,9 +1265,11 @@ private object OmHomeBuilder {
         return OmHomeSection.SpeedDial(mixed.take(45))
     }
 
+    /** What the listener is into: artists of the songs played last, the taste profile, and the kinds of music he said he likes. */
     private fun tasteCategories(c: android.content.Context): List<String> {
+        val recentArtists = OnlineMusicHomeStats.recent(c, 4).map { it.artist }.filter { it.isNotBlank() }
         val taste = try { OnlineInterestProfile.focus(c, OnlineInterestProfile.KIND_AUDIO, 4).map { it.name } } catch (_: Throwable) { emptyList() }
-        return taste.ifEmpty { listOf("Hindi", "Punjabi", "Pop") }.distinct()
+        return (recentArtists.take(2) + taste + OM_LIKED).distinct().take(7)
     }
 
     suspend fun firstBatch(c: android.content.Context, pool: List<OnlineTrackResult>, used: MutableSet<String>): List<OmHomeSection> =
@@ -1251,6 +1287,10 @@ private object OmHomeBuilder {
                 per.awaitAll().filter { it.isNotEmpty() }.reduceOrNull { a, b -> a.interleave(b) }.orEmpty()
             }
             val remixJob = async { (tracks("popular $cat1 remix", 8) + tracks("top $cat2 songs", 8)) }
+            val likeJob = async {
+                val last = liked.firstOrNull()
+                if (last == null) emptyList() else tracks("${last.artist} ${last.title} similar songs", 12) + tracks("most popular ${cat1} songs", 8)
+            }
             val newJob = async { taste.take(3).map { k -> async { OnlineMusicService.searchHomePlaylists("$k new songs 2026", albums = true, limit = 5) } }.awaitAll().flatten() }
             val albumsJob = async { taste.take(3).map { k -> async { OnlineMusicService.searchHomePlaylists("$k hits", albums = false, limit = 6) } }.awaitAll().flatten() }
             val artistJobs = artists.take(2).map { a -> async { artistRow(a, used) } }
@@ -1261,6 +1301,8 @@ private object OmHomeBuilder {
             out.add(speedDial(c, pool))
             val mixes = (mixesJob.await() + pool.take(12)).distinctBy { it.videoUrl }.take(32)
             if (mixes.isNotEmpty()) out.add(OmHomeSection.SongMixes(mixes))
+            val like = likeJob.await().distinctBy { it.videoUrl }
+            if (like.isNotEmpty()) out.add(OmHomeSection.Squares("om_more_like", liked.firstOrNull()?.let { "More like ${it.title.take(24)}" } ?: "Popular for you", like.map { trackTile(it) }))
             val remix = remixJob.await().distinctBy { it.videoUrl }
             if (remix.isNotEmpty()) out.add(OmHomeSection.Squares("om_remix_popular", "Remix & popular", remix.map { trackTile(it) }))
             val news = newJob.await().distinctBy { it.url }
@@ -1332,14 +1374,19 @@ private object OmHomeBuilder {
     suspend fun moreBatch(c: android.content.Context, batch: Int, used: MutableSet<String>): List<OmHomeSection> =
         kotlinx.coroutines.coroutineScope {
             val unused = OM_CATEGORIES.filter { cat -> used.none { it.contains("_${cat}_", true) || it.endsWith("_$cat", true) } }
-            val pickPool = (unused.ifEmpty { OM_CATEGORIES }).shuffled()
+            // the first pages stay inside the listener's own kinds of music (the newest taste first); later pages add new categories
+            val tasteList = tasteCategories(c)
+            val pickPool = if (batch <= 6 && tasteList.isNotEmpty()) {
+                List(4) { i -> tasteList[(batch * 3 + i) % tasteList.size] }
+            } else (unused.ifEmpty { OM_CATEGORIES }).shuffled()
+            val flavour = listOf("most popular songs", "top hits", "best songs", "popular playlist")[batch % 4]
             val a = pickPool[0]
             val b = pickPool.getOrElse(1) { pickPool[0] }
             val d = pickPool.getOrElse(2) { pickPool[0] }
             val e = pickPool.getOrElse(3) { pickPool[0] }
             val mood = OM_MOODS[batch % OM_MOODS.size]
-            val squaresJob = async { OnlineMusicService.searchHomePlaylists("$a hits", albums = false, limit = 8) }
-            val albumsJob = async { OnlineMusicService.searchHomePlaylists("$b new album", albums = true, limit = 8) }
+            val squaresJob = async { OnlineMusicService.searchHomePlaylists("$a $flavour", albums = false, limit = 8) }
+            val albumsJob = async { OnlineMusicService.searchHomePlaylists("$b ${if (batch % 2 == 0) "new album" else "best album"}", albums = true, limit = 8) }
             val cardsJob = async { songCards(d, mood, emptyList()) }
             val communityJob = async { community(listOf(a, b, d, e), "$mood picks") }
             val artistJob = async {
@@ -1452,9 +1499,20 @@ private fun OmSongRow(
     selected: Boolean, onSwipe: () -> Unit, onClick: () -> Unit
 ) {
     val views = formatViews(track.viewCount)
+    // A plain slide moves the row of songs sideways; touch and HOLD, then slide left = the actions bar (download, playlist ...)
+    val dragged = remember { floatArrayOf(0f) }
     Row(
-        modifier = Modifier.fillMaxWidth().swipeLeftForActions(selected = selected) { onSwipe() }
-            .clickable { onClick() }.padding(vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth()
+            .pointerInput(Unit) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { dragged[0] = 0f },
+                    onDrag = { change, amount -> change.consume(); dragged[0] += amount.x },
+                    onDragEnd = { if (dragged[0] < -60f) onSwipe() },
+                    onDragCancel = { dragged[0] = 0f }
+                )
+            }
+            .clickable { onClick() }.padding(vertical = 6.dp)
+            .then(if (selected) Modifier.background(Color(0x1A60A5FA), RoundedCornerShape(10.dp)) else Modifier),
         verticalAlignment = Alignment.CenterVertically
     ) {
         OmThumb(track.thumbnailUrl, Modifier.size(60.dp).clip(RoundedCornerShape(8.dp)), isDark)
