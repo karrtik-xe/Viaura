@@ -5114,6 +5114,22 @@ private fun ChannelPlayerSection(
     val hidden = remember(watchUrl) {
         com.example.util.OnlineMediaLibrary.notInterestedSet(context, com.example.util.OnlineMediaLibrary.KIND_VIDEO)
     }
+    // The recommended list follows the layout chosen for Online videos (Sort & View > Layout): List, Grid or Feed
+    val recLayout = remember { com.example.ui.state.SettingsPreferencesManager.loadLayoutMode(context, "online_video") }
+    val relTrackByUrl: Map<String, OnlineTrackResult> = remember(details, hidden, watchUrl) {
+        if (watchUrl != null) {
+            com.example.util.OnlineVideoRecommender.spreadChannels(details?.related.orEmpty().filter { it.videoUrl !in hidden })
+                .associateBy { it.videoUrl }
+        } else emptyMap()
+    }
+    val onRecClick: (VideoItem) -> Unit = { item ->
+        if (item.isOnline) {
+            com.example.util.OnlineVideoRecommender.recordOpened(
+                context, OnlineVideoService.toWatchUrl(item.path), item.channelName.orEmpty(), item.displayName
+            )
+        }
+        onPlayItem(item)
+    }
     val recommended: List<VideoItem> = remember(details, playlist, video) {
         val list: List<VideoItem> = if (watchUrl != null) {
             val rel = details?.related.orEmpty().filter { it.videoUrl !in hidden }
@@ -5375,20 +5391,60 @@ private fun ChannelPlayerSection(
                     modifier = Modifier.padding(start = 4.dp, top = 2.dp)
                 )
             }
-            items(recommended, key = { "channel_rec_${it.path}" }) { item ->
-                VideoItemCard(
-                    video = item,
-                    isDark = isDark,
-                    visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
-                    onClick = {
-                        if (item.isOnline) {
-                            com.example.util.OnlineVideoRecommender.recordOpened(
-                                context, OnlineVideoService.toWatchUrl(item.path), item.channelName.orEmpty(), item.displayName
-                            )
-                        }
-                        onPlayItem(item)
+            if (watchUrl != null && recLayout == com.example.ui.components.LayoutMode.YOUTUBE) {
+                // Feed: full-width YouTube-style cards, same as Online videos
+                items(recommended, key = { "channel_rec_${it.path}" }) { item ->
+                    val t = relTrackByUrl[OnlineVideoService.toWatchUrl(item.path)]
+                    if (t != null) {
+                        com.example.ui.components.OnlineYouTubeVideoCard(
+                            video = t,
+                            isDark = isDark,
+                            onClick = { onRecClick(item) },
+                            onChannelClick = {
+                                val cu = t.channelUrl
+                                if (!cu.isNullOrBlank()) {
+                                    onOpenChannel(
+                                        com.example.util.OnlineChannelResult(
+                                            channelUrl = cu, name = t.artist, avatarUrl = t.channelAvatarUrl,
+                                            subscriberCountText = null, videoCountText = null
+                                        )
+                                    )
+                                }
+                            }
+                        )
+                    } else {
+                        VideoItemCard(
+                            video = item, isDark = isDark,
+                            visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                            onClick = { onRecClick(item) }
+                        )
                     }
-                )
+                }
+            } else if (watchUrl != null && recLayout == com.example.ui.components.LayoutMode.GRID) {
+                // Grid: two cards per row
+                items(recommended.chunked(2), key = { "channel_rec_g_${it.first().path}" }) { pair ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        pair.forEach { item ->
+                            Box(modifier = Modifier.weight(1f)) {
+                                com.example.ui.components.VideoItemGridCard(
+                                    video = item, isDark = isDark,
+                                    visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                                    onClick = { onRecClick(item) }
+                                )
+                            }
+                        }
+                        if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            } else {
+                items(recommended, key = { "channel_rec_${it.path}" }) { item ->
+                    VideoItemCard(
+                        video = item,
+                        isDark = isDark,
+                        visibleFields = VisibleFields(showExtension = false, showSize = false, showSubtitleIndicator = false),
+                        onClick = { onRecClick(item) }
+                    )
+                }
             }
         } else if (watchUrl != null && details == null) {
             item(key = "channel_rec_loading") {

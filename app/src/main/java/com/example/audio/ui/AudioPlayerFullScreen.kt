@@ -370,6 +370,11 @@ fun AudioPlayerScreen(
         }
     }
 
+    // (declared before the back handler, which uses them)
+    var lyricsImmersive by remember { mutableStateOf(false) }
+    var lyricsManualControl by remember { mutableStateOf(false) }
+    // Full-screen lyrics: slide down on the seek bar (or on the strip of lyrics just above it) and everything except the lyrics goes away.
+    var lyricsFullScreen by remember { mutableStateOf(false) }
     // Intercept system back button to smoothly close secondary bottom sheets first, or collapse to Mini Player
     BackHandler(enabled = true) {
         when {
@@ -382,6 +387,11 @@ fun AudioPlayerScreen(
             showABLoopSheet -> showABLoopSheet = false
             showEqualizerSheet -> showEqualizerSheet = false
             showAddToPlaylistDialog -> showAddToPlaylistDialog = false
+            lyricsFullScreen -> {
+                lyricsFullScreen = false
+                lyricsManualControl = true
+                lyricsImmersive = false
+            }
             isLyricsViewExpanded -> isLyricsViewExpanded = false
             else -> onCollapse()
         }
@@ -405,8 +415,7 @@ fun AudioPlayerScreen(
 
     // Lyrics view: starts compact (small, no card), turns full-screen after 3 s with the title/share/playlist
     // controls hidden. Tapping the empty space beside the lyrics toggles the controls back; tapping a line seeks.
-    var lyricsImmersive by remember { mutableStateOf(false) }
-    var lyricsManualControl by remember { mutableStateOf(false) }
+    LaunchedEffect(isLyricsViewExpanded) { if (!isLyricsViewExpanded) lyricsFullScreen = false }
     LaunchedEffect(isLyricsViewExpanded, track.id) {
         lyricsImmersive = false
         lyricsManualControl = false
@@ -1011,15 +1020,33 @@ fun AudioPlayerScreen(
                         onShiftChange = { updateLyricsShift(it) },
                         onBackgroundTap = {
                             lyricsManualControl = true
-                            lyricsImmersive = !lyricsImmersive
+                            if (lyricsFullScreen) {
+                                // leave full screen: the controls come back
+                                lyricsFullScreen = false
+                                lyricsImmersive = false
+                            } else {
+                                lyricsImmersive = !lyricsImmersive
+                            }
                         },
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 6.dp)
+                            // slide down on the strip just above the seek bar -> full-screen lyrics
+                            .then(if (isLandscapeLayout) Modifier else Modifier.slideDownForFullScreenLyrics(zoneFromBottom = 64.dp) {
+                                lyricsManualControl = true
+                                lyricsImmersive = true
+                                lyricsFullScreen = true
+                            })
                             .pointerInput(Unit) {
                                 detectVerticalDragGestures { _, dragAmount ->
                                     if (dragAmount > 25) {
-                                        isLyricsViewExpanded = false
+                                        if (lyricsFullScreen) {
+                                            lyricsFullScreen = false
+                                            lyricsManualControl = true
+                                            lyricsImmersive = false
+                                        } else {
+                                            isLyricsViewExpanded = false
+                                        }
                                     }
                                 }
                             }
@@ -1469,6 +1496,12 @@ fun AudioPlayerScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { artScrubTopPx = it.positionInWindow().y }
+                    // slide down on the seek bar while the lyrics are open -> full-screen lyrics
+                    .then(if (isLyricsViewExpanded && !isLandscapeLayout) Modifier.slideDownForFullScreenLyrics(zoneFromBottom = null) {
+                        lyricsManualControl = true
+                        lyricsImmersive = true
+                        lyricsFullScreen = true
+                    } else Modifier)
             )
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -1813,11 +1846,23 @@ fun AudioPlayerScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                topBarSection()
+                AnimatedVisibility(
+                    visible = !lyricsFullScreen,
+                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(260)),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { topBarSection() }
+                }
                 centerSection()
                 Spacer(modifier = Modifier.height(10.dp))
                 infoSection()
-                controlsSection()
+                AnimatedVisibility(
+                    visible = !lyricsFullScreen,
+                    enter = fadeIn(tween(240)) + expandVertically(tween(280)),
+                    exit = fadeOut(tween(200)) + shrinkVertically(tween(260)),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) { controlsSection() }
+                }
             }
         }
 
@@ -2957,6 +3002,36 @@ fun AudioPlayerScreen(
         }
     }
 }
+
+/**
+ * Slide-down gesture for the full-screen lyrics. It only watches the touch (it never blocks taps or seeking): once the finger has
+ * clearly moved DOWN (more down than sideways) it fires [onTrigger] and takes the rest of that touch. With [zoneFromBottom] the touch
+ * must start inside that bottom strip of the view (the part of the lyrics just above the seek bar).
+ */
+private fun Modifier.slideDownForFullScreenLyrics(zoneFromBottom: androidx.compose.ui.unit.Dp?, onTrigger: () -> Unit): Modifier =
+    this.pointerInput(zoneFromBottom) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            if (zoneFromBottom != null && down.position.y < size.height - zoneFromBottom.toPx()) return@awaitEachGesture
+            val slop = 28.dp.toPx()
+            var dx = 0f
+            var dy = 0f
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) break
+                val d = change.positionChange()
+                dx += d.x
+                dy += d.y
+                if (dy > slop && dy > kotlin.math.abs(dx) * 1.5f) {
+                    event.changes.forEach { it.consume() }
+                    onTrigger()
+                    break
+                }
+                if (kotlin.math.abs(dx) > slop * 1.5f || dy < -slop) break
+            }
+        }
+    }
 
 @Composable
 private fun InfoRow(

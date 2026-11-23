@@ -86,6 +86,7 @@ import com.example.ui.components.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -254,12 +255,11 @@ fun AudioTrackListCard(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Thumbnail Card (Left side, exactly matching VideoItemCard 136dp x 80dp)
+            // Thumbnail Card (Left side): audio artwork is square, so the card is 1:1
             if (visibleFields.showThumbnails) {
                 Box(
                     modifier = Modifier
-                        .width(136.dp)
-                        .height(80.dp)
+                        .size(88.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(
                             if (isCurrent) {
@@ -658,11 +658,11 @@ fun AudioTrackGridCard(
             .padding(10.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Thumbnail
+            // Thumbnail (1:1, audio artwork is square)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(96.dp)
+                    .aspectRatio(1f)
                     .clip(RoundedCornerShape(12.dp))
                     .background(
                         if (isCurrent) AccentGradient else Brush.linearGradient(
