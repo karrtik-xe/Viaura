@@ -440,6 +440,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var searchBeforeTitle: String? = null
     var lastTitlePageKey: String = "|"
     var lastPlaylistId: String? = null
+    /** True while the Otube (online music) folder is open: coming back from a playlist / channel / player reopens it. */
+    var restoreOnlineMusicFolder: Boolean = false
 
     // Home list scroll memory. HomeScreen leaves composition while the video player is open, so its remembered scroll
     // states and the "already auto-scrolled" key used to be lost: Back rebuilt the list at the top and then scrolled to the

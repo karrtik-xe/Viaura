@@ -209,6 +209,8 @@ class MainActivity : ComponentActivity() {
         val previousCrashReport = if (savedInstanceState == null) com.example.util.CrashReporter.consume(applicationContext) else null
         applyLaunchWindowBackground()
         com.example.util.DownloadStore.init(applicationContext)
+        // listening behaviour for the music recommendations (reads the real playback only, off the main thread)
+        com.example.util.MusicListeningTracker.start(applicationContext)
         // Appearance extras: background animation, and Remove Card UI choices
         com.example.background.BackgroundAnimationSettings.init(applicationContext)
         com.example.ui.components.CardStyleSettings.init(applicationContext)

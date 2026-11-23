@@ -528,8 +528,14 @@ fun HomeScreen(
         if (restoreFolderScroll) viewModel?.homeFolderGridScrollOffset ?: 0 else 0
     )
 
-    var isInsideMusicFolder by remember { mutableStateOf(false) }
-    var selectedMusicFolder by remember { mutableStateOf<AudioFolderItem?>(null) }
+    var isInsideMusicFolder by remember { mutableStateOf(viewModel?.restoreOnlineMusicFolder == true) }
+    var selectedMusicFolder by remember {
+        mutableStateOf<AudioFolderItem?>(if (viewModel?.restoreOnlineMusicFolder == true) com.example.ui.screens.ONLINE_FOLDER_ITEM else null)
+    }
+    // Back from a playlist / channel / player lands in Otube again (not on the audio home with the folders)
+    LaunchedEffect(selectedMusicFolder) {
+        viewModel?.restoreOnlineMusicFolder = selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH
+    }
     var selectedRecentsFolder by remember { mutableStateOf<RecentsFolder?>(null) }
     var selectedPlaylist by remember {
         mutableStateOf<com.example.util.CustomPlaylist?>(
@@ -1878,7 +1884,10 @@ fun HomeScreen(
                             isSearchActive = !isSearchActive
                             if (!isSearchActive) searchQuery = ""
                         },
-                        onSortClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) null else { { showSortAndViewDialog = true } },
+                        // no Sort & View in Otube (online music has its own home); search and settings stay
+                        onSortClick = if ((effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) ||
+                            (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
+                        ) null else { { showSortAndViewDialog = true } },
                         onDownloadClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) {
                             {
                                 searchQuery = ""

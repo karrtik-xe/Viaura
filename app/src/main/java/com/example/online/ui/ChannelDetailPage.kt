@@ -205,6 +205,8 @@ fun ChannelDetailScreen(
     var isLoadingMore by remember(channel?.channelUrl) { mutableStateOf(false) }
 
     var expandedPlaylist by remember(channel?.channelUrl) { mutableStateOf<OnlineChannelPlaylist?>(null) }
+    // artist pages (audio): when the channel itself gives no playlists, the artist's playlists / albums come from search
+    var fallbackPlaylists by remember(channel?.channelUrl) { mutableStateOf<List<OnlineChannelPlaylist>>(emptyList()) }
     var playlistTracks by remember(channel?.channelUrl) { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
     var isLoadingPlaylist by remember(channel?.channelUrl) { mutableStateOf(false) }
 
@@ -276,8 +278,28 @@ fun ChannelDetailScreen(
             tracks = result.initialTracks.items
             nextPage = result.initialTracks.nextPage
             hasNextPage = result.initialTracks.hasNextPage
-        } else {
+        } else if (!isAudioMode) {
             loadError = "Unable to load this channel"
+        }
+        if (isAudioMode) {
+            // An artist page always shows something: his songs and playlists, also when the channel page itself gave none
+            val name = (result?.name ?: channel?.name).orEmpty()
+            if (name.isNotBlank()) {
+                if (tracks.isEmpty()) {
+                    val found = OnlineMusicService.search("$name songs")
+                        .filter { OnlineMusicService.isAudioOrMusicContent(it.title, it.artist, it.durationSec) }
+                    val key = name.lowercase()
+                    val own = found.filter { val a = it.artist.lowercase(); a.contains(key) || (a.length > 2 && key.contains(a)) }
+                    tracks = own.ifEmpty { found.take(20) }
+                }
+                if (result?.playlists.isNullOrEmpty()) {
+                    val pls = OnlineMusicService.searchHomePlaylists(name, albums = false, limit = 8) +
+                        OnlineMusicService.searchHomePlaylists(name, albums = true, limit = 8)
+                    fallbackPlaylists = pls.distinctBy { it.url }.map {
+                        OnlineChannelPlaylist(it.url, it.name, it.thumbnailUrl, if (it.songCount > 0) "${it.songCount} songs" else null)
+                    }
+                }
+            }
         }
         isLoading = false
     }
@@ -449,7 +471,7 @@ fun ChannelDetailScreen(
         if (isAudioMode) sortedTracksAll else sortedTracksAll.filter { it.videoUrl !in hiddenUrls }
     }
 
-    val playlists = detail?.playlists.orEmpty()
+    val playlists = detail?.playlists.orEmpty().ifEmpty { fallbackPlaylists }
     val filteredPlaylists = remember(playlists, searchQuery) {
         if (searchQuery.isBlank()) playlists
         else playlists.filter { it.name.contains(searchQuery, ignoreCase = true) }
@@ -608,7 +630,9 @@ fun ChannelDetailScreen(
 
                             // Tabs: Home | Videos | Shorts | Playlists | Posts (sliding selected indicator)
                             ChannelTabsRow(
-                                tabs = listOf(
+                                // artist pages (audio): Home (all songs) | Playlists | Posts. Video channels keep Videos and Shorts.
+                                tabs = if (isAudioMode) listOf("home" to "Home", "playlists" to "Playlists", "posts" to "Posts")
+                                else listOf(
                                     "home" to "Home",
                                     "videos" to "Videos",
                                     "shorts" to "Shorts",
