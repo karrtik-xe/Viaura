@@ -352,7 +352,8 @@ object MusicMetadataResolver {
                     val wait = 1100L - (System.currentTimeMillis() - lastMbAt)
                     if (wait > 0) delay(wait)
                     lastMbAt = System.currentTimeMillis()
-                    MusicHttp.getRaw("https://musicbrainz.org/ws/2/artist/?query=artist:${MusicText.enc("\"$artist\"")}&limit=1&fmt=json")
+                    val q = MusicText.enc("\"" + artist + "\"")
+                    MusicHttp.getRaw("https://musicbrainz.org/ws/2/artist/?query=artist:" + q + "&limit=1&fmt=json")
                 }
                 val a0 = body?.let { JSONObject(it).optJSONArray("artists")?.optJSONObject(0) }
                 val list = ArrayList<String>()
@@ -617,6 +618,16 @@ object MusicTaste {
         changes.value = changes.value + 1
     }
 
+    /** "Not interested": the song is never recommended again and its artist loses weight. */
+    fun markRejected(c: Context, url: String, artist: String = "") {
+        val e = track(c, url) ?: JSONObject().put("artist", artist).put("last", System.currentTimeMillis())
+        e.put("skips", maxOf(3, e.optInt("skips") + 1)).put("comp", 0)
+        store.put(c, "t:$url", e)
+        val a = e.optString("artist").ifBlank { artist }
+        if (a.isNotBlank()) bump(c, "a:" + MusicText.artistKey(a), -1.0)
+        changes.value = changes.value + 1
+    }
+
     fun onFavorite(c: Context, url: String) = strong(c, url, 2.0)
     fun onPlaylistAdd(c: Context, url: String) = strong(c, url, 1.5)
 
@@ -851,6 +862,31 @@ private object MusicSources {
         } catch (t: CancellationException) { throw t } catch (_: Throwable) { emptyList() }
     }
 
+    private val radioCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<OnlineTrackResult>>>()
+
+    /**
+     * What YouTube Music itself plays after a song: the "radio" mix YouTube builds from it plus the watch page's related list, in
+     * YouTube's own order (same sound, language and mood: a Bhojpuri phonk song gets Bhojpuri phonk songs). The first item is the most
+     * relevant, so [MusicCandidate.popularity] carries the position (1.0 = first).
+     */
+    suspend fun radio(c: Context, seedUrl: String, genre: String, sub: String, seedArtist: String?): List<MusicCandidate> = withContext(Dispatchers.IO) {
+        val id = OnlineMusicService.extractVideoId(seedUrl) ?: return@withContext emptyList()
+        val hit = radioCache[id]
+        val tracks = if (hit != null && System.currentTimeMillis() - hit.first < 30 * 60_000L) hit.second else {
+            val mix = try { OnlineMusicService.fetchPlaylistTracks("https://www.youtube.com/watch?v=$id&list=RD$id") } catch (t: CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+            val rel = try { OnlineMusicService.resolveStreamWithRelated(seedUrl).relatedTracks } catch (t: CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+            val merged = (mix + rel)
+                .filter { it.videoUrl != seedUrl && it.durationSec in 60L..720L && OnlineMusicService.isAudioOrMusicContent(it.title, it.artist, it.durationSec) }
+                .distinctBy { MusicText.songKey(it.artist, it.title) }
+            if (merged.isNotEmpty()) radioCache[id] = System.currentTimeMillis() to merged
+            merged
+        }
+        tracks.mapIndexed { i, t ->
+            MusicCandidate(t.title, t.artist, t.thumbnailUrl, 1f - i.toFloat() / tracks.size.coerceAtLeast(1), t.uploadDateEpochMs ?: 0L,
+                genre, sub, false, seedArtist, "radio", ready = t)
+        }
+    }
+
     private val sem = Semaphore(6)
     private val BAD = Regex("\\b(live|cover|karaoke|reaction|8d|nightcore|sped up|speed up|slowed|reverb|instrumental|tutorial|lesson)\\b")
 
@@ -899,6 +935,8 @@ private class RankWeights(val g: Double, val s: Double, val a: Double, val era: 
         val POPULAR = RankWeights(0.35, 0.10, 0.05, 0.05, 0.50, 0.05, 0.15, 0.05)
         val DISCOVER = RankWeights(0.35, 0.20, 0.0, 0.05, 0.0, 0.10, 0.0, 0.10, emerging = 0.25)
         val SIMILAR = RankWeights(0.30, 0.25, 0.10, 0.10, 0.10, 0.05, 0.0, 0.10)
+        /** YouTube's own radio order dominates (popularity = position in the radio); taste only breaks ties. */
+        val RADIO = RankWeights(0.05, 0.03, 0.08, 0.0, 0.85, 0.0, 0.0, 0.1)
     }
 }
 
@@ -974,8 +1012,10 @@ object MusicRecoEngine {
     }
 
     private suspend fun resolveAll(c: Context, picked: List<MusicCandidate>, limit: Int): List<OnlineTrackResult> = coroutineScope {
+        val hidden = OnlineMediaLibrary.notInterestedSet(c, OnlineMediaLibrary.KIND_AUDIO)
         picked.map { cand -> async { cand to MusicSources.playable(c, cand) } }.awaitAll()
             .mapNotNull { (cand, t) -> t }
+            .filter { it.videoUrl !in hidden }
             .distinctBy { it.videoUrl }.take(limit)
     }
 
@@ -1020,7 +1060,11 @@ object MusicRecoEngine {
         } }
         val newest = artists.take(3).map { a -> async { val (g, s) = genreOfArtist(a); MusicSources.itunesNewest(c, a, g, s) } }
 
-        val all = (tops + related + listOf(charts) + yt + newest).awaitAll().flatten()
+        val radios = p.recent.distinctBy { MusicText.artistKey(it.artist) }.take(3).map { r -> async {
+            val e = MusicTaste.track(c, r.url)
+            MusicSources.radio(c, r.url, e?.optString("g").orEmpty(), e?.optString("s").orEmpty(), r.artist)
+        } }
+        val all = (tops + related + listOf(charts) + yt + newest + radios).awaitAll().flatten()
         Pool(all, relatedArtists.distinctBy { it.name })
     }
 
@@ -1066,10 +1110,15 @@ object MusicRecoEngine {
 
         add("recommended", "Recommended for you", pick(p, pool.all, RankWeights.BALANCED, 40, 2, taken, now), 32)
         if (last != null) {
-            val basedOn = pool.all.filter { it.relatedTo != null && MusicText.artistKey(it.relatedTo) == lastArtistKey || MusicText.artistKey(it.artist) == lastArtistKey }
-            add("recent", "Based on ${shortTitle(last.title).ifBlank { "your last song" }}", pick(p, basedOn, RankWeights.SIMILAR, 14, 3, taken, now), 12)
-            val similar = pool.all.filter { (lastSub.isNotBlank() && it.subgenre == lastSub) || (lastGenre.isNotBlank() && it.genre == lastGenre) }
-            add("similar", "Similar songs", pick(p, similar, RankWeights.SIMILAR, 14, 2, taken, now), 12)
+            // exactly what YouTube Music would play after the last song (its radio), in its order
+            val basedOn = pool.all.filter { it.source == "radio" && it.relatedTo != null && MusicText.artistKey(it.relatedTo) == lastArtistKey }
+            add("recent", "Based on ${shortTitle(last.title).ifBlank { "your last song" }}", pick(p, basedOn, RankWeights.RADIO, 16, 3, taken, now, allowHeard = true), 12)
+            val second = p.recent.firstOrNull { MusicText.artistKey(it.artist) != lastArtistKey }
+            if (second != null) {
+                val secKey = MusicText.artistKey(second.artist)
+                val more = pool.all.filter { it.source == "radio" && it.relatedTo != null && MusicText.artistKey(it.relatedTo) == secKey }
+                add("similar", "More like ${shortTitle(second.title).ifBlank { second.artist }}", pick(p, more, RankWeights.RADIO, 16, 3, taken, now, allowHeard = true), 12)
+            }
         }
         add("trending", "Trending music", pick(p, pool.all.filter { it.trend }, RankWeights.TRENDING, 14, 2, taken, now), 12)
         val myGenres = p.topGenres.take(3).toSet()
@@ -1115,52 +1164,48 @@ object MusicRecoEngine {
         out
     }
 
-    /** The queue that follows a played song: same kind of music (genre / sub-genre / era / language), different artists, some fresh. */
+    /**
+     * The queue that follows a played song, like YouTube Music's "Up next": YouTube's own radio of that song (so a phonk song is
+     * followed by phonk songs, a Bhojpuri song by Bhojpuri songs), kept in YouTube's order. The listener's taste only moves things
+     * a little: not-interested and skipped songs are removed, an artist appears at most twice and never twice in a row, songs heard
+     * very recently go later. When the radio is thin, searches of the same artist / sub-genre fill the rest.
+     */
     suspend fun queueAfterPlay(c: Context, seed: OnlineTrackResult, count: Int = 30): List<OnlineTrackResult> = withContext(Dispatchers.Default) {
-        val meta = withTimeoutOrNull(4000L) { MusicMetadataResolver.resolve(c, seed.artist, seed.title) } ?: MusicMeta.UNKNOWN
-        val base = profile(c)
-        val sg = meta.genre.ifBlank { base.topGenres.firstOrNull().orEmpty() }
-        val ss = meta.subgenre
-        // the song being played counts more than the older taste while its queue is built
-        val p = MusicProfile(
-            genres = base.genres + (sg to 1.0), subs = if (ss.isNotBlank()) base.subs + (ss to 1.0) else base.subs,
-            artists = base.artists + (MusicText.artistKey(seed.artist) to 1.0), eras = if (meta.era.isNotBlank()) base.eras + (meta.era to 1.0) else base.eras,
-            langs = base.langs, artistNames = (listOf(seed.artist) + base.artistNames).distinct(), recent = base.recent,
-            heardKeys = base.heardKeys, rejected = base.rejected, coldStart = false
-        )
-        val now = System.currentTimeMillis()
-        val cands = coroutineScope {
-            val own = async {
-                MusicSources.deezerArtist(c, seed.artist)?.let { dz ->
-                    val top = MusicSources.deezerTop(c, dz.id, 6, sg, ss, seed.artist)
-                    val rel = MusicSources.deezerRelated(c, dz.id, 8).take(6).map { r -> async { MusicSources.deezerTop(c, r.id, 3, sg, ss, seed.artist) } }.awaitAll().flatten()
-                    top + rel
-                }.orEmpty()
-            }
-            val yt = async {
-                val q = if (ss.isNotBlank()) "$ss songs" else if (sg.isNotBlank()) "$sg songs" else "${seed.artist} songs"
-                MusicSources.youtube(c, q, sg, ss, null, 12) + MusicSources.youtube(c, "${seed.artist} songs", sg, ss, seed.artist, 6)
-            }
-            val chart = async { MusicSources.deezerGenreId(sg)?.let { MusicSources.deezerChart(c, it, 25, sg) }.orEmpty() }
-            own.await() + yt.await() + chart.await()
+        val hidden = OnlineMediaLibrary.notInterestedSet(c, OnlineMediaLibrary.KIND_AUDIO)
+        val p = profile(c)
+        var cands = MusicSources.radio(c, seed.videoUrl, "", "", seed.artist)
+        if (cands.size < 14) {
+            val meta = withTimeoutOrNull(3000L) { MusicMetadataResolver.resolve(c, seed.artist, seed.title) } ?: MusicMeta.UNKNOWN
+            val kind = meta.subgenre.ifBlank { meta.genre }
+            cands = cands + MusicSources.youtube(c, "${seed.artist} songs", meta.genre, meta.subgenre, seed.artist, 8) +
+                (if (kind.isNotBlank()) MusicSources.youtube(c, "$kind songs", meta.genre, meta.subgenre, null, 10) else emptyList())
         }
-        val taken = mutableSetOf(MusicText.songKey(seed.artist, seed.title))
-        val similarN = (count * 0.75).toInt()
-        val similar = pick(p, cands, RankWeights.SIMILAR, similarN + 8, 2, taken, now)
-        val fresh = pick(p, cands.filter { it.trend || (it.releaseMs > 0 && now - it.releaseMs < 120L * 86_400_000L) }, RankWeights.NEW, count - similarN + 4, 1, taken, now)
-        val rs = resolveAll(c, similar, similarN + 4)
-        val rf = resolveAll(c, fresh, count - similarN + 2)
-        // 3 similar, then 1 fresh; never the same artist twice in a row
-        val merged = ArrayList<OnlineTrackResult>()
-        var i = 0; var j = 0
-        while ((i < rs.size || j < rf.size) && merged.size < count) {
-            repeat(3) { if (i < rs.size) merged.add(rs[i++]) }
-            if (j < rf.size) merged.add(rf[j++])
+        val seedKey = MusicText.songKey(seed.artist, seed.title)
+        val seedArtist = MusicText.artistKey(seed.artist)
+        val scored = cands.mapNotNull { cand ->
+            val t = cand.ready ?: return@mapNotNull null
+            val key = MusicText.songKey(t.artist, t.title)
+            if (t.videoUrl in hidden || key == seedKey || key in p.rejected) return@mapNotNull null
+            val order = if (cand.source == "radio") cand.popularity.toDouble() else cand.popularity * 0.5
+            val affinity = p.artists[MusicText.artistKey(t.artist)] ?: 0.0
+            val heardPenalty = if (key in p.heardKeys) 0.25 else 0.0
+            Triple(t, key, order * 0.75 + affinity * 0.2 - heardPenalty)
+        }.sortedByDescending { it.third }
+        val taken = HashSet<String>()
+        val perArtist = HashMap<String, Int>()
+        val chosen = ArrayList<OnlineTrackResult>()
+        for ((t, key, _) in scored) {
+            if (chosen.size >= count) break
+            val ak = MusicText.artistKey(t.artist)
+            if (!taken.add(key) || (perArtist[ak] ?: 0) >= 2) continue
+            perArtist[ak] = (perArtist[ak] ?: 0) + 1
+            chosen.add(t)
         }
+        // never the same artist twice in a row (the seed's artist counts as the previous one)
         val spaced = ArrayList<OnlineTrackResult>()
-        val rest = merged.filter { it.videoUrl != seed.videoUrl }.toMutableList()
-        var prev = MusicText.artistKey(seed.artist)
-        while (rest.isNotEmpty() && spaced.size < count) {
+        val rest = chosen.toMutableList()
+        var prev = seedArtist
+        while (rest.isNotEmpty()) {
             val idx = rest.indexOfFirst { MusicText.artistKey(it.artist) != prev }.let { if (it < 0) 0 else it }
             val t = rest.removeAt(idx)
             spaced.add(t)
@@ -1172,13 +1217,19 @@ object MusicRecoEngine {
     /** Exactly the extra songs for the speed dial: different artists / genres, nothing the listener heard lately. */
     suspend fun speedDialExtras(c: Context, count: Int = 2): List<OnlineTrackResult> = withContext(Dispatchers.Default) {
         val p = profile(c)
-        val pool = try { gather(c, p) } catch (t: CancellationException) { throw t } catch (_: Throwable) { return@withContext emptyList() }
-        val taken = mutableSetOf<String>()
-        val now = System.currentTimeMillis()
-        val picks = ArrayList<MusicCandidate>()
-        for (g in p.topGenres.take(count)) picks += pick(p, pool.all.filter { it.genre == g }, RankWeights.BALANCED, 1, 1, taken, now)
-        if (picks.size < count) picks += pick(p, pool.all, RankWeights.BALANCED, count - picks.size, 1, taken, now)
-        resolveAll(c, picks, count)
+        val hidden = OnlineMediaLibrary.notInterestedSet(c, OnlineMediaLibrary.KIND_AUDIO)
+        val out = ArrayList<OnlineTrackResult>()
+        val taken = HashSet<String>()
+        // the first song of the radio of each of the last played songs (different artists): "what comes next" for him
+        for (r in p.recent.distinctBy { MusicText.artistKey(it.artist) }.take(count + 1)) {
+            if (out.size >= count) break
+            val first = MusicSources.radio(c, r.url, "", "", r.artist).mapNotNull { it.ready }.firstOrNull {
+                it.videoUrl !in hidden && MusicText.songKey(it.artist, it.title) !in p.heardKeys && MusicText.songKey(it.artist, it.title) !in p.rejected &&
+                    MusicText.artistKey(it.artist) != MusicText.artistKey(r.artist)
+            } ?: continue
+            if (taken.add(MusicText.songKey(first.artist, first.title))) out.add(first)
+        }
+        out
     }
 
     /** Artists for the Artists tab: replayed ones (with picture), similar ones and the popular ones of the listener's genres. */
@@ -1188,13 +1239,14 @@ object MusicRecoEngine {
         val mine = coroutineScope {
             MusicTaste.repeatedArtists(c, 2).map { it.first }.take(12).map { a -> async { MusicSources.deezerArtist(c, a)?.let { MusicArtist(it.name, it.pic, it.fans) } ?: MusicArtist(a, null, 0) } }.awaitAll()
         }
-        if (mine.isNotEmpty()) out.add("Artists you replay" to mine)
+        val seen = HashSet<String>()
+        fun fresh(l: List<MusicArtist>) = l.filter { seen.add(MusicText.artistKey(it.name)) }
+        fresh(mine).takeIf { it.isNotEmpty() }?.let { out.add("Artists you replay" to it) }
         val pool = try { gather(c, p) } catch (t: CancellationException) { throw t } catch (_: Throwable) { Pool(emptyList(), emptyList()) }
-        if (pool.relatedArtists.isNotEmpty()) out.add("Similar to your artists" to pool.relatedArtists.sortedByDescending { it.fans }.take(15))
+        fresh(pool.relatedArtists.sortedByDescending { it.fans }.take(15)).takeIf { it.isNotEmpty() }?.let { out.add("Similar to your artists" to it) }
         for (g in p.topGenres.take(3)) {
             val id = MusicSources.deezerGenreId(g) ?: continue
-            val list = MusicSources.deezerChartArtists(c, id, 15)
-            if (list.isNotEmpty()) out.add("Popular in $g" to list)
+            fresh(MusicSources.deezerChartArtists(c, id, 15)).takeIf { it.isNotEmpty() }?.let { out.add("Popular in $g" to it) }
         }
         out
     }
@@ -1204,6 +1256,42 @@ object MusicRecoEngine {
         val p = profile(c)
         val rep = MusicTaste.repeatedArtists(c, 4).map { it.first }.ifEmpty { p.artistNames.take(2) }.take(3)
         return rep to p.topGenres.take(3)
+    }
+
+    private val ADJACENT = mapOf(
+        "Phonk" to listOf("Brazilian Phonk", "Drift Phonk", "Hip-Hop", "Trap", "Electronic"),
+        "Hip-Hop" to listOf("Rap", "Trap", "Drill", "R&B"), "Bollywood" to listOf("Hindi pop", "Punjabi", "Sufi", "Romantic Hindi"),
+        "Bhojpuri" to listOf("Haryanvi", "Punjabi", "Hindi folk"), "Punjabi" to listOf("Haryanvi", "Bollywood", "Hip-Hop"),
+        "Haryanvi" to listOf("Punjabi", "Bhojpuri", "Hindi pop"), "Pop" to listOf("Dance pop", "Indie pop", "R&B"),
+        "Electronic" to listOf("House", "EDM", "Synthwave", "Phonk"), "Rock" to listOf("Alternative rock", "Metal", "Punk"),
+        "Lo-Fi" to listOf("Ambient", "Chill", "Instrumental"), "Tamil" to listOf("Telugu", "Malayalam", "Kannada"),
+        "Telugu" to listOf("Tamil", "Kannada", "Malayalam"), "Latin" to listOf("Reggaeton", "Brazilian funk", "Salsa"),
+        "R&B" to listOf("Soul", "Hip-Hop", "Pop"), "Metal" to listOf("Rock", "Hard rock", "Punk"), "Devotional" to listOf("Bhajan", "Sufi", "Classical")
+    )
+
+    /** The listener's own categories: sub-genres, genres and languages he really plays (newest taste first). */
+    fun favoriteCategories(c: Context): List<String> {
+        val p = profile(c)
+        return (p.topSubs.take(3) + p.topGenres.take(3) + p.topLanguage.takeIf { it.isNotBlank() && it != "English" }.let { listOfNotNull(it) }).distinct()
+    }
+
+    /** Categories next to his own (Phonk -> Brazilian phonk, Trap, Hip-Hop ...). */
+    fun adjacentCategories(c: Context): List<String> {
+        val mine = favoriteCategories(c)
+        return mine.flatMap { ADJACENT[it].orEmpty() }.distinct().filter { it !in mine }
+    }
+
+    /** Everything else: new categories to discover. */
+    fun diverseCategories(c: Context): List<String> {
+        val own = (favoriteCategories(c) + adjacentCategories(c)).toSet()
+        return (DISCOVERY_GENRES + listOf("Indie", "K-Pop", "Afrobeats", "Reggaeton", "Country", "Gospel", "Blues", "Lo-Fi", "Retro Hindi", "90s Hindi", "Tamil", "Telugu")).filter { it !in own }.distinct()
+    }
+
+    /** Popular + new songs of one category (for the endless scroll). */
+    suspend fun categorySongs(c: Context, category: String, taken: MutableSet<String>, limit: Int = 12): List<OnlineTrackResult> = withContext(Dispatchers.Default) {
+        val p = profile(c)
+        val cands = MusicSources.youtube(c, "$category popular songs", category, "", null, 12) + MusicSources.youtube(c, "$category new songs 2026", category, "", null, 10)
+        resolveAll(c, pick(p, cands, RankWeights.POPULAR, limit + 4, 2, taken, System.currentTimeMillis()), limit)
     }
 
     fun topGenres(c: Context): List<String> = profile(c).topGenres.take(4)

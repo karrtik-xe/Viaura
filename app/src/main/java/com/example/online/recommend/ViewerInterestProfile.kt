@@ -178,36 +178,6 @@ object OnlineInterestProfile {
         "Dude Perfect", "Sony SAB", "TVF", "Mark Rober", "Vox"
     )
 
-    val POPULAR_AUDIO_CHANNELS = listOf(
-        "T-Series", "Sony Music India", "Zee Music Company", "Tips Official", "Saregama Music", "Speed Records",
-        "Atlantic Records", "Warner Records", "UMG", "Lofi Girl"
-    )
-
-    // ---------- audio taste: popular hits of the language / genre the listener sticks to ----------
-
-    private val POPULAR_BY_CATEGORY = mapOf(
-        "punjabi" to listOf("punjabi hit songs", "latest punjabi songs", "top punjabi songs"),
-        "phonk" to listOf("popular phonk songs", "top phonk music"),
-        "retro" to listOf("old hindi hit songs", "evergreen old songs", "90s hindi hits"),
-        "bollywood" to listOf("bollywood hit songs", "top hindi songs", "arijit singh hits"),
-        "rap" to listOf("hindi rap songs", "indian rap hits"),
-        "english" to listOf("english top hits", "english pop hits")
-    )
-    private val POPULAR_RAP = listOf("hindi rap songs", "indian rap hits", "emiway bantai", "badshah rap", "raftaar rap", "divine rap")
-    private val POPULAR_HINDI = listOf("bollywood hit songs", "top hindi songs", "new hindi songs")
-
-    /**
-     * What a listener of [focusNames] may like besides the very same thing: first the popular hits of his own
-     * language / genre (Punjabi listener -> Punjabi hits), then popular creators' rap songs, then popular Hindi / Bollywood.
-     */
-    fun audioPopularGroups(focusNames: List<String>): List<List<String>> {
-        val own = focusNames.flatMap { POPULAR_BY_CATEGORY[categoryOf(it)] ?: emptyList() }.distinct()
-        return listOf(own, POPULAR_RAP, POPULAR_HINDI).filter { it.isNotEmpty() }
-    }
-
-    fun audioPopularQueries(focusNames: List<String>): List<String> =
-        audioPopularGroups(focusNames).flatten().distinct()
-
     // ---------- storage ----------
 
     private fun prefs(c: Context) = c.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

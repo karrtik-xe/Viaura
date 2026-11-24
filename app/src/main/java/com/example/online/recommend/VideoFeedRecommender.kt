@@ -70,6 +70,7 @@ object OnlineVideoRecommender {
     fun recordOpened(c: Context, videoUrl: String, channel: String, title: String = "") {
         // a tap alone is a weak signal; the topic gets its real weight once half of the video is watched
         if (title.isNotBlank()) OnlineInterestProfile.record(c, OnlineInterestProfile.KIND_VIDEO, title, TAP_WEIGHT)
+        VideoRecoEngine.recordPlay(c, videoUrl, title, channel)
         val opened = readArr(c, KEY_OPENED)
         val list = (0 until opened.length()).map { opened.optString(it) }.toMutableList()
         if (!list.contains(videoUrl)) list.add(videoUrl)
@@ -112,12 +113,48 @@ object OnlineVideoRecommender {
         synchronized(this) {
             val set = completedSet(c)
             if (!set.add(videoUrl)) return
+            VideoRecoEngine.addEngagement(c, videoUrl, 1.5)
             while (set.size > MAX_COMPLETED) set.remove(set.first())
             prefs(c).edit().putString(KEY_COMPLETED, JSONArray(set.toList()).toString()).apply()
         }
     }
 
     fun isCompleted(c: Context, videoUrl: String): Boolean = videoUrl in completedSet(c)
+
+    /** Like button: a strong positive signal for the video's topic and creator. */
+    fun recordLiked(c: Context, videoUrl: String) = VideoRecoEngine.addEngagement(c, videoUrl, 2.0)
+
+    /** Dislike button or leaving a video within seconds: this kind of video is pushed down. */
+    fun recordDisliked(c: Context, videoUrl: String) = VideoRecoEngine.addEngagement(c, videoUrl, -1.5)
+
+    /**
+     * Up Next for the playing video: YouTube's related list re-ranked by similarity to it (title, description, creator), to the
+     * watch history and by creator affinity, freshness and popularity; one creator never repeats back to back. Runs on the caller's
+     * thread in a few milliseconds (the heavy tag / comment lookups happen earlier in the background).
+     */
+    fun rankUpNext(
+        c: Context, seedUrl: String, seedTitle: String, seedChannel: String, seedDescription: String, related: List<OnlineTrackResult>
+    ): List<OnlineTrackResult> {
+        return try {
+            val seed = VideoRecoEngine.Seed(seedTitle, seedChannel, seedDescription, VideoRecoEngine.seedSentiment(c, seedUrl))
+            val opened = readArr(c, KEY_OPENED).let { a -> (0 until a.length()).map { a.optString(it) }.toSet() }
+            val aff = readObj(c, KEY_WATCHED).let { o -> o.keys().asSequence().associate { it.lowercase(Locale.ROOT) to o.optDouble(it, 0.0) } }
+            val ranked = VideoRecoEngine.rank(c, related.filter { it.videoUrl != seedUrl }, seed, { isCompleted(c, it) }, opened, ignoredChannels(c), aff)
+            spreadChannels(ranked)
+        } catch (_: Throwable) {
+            spreadChannels(related)
+        }
+    }
+
+    /** Trending videos (the YouTube trending page through the extractor), cached for 30 minutes. */
+    suspend fun fetchTrending(c: Context, limit: Int = 20): List<OnlineTrackResult> {
+        val hit = trendingCache
+        if (hit != null && System.currentTimeMillis() - hit.first < 30 * 60_000L) return hit.second.take(limit)
+        val list = OnlineMusicService.fetchTrendingVideos(limit + 10)
+        if (list.isNotEmpty()) trendingCache = System.currentTimeMillis() to list
+        return list.take(limit)
+    }
+    @Volatile private var trendingCache: Pair<Long, List<OnlineTrackResult>>? = null
 
     /** True when the video was opened (played) at least once or watched to the end: the Subs tab then stops listing it. */
     fun isWatched(c: Context, videoUrl: String): Boolean {
@@ -161,6 +198,7 @@ object OnlineVideoRecommender {
     fun recordWatchedHalf(c: Context, videoUrl: String) {
         if (videoUrl.isBlank() || videoUrl in creditedSet(c)) return
         val meta = takeCredit(c, videoUrl) ?: return
+        VideoRecoEngine.addEngagement(c, videoUrl, 1.0)
         val title = meta.optString("t")
         val channel = meta.optString("c")
         if (title.isNotBlank()) OnlineInterestProfile.record(c, OnlineInterestProfile.KIND_VIDEO, title, WATCH_WEIGHT)
@@ -298,7 +336,7 @@ object OnlineVideoRecommender {
 
         val focus = OnlineInterestProfile.focus(context, OnlineInterestProfile.KIND_VIDEO, 2)
         if (focus.isNotEmpty()) {
-            return@coroutineScope fetchInterestBatch(context, focus, excludeUrls, usedQueries, total, shown, opened, onScreenChannels)
+            return@coroutineScope withTrending(context, fetchInterestBatch(context, focus, excludeUrls, usedQueries, total, shown, opened, onScreenChannels), excludeUrls)
         }
 
         val similarQueries = if (favs.isEmpty()) emptyList() else
@@ -343,7 +381,25 @@ object OnlineVideoRecommender {
         val mixed = if (favs.isEmpty()) discovery.take(rest)
         else OnlineRecommendationMixer.mix(similar = similar, discovery = discovery, total = rest)
         // NEW uploads of subscribed channels stay on top, the personalised / discovery mix follows.
-        subscribed + spreadChannels(mixed)
+        withTrending(context, subscribed + spreadChannels(mixed), excludeUrls)
+    }
+
+    /** 3 trending videos that fit the watch history best are scattered into a batch (never at the very top, never next to each other). */
+    private suspend fun withTrending(context: Context, batch: List<OnlineTrackResult>, excludeUrls: Set<String>): List<OnlineTrackResult> {
+        return try {
+            val have = batch.map { it.videoUrl }.toSet()
+            val opened = readArr(context, KEY_OPENED).let { a -> (0 until a.length()).map { a.optString(it) }.toSet() }
+            val fresh = fetchTrending(context, 30).filter { it.videoUrl !in have && it.videoUrl !in excludeUrls && it.durationSec >= 60L && !isCompleted(context, it.videoUrl) }
+            val aff = readObj(context, KEY_WATCHED).let { o -> o.keys().asSequence().associate { it.lowercase(Locale.ROOT) to o.optDouble(it, 0.0) } }
+            val picks = spreadChannels(VideoRecoEngine.rank(context, fresh, null, { isCompleted(context, it) }, opened, ignoredChannels(context), aff)).take(3)
+            val out = batch.toMutableList()
+            picks.forEachIndexed { i, t -> out.add((4 + i * 6).coerceAtMost(out.size), t) }
+            out
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            batch
+        }
     }
 
     /**
@@ -528,5 +584,189 @@ object OnlineVideoRecommender {
             out.add(pending.removeAt(idx))
         }
         return out
+    }
+}
+
+// =====================================================================================================================
+// ONLINE VIDEO RECOMMENDATION ENGINE (local, no AI service, separate from the music taste)
+//
+//  * Learns only from videos that were really PLAYED: title, tags, category, channel, description and the mood of the comments
+//    (a small word-list sentiment), plus how they were watched (half / finished / liked / disliked / skipped).
+//  * Text similarity is TF-IDF + cosine over those words, computed on the phone (the same idea as the open-source
+//    "YT-Recommendation" project: content similarity of titles / tags, sentiment of comments).
+//  * Up Next = YouTube's own related list of the playing video, re-ranked by similarity to it (most weight), to the watch history
+//    profile, by channel affinity, freshness and popularity; finished / opened / ignored videos go down, one channel never repeats
+//    back to back. Everything heavy (tags, comments) is fetched in the background on a low priority thread.
+// =====================================================================================================================
+internal object VideoRecoEngine {
+    private const val PREFS = "viaura_video_taste"
+    private const val MAX_DOCS = 250
+    private const val HALF_LIFE_DAYS = 21.0
+    private val exec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "viaura-video-taste").apply { isDaemon = true; priority = Thread.MIN_PRIORITY }
+    }
+    private val STOP = setOf(
+        "the", "and", "for", "with", "this", "that", "from", "you", "your", "are", "was", "were", "will", "have", "has", "had", "not", "but", "all", "can",
+        "how", "what", "why", "who", "when", "where", "new", "official", "video", "videos", "full", "part", "episode", "live", "channel", "subscribe", "like",
+        "share", "comment", "watch", "best", "top", "ka", "ki", "ke", "ko", "hai", "hain", "mein", "me", "se", "par", "aur", "ye", "yeh", "wo", "woh", "kya",
+        "https", "http", "www", "com", "youtube", "shorts", "short", "hindi", "english"
+    )
+    private val POS = setOf(
+        "great", "awesome", "amazing", "love", "loved", "best", "good", "nice", "helpful", "thanks", "thank", "excellent", "perfect", "wow", "brilliant",
+        "fantastic", "superb", "mast", "badiya", "zabardast", "shandar", "kamal", "accha", "acha", "sahi", "underrated", "masterpiece", "legend"
+    )
+    private val NEG = setOf(
+        "bad", "worst", "hate", "boring", "waste", "fake", "clickbait", "trash", "terrible", "awful", "useless", "disappointing", "scam", "cringe",
+        "bekar", "faltu", "ghatiya", "bakwas", "overrated", "misleading"
+    )
+
+    private fun prefs(c: Context) = c.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun tokens(text: String): List<String> =
+        text.lowercase(Locale.ROOT).split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 3 && it !in STOP && !it.all { ch -> ch.isDigit() } }
+
+    private fun termFreq(parts: List<Pair<String, Double>>): Map<String, Double> {
+        val tf = HashMap<String, Double>()
+        for ((text, w) in parts) for (t in tokens(text)) tf[t] = (tf[t] ?: 0.0) + w
+        return tf
+    }
+
+    private class Doc(val url: String, val title: String, val channel: String, val tags: String, val category: String, val desc: String, val w: Double, val ts: Long, val sent: Double)
+
+    private fun docs(c: Context): MutableList<JSONObject> = synchronized(this) {
+        try {
+            val a = JSONArray(prefs(c).getString("docs", "[]") ?: "[]")
+            (0 until a.length()).mapNotNull { a.optJSONObject(it) }.toMutableList()
+        } catch (_: Throwable) { mutableListOf() }
+    }
+
+    private fun save(c: Context, list: List<JSONObject>) = synchronized(this) {
+        val trimmed = if (list.size > MAX_DOCS) list.takeLast(MAX_DOCS) else list
+        prefs(c).edit().putString("docs", JSONArray(trimmed).toString()).apply()
+    }
+
+    private fun toDoc(o: JSONObject) = Doc(o.optString("u"), o.optString("t"), o.optString("c"), o.optString("tags"), o.optString("cat"), o.optString("d"), o.optDouble("w", 0.6), o.optLong("ts"), o.optDouble("s", 0.5))
+
+    private fun docTf(d: Doc): Map<String, Double> =
+        termFreq(listOf(d.title to 2.0, d.tags to 3.0, d.category to 2.0, d.channel to 1.5, d.desc to 1.0))
+
+    /** A video the user started: stored with a small weight; its tags / category / comments are fetched in the background. */
+    fun recordPlay(c: Context, url: String, title: String, channel: String) {
+        if (url.isBlank()) return
+        synchronized(this) {
+            val list = docs(c)
+            val old = list.firstOrNull { it.optString("u") == url }
+            list.removeAll { it.optString("u") == url }
+            val o = old ?: JSONObject().put("u", url).put("t", title).put("c", channel).put("w", 0.6)
+            o.put("t", title.ifBlank { o.optString("t") }).put("c", channel.ifBlank { o.optString("c") }).put("ts", System.currentTimeMillis())
+            list.add(o)
+            save(c, list)
+            if (!o.has("tags")) enrichLater(c, url)
+        }
+    }
+
+    /** Watch behaviour: finished / half = interest, like = strong, dislike / skip = negative. */
+    fun addEngagement(c: Context, url: String, delta: Double) {
+        synchronized(this) {
+            val list = docs(c)
+            val o = list.firstOrNull { it.optString("u") == url } ?: return
+            o.put("w", (o.optDouble("w", 0.6) + delta).coerceIn(0.1, 8.0))
+            save(c, list)
+        }
+    }
+
+    private fun enrichLater(c: Context, url: String) {
+        exec.execute {
+            try {
+                OnlineMusicService.ensureInit()
+                val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(org.schabi.newpipe.extractor.ServiceList.YouTube, url)
+                val tags = (info.tags ?: emptyList()).joinToString(" ")
+                val category = info.category ?: ""
+                val desc = (info.description?.content ?: "").take(400)
+                val sent = commentSentiment(url)
+                synchronized(this) {
+                    val list = docs(c)
+                    val o = list.firstOrNull { it.optString("u") == url } ?: return@execute
+                    o.put("tags", tags).put("cat", category).put("d", desc).put("s", sent)
+                    save(c, list)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    /** 0..1 (0.5 = neutral): the share of positive words among the sentiment words of the top comments. */
+    private fun commentSentiment(url: String): Double = try {
+        val info = org.schabi.newpipe.extractor.comments.CommentsInfo.getInfo(org.schabi.newpipe.extractor.ServiceList.YouTube, url)
+        var pos = 0
+        var neg = 0
+        for (item in info.relatedItems.take(30)) {
+            for (t in tokens(item.commentText?.content ?: "")) {
+                if (t in POS) pos++ else if (t in NEG) neg++
+            }
+        }
+        if (pos + neg == 0) 0.5 else pos.toDouble() / (pos + neg)
+    } catch (_: Throwable) {
+        0.5
+    }
+
+    fun seedSentiment(c: Context, url: String): Double = docs(c).firstOrNull { it.optString("u") == url }?.optDouble("s", 0.5) ?: 0.5
+
+    class Seed(val title: String, val channel: String, val description: String, val sentiment: Double = 0.5)
+
+    private fun cosine(a: Map<String, Double>, b: Map<String, Double>): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val (small, big) = if (a.size <= b.size) a to b else b to a
+        var dot = 0.0
+        for ((k, v) in small) dot += v * (big[k] ?: 0.0)
+        val na = Math.sqrt(a.values.sumOf { it * it })
+        val nb = Math.sqrt(b.values.sumOf { it * it })
+        return if (na == 0.0 || nb == 0.0) 0.0 else dot / (na * nb)
+    }
+
+    /** Candidates sorted best first. [channelAffinity] = how often each channel (lower case) was watched. */
+    fun rank(
+        c: Context, cands: List<OnlineTrackResult>, seed: Seed?, completed: (String) -> Boolean, opened: Set<String>,
+        ignoredChannels: Set<String>, channelAffinity: Map<String, Double>
+    ): List<OnlineTrackResult> {
+        if (cands.size < 2) return cands
+        val history = docs(c).map { toDoc(it) }
+        val now = System.currentTimeMillis()
+        val candTf = cands.map { termFreq(listOf(it.title to 2.0, it.artist to 1.5)) }
+        val seedTf = seed?.let { termFreq(listOf(it.title to 2.0, it.channel to 1.5, it.description.take(400) to 1.0)) }
+        // IDF over history + candidates + seed
+        val df = HashMap<String, Int>()
+        val all = history.map { docTf(it) } + candTf + listOfNotNull(seedTf)
+        for (tf in all) for (t in tf.keys) df[t] = (df[t] ?: 0) + 1
+        val n = all.size.toDouble()
+        fun vec(tf: Map<String, Double>) = tf.mapValues { (t, v) -> (1.0 + Math.log(v)) * (Math.log((n + 1) / ((df[t] ?: 0) + 1)) + 1.0) }
+        // profile = weighted sum of the watched videos (engagement x recency)
+        val profile = HashMap<String, Double>()
+        for (d in history) {
+            val ageDays = (now - d.ts) / 86_400_000.0
+            val weight = d.w * Math.pow(0.5, ageDays / HALF_LIFE_DAYS)
+            for ((t, v) in vec(docTf(d))) profile[t] = (profile[t] ?: 0.0) + v * weight
+        }
+        val seedVec = seedTf?.let { vec(it) }
+        val maxAff = channelAffinity.values.maxOrNull() ?: 1.0
+        val seedChannel = seed?.channel?.lowercase(Locale.ROOT).orEmpty()
+        val seedWeight = if (seedVec != null) 0.38 * (0.85 + 0.3 * (seed?.sentiment ?: 0.5)) else 0.0
+        val profileWeight = if (seedVec != null) 0.27 else 0.55
+        val scored = cands.mapIndexed { i, cand ->
+            val cv = vec(candTf[i])
+            val sim = if (seedVec != null) cosine(cv, seedVec) else 0.0
+            val prof = cosine(cv, profile)
+            val ch = cand.artist.lowercase(Locale.ROOT)
+            val aff = (channelAffinity[ch] ?: 0.0) / maxAff
+            val related = if (seedChannel.isNotBlank() && ch == seedChannel) 1.0 else 0.0
+            val ageDays = cand.uploadDateEpochMs?.let { (now - it) / 86_400_000.0 }
+            val fresh = if (ageDays == null) 0.2 else Math.exp(-ageDays.coerceAtLeast(0.0) / 60.0)
+            val pop = (Math.log(cand.viewCount + 1.0) / Math.log(1e9)).coerceIn(0.0, 1.0)
+            var s = seedWeight * sim + profileWeight * prof + 0.12 * aff + 0.07 * related + 0.09 * fresh + 0.07 * pop
+            if (completed(cand.videoUrl)) s *= 0.15 else if (cand.videoUrl in opened) s *= 0.55
+            if (ch in ignoredChannels) s *= 0.4
+            cand to s
+        }
+        return scored.sortedByDescending { it.second }.map { it.first }
     }
 }

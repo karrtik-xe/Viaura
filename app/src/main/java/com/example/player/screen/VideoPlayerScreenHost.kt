@@ -5116,10 +5116,17 @@ private fun ChannelPlayerSection(
     }
     // The recommended list follows the layout chosen for Online videos (Sort & View > Layout): List, Grid or Feed
     val recLayout = remember { com.example.ui.state.SettingsPreferencesManager.loadLayoutMode(context, "online_video") }
+    // Up Next: YouTube's related list of this video, re-ranked by the local video recommendation engine
+    val upNextTracks: List<OnlineTrackResult> = remember(details, hidden, watchUrl) {
+        val w = watchUrl
+        if (w == null) emptyList() else com.example.util.OnlineVideoRecommender.rankUpNext(
+            context, w, details?.title ?: video?.displayName.orEmpty(), details?.uploader ?: video?.channelName.orEmpty(),
+            details?.description.orEmpty(), details?.related.orEmpty().filter { it.videoUrl !in hidden }
+        )
+    }
     val relTrackByUrl: Map<String, OnlineTrackResult> = remember(details, hidden, watchUrl) {
         if (watchUrl != null) {
-            com.example.util.OnlineVideoRecommender.spreadChannels(details?.related.orEmpty().filter { it.videoUrl !in hidden })
-                .associateBy { it.videoUrl }
+            upNextTracks.associateBy { it.videoUrl }
         } else emptyMap()
     }
     val onRecClick: (VideoItem) -> Unit = { item ->
@@ -5132,8 +5139,7 @@ private fun ChannelPlayerSection(
     }
     val recommended: List<VideoItem> = remember(details, playlist, video) {
         val list: List<VideoItem> = if (watchUrl != null) {
-            val rel = details?.related.orEmpty().filter { it.videoUrl !in hidden }
-            com.example.util.OnlineVideoRecommender.spreadChannels(rel).map { it.toOnlineVideoItem() }
+            upNextTracks.map { it.toOnlineVideoItem() }
         } else {
             // Not YouTube (local file, Network tab link, stream, provider media):
             //  - a single movie gets NO recommendations,
@@ -5308,7 +5314,10 @@ private fun ChannelPlayerSection(
                             liked = !liked
                             if (liked) disliked = false
                             prefs.edit().putBoolean("like_${t.videoUrl}", liked).putBoolean("dislike_${t.videoUrl}", disliked).apply()
-                            if (liked) com.example.util.OnlineVideoRecommender.recordWatchedHalf(context, t.videoUrl)
+                            if (liked) {
+                                com.example.util.OnlineVideoRecommender.recordWatchedHalf(context, t.videoUrl)
+                                com.example.util.OnlineVideoRecommender.recordLiked(context, t.videoUrl)
+                            }
                         }
                         ChannelActionChip(
                             iconRes = dislikeIconRes,
@@ -5316,7 +5325,10 @@ private fun ChannelPlayerSection(
                             isDark = isDark, active = disliked
                         ) {
                             disliked = !disliked
-                            if (disliked) liked = false
+                            if (disliked) {
+                                liked = false
+                                com.example.util.OnlineVideoRecommender.recordDisliked(context, t.videoUrl)
+                            }
                             prefs.edit().putBoolean("like_${t.videoUrl}", liked).putBoolean("dislike_${t.videoUrl}", disliked).apply()
                         }
                         ChannelActionChip(

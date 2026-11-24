@@ -264,18 +264,19 @@ fun ChannelDetailScreen(
     BackHandler(enabled = actionTarget != null) { actionTarget = null }
 
     LaunchedEffect(channel?.channelUrl) {
-        val url = channel?.channelUrl
-        if (url.isNullOrBlank()) {
+        // an artist opened by name only ("artist:<name>") has no channel yet: the songs / playlists come from search below
+        val url = channel?.channelUrl?.takeIf { it.isNotBlank() && !it.startsWith("artist:") }
+        if (url == null && !(isAudioMode && channel != null)) {
             isLoading = false
             loadError = "Channel unavailable"
             return@LaunchedEffect
         }
         isLoading = true
         loadError = null
-        val result = OnlineMusicService.fetchChannelDetail(url)
+        val result = if (url == null) null else OnlineMusicService.fetchChannelDetail(url)
         if (result != null) {
             detail = result
-            tracks = result.initialTracks.items
+            tracks = result.initialTracks.items.distinctBy { com.example.util.MusicRecoEngine.songKeyOf(it.artist, it.title) }
             nextPage = result.initialTracks.nextPage
             hasNextPage = result.initialTracks.hasNextPage
         } else if (!isAudioMode) {
@@ -290,7 +291,7 @@ fun ChannelDetailScreen(
                         .filter { OnlineMusicService.isAudioOrMusicContent(it.title, it.artist, it.durationSec) }
                     val key = name.lowercase()
                     val own = found.filter { val a = it.artist.lowercase(); a.contains(key) || (a.length > 2 && key.contains(a)) }
-                    tracks = own.ifEmpty { found.take(20) }
+                    tracks = own.ifEmpty { found.take(20) }.distinctBy { com.example.util.MusicRecoEngine.songKeyOf(it.artist, it.title) }
                 }
                 if (result?.playlists.isNullOrEmpty()) {
                     val pls = OnlineMusicService.searchHomePlaylists(name, albums = false, limit = 8) +

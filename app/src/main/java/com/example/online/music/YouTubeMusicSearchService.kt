@@ -565,6 +565,21 @@ object OnlineMusicService {
      * Streams that are live right now (the "Live" tab of the Online Video home). The website has no "live" list of its own,
      * so a few "live" searches are read and only the items that are really live streams are kept.
      */
+    /** The YouTube trending page (default kiosk) as videos. Empty when it cannot be read. */
+    suspend fun fetchTrendingVideos(limit: Int = 30): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val extractor = ServiceList.YouTube.kioskList.defaultKioskExtractor
+            extractor.fetchPage()
+            extractor.initialPage.items.filterIsInstance<StreamInfoItem>()
+                .filter { it.streamType == org.schabi.newpipe.extractor.stream.StreamType.VIDEO_STREAM && it.duration > 0L }
+                .take(limit).map { it.toOnlineTrackResult() }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            emptyList()
+        }
+    }
+
     suspend fun fetchLiveStreams(limit: Int = 24): List<OnlineTrackResult> = withContext(Dispatchers.IO) {
         try {
             ensureInit()
@@ -793,6 +808,34 @@ object OnlineMusicService {
      * YouTube Music playlists ([albums] = false) or albums / EPs ([albums] = true) for a text, for the online music home.
      * Returns an empty list when nothing is found or the network fails.
      */
+    /**
+     * The channel of an artist by name: YouTube Music artists first, normal channels second. Unlike the strict channel filter of the
+     * normal search, the first real match is taken, so an artist page always has something to open.
+     */
+    suspend fun searchArtistChannel(name: String): OnlineChannelResult? = withContext(Dispatchers.IO) {
+        try {
+            ensureInit()
+            val service = ServiceList.YouTube
+            for (filter in listOf("music_artists", "channels")) {
+                try {
+                    val handler = service.searchQHFactory.fromQuery(name, listOf(filter), "")
+                    val extractor = service.getSearchExtractor(handler)
+                    extractor.fetchPage()
+                    val ch = extractor.initialPage.items.filterIsInstance<ChannelInfoItem>().firstOrNull() ?: continue
+                    return@withContext ch.toOnlineChannelResult()
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (_: Throwable) {
+                }
+            }
+            null
+        } catch (t: CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     suspend fun searchHomePlaylists(query: String, albums: Boolean, limit: Int = 10): List<OnlineHomePlaylist> = withContext(Dispatchers.IO) {
         try {
             ensureInit()
