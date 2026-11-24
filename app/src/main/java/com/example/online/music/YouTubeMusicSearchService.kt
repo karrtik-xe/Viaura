@@ -816,19 +816,29 @@ object OnlineMusicService {
         try {
             ensureInit()
             val service = ServiceList.YouTube
-            for (filter in listOf("music_artists", "channels")) {
+            fun clean(x: String) = x.lowercase().replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ").trim()
+            val wanted = clean(name)
+            val found = ArrayList<ChannelInfoItem>()
+            for (filter in listOf("channels", "music_artists")) {
                 try {
                     val handler = service.searchQHFactory.fromQuery(name, listOf(filter), "")
                     val extractor = service.getSearchExtractor(handler)
                     extractor.fetchPage()
-                    val ch = extractor.initialPage.items.filterIsInstance<ChannelInfoItem>().firstOrNull() ?: continue
-                    return@withContext ch.toOnlineChannelResult()
+                    found += extractor.initialPage.items.filterIsInstance<ChannelInfoItem>().take(6)
                 } catch (t: CancellationException) {
                     throw t
                 } catch (_: Throwable) {
                 }
             }
-            null
+            // the artist's own channel: same name, verified, most subscribers ("- Topic" channels have no real subscriber count)
+            val best = found.distinctBy { it.url }.maxWithOrNull(
+                compareBy<ChannelInfoItem>(
+                    { val n = clean(it.name ?: ""); if (n == wanted) 3 else if (n.contains(wanted) && !n.endsWith("topic")) 2 else if (n.contains(wanted)) 1 else 0 },
+                    { if (it.isVerified) 1 else 0 },
+                    { it.subscriberCount }
+                )
+            )
+            best?.toOnlineChannelResult()
         } catch (t: CancellationException) {
             throw t
         } catch (_: Throwable) {

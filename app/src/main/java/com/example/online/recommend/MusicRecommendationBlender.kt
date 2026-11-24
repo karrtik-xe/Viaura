@@ -560,6 +560,10 @@ object MusicTaste {
 
     fun hasData(c: Context): Boolean = store.entries(c).any { it.first.startsWith("t:") }
 
+    /** A song counts as the listener's taste only when he chose it, or really listened (30 s+ / finished). Auto-played queue songs he skipped do not. */
+    private fun qualified(e: JSONObject): Boolean = e.optBoolean("picked") || e.optLong("ms") >= 30_000L || e.optInt("comp") > 0 || e.optInt("fav") > 0
+
+    /** The player started a song (any reason). Only noted; it becomes taste once it is qualified (see [qualified]). */
     fun onPlayStart(c: Context, t: OnlineTrackResult) {
         val old = track(c, t.videoUrl)
         val now = System.currentTimeMillis()
@@ -569,22 +573,69 @@ object MusicTaste {
         e.put("title", t.title).put("artist", t.artist).put("thumb", t.thumbnailUrl ?: "").put("dur", t.durationSec)
             .put("plays", e.optInt("plays") + 1).put("replays", e.optInt("replays") + if (replay) 1 else 0).put("last", now)
         store.put(c, "t:${t.videoUrl}", e)
-        bump(c, "a:" + MusicText.artistKey(t.artist), if (replay) 1.6 else 1.0)
+        if (replay && qualified(e)) bump(c, "a:" + MusicText.artistKey(t.artist), 0.6)
+    }
+
+    /** The listener TAPPED this song himself (search result, speed dial, a row): a clear seed at once. */
+    fun onUserPicked(c: Context, t: OnlineTrackResult) {
+        val e = track(c, t.videoUrl) ?: JSONObject().put("title", t.title).put("artist", t.artist).put("thumb", t.thumbnailUrl ?: "").put("dur", t.durationSec).put("last", System.currentTimeMillis())
+        if (e.optBoolean("picked")) return
+        e.put("picked", true)
+        store.put(c, "t:${t.videoUrl}", e)
+        applyTaste(c, e, 1.2)
         changes.value = changes.value + 1
+    }
+
+    /** Adds a qualified song's artist / genre / sub-genre / language / era / mood to the taste ([weight] 1.0 = one normal listen). */
+    private fun applyTaste(c: Context, e: JSONObject, weight: Double) {
+        bump(c, "a:" + MusicText.artistKey(e.optString("artist")), weight)
+        if (e.has("g")) {
+            val conf = if (e.optString("metaSrc") == "title-hint") 0.35 else 1.0
+            bump(c, "g:" + e.optString("g"), weight * conf)
+            bump(c, "s:" + e.optString("s"), weight * conf)
+            bump(c, "l:" + e.optString("l"), 0.6 * weight * conf)
+            bump(c, "e:" + e.optString("e"), 0.6 * weight * conf)
+            bump(c, "m:" + e.optString("m"), 0.4 * weight * conf)
+        }
     }
 
     fun applyMeta(c: Context, url: String, meta: MusicMeta) {
         val e = track(c, url) ?: return
-        if (e.has("g") && e.optString("metaSrc") == meta.source) return
+        val firstTime = !e.has("g")
         e.put("g", meta.genre).put("s", meta.subgenre).put("l", meta.language).put("e", meta.era).put("m", meta.mood).put("metaSrc", meta.source)
         store.put(c, "t:$url", e)
-        val w = meta.confidence.toDouble()
-        bump(c, "g:" + meta.genre, 1.0 * w)
-        bump(c, "s:" + meta.subgenre, 1.0 * w)
-        bump(c, "l:" + meta.language, 0.6 * w)
-        bump(c, "e:" + meta.era, 0.6 * w)
-        bump(c, "m:" + meta.mood, 0.4 * w)
-        changes.value = changes.value + 1
+        // the genre part of the taste is added now only if the song already qualified (its artist was added when it qualified)
+        if (firstTime && qualified(e)) {
+            val conf = if (meta.source == "title-hint") 0.35 else 1.0
+            bump(c, "g:" + meta.genre, conf); bump(c, "s:" + meta.subgenre, conf)
+            bump(c, "l:" + meta.language, 0.6 * conf); bump(c, "e:" + meta.era, 0.6 * conf); bump(c, "m:" + meta.mood, 0.4 * conf)
+            changes.value = changes.value + 1
+        }
+    }
+
+    /**
+     * One-time clean start: the taste scores are rebuilt from the songs that really qualified, so songs that only auto-played (and were
+     * skipped) in older versions no longer pull the recommendations to other categories.
+     */
+    fun rebuildIfNeeded(c: Context) {
+        if (store.get(c, "meta:rebuilt3") != null) return
+        val now = System.currentTimeMillis()
+        store.entries(c).filter { it.first.length > 2 && it.first[1] == ':' && it.first[0] in "gsalem" }.forEach { store.remove(c, it.first) }
+        val sums = HashMap<String, Double>()
+        for ((k, e) in store.entries(c)) {
+            if (!k.startsWith("t:") || !qualified(e)) continue
+            val ageDays = (now - e.optLong("last")) / 86_400_000.0
+            val base = (1.0 + (e.optInt("plays") - 1).coerceIn(0, 4) * 0.4 + e.optInt("comp") * 0.8 + e.optInt("fav") * 1.5 + (if (e.optBoolean("picked")) 0.5 else 0.0)) * Math.pow(0.5, ageDays / 30.0)
+            val conf = if (e.optString("metaSrc") == "title-hint") 0.35 else 1.0
+            fun add(key: String, w: Double) { if (!key.endsWith(":")) sums[key] = (sums[key] ?: 0.0) + w }
+            add("a:" + MusicText.artistKey(e.optString("artist")), base)
+            if (e.has("g")) {
+                add("g:" + e.optString("g"), base * conf); add("s:" + e.optString("s"), base * conf)
+                add("l:" + e.optString("l"), 0.6 * base * conf); add("e:" + e.optString("e"), 0.6 * base * conf); add("m:" + e.optString("m"), 0.4 * base * conf)
+            }
+        }
+        sums.forEach { (k, v) -> store.put(c, k, JSONObject().put("v", v).put("t", now)) }
+        store.put(c, "meta:rebuilt3", JSONObject().put("t", now))
     }
 
     /** A song that was heard for [listenedMs] of [durationMs]: finished = strong interest, a long listen = interest, a quick skip = weak negative. */
@@ -592,7 +643,9 @@ object MusicTaste {
         val e = track(c, url) ?: return
         if (durationMs <= 0L) return
         val frac = (listenedMs.toDouble() / durationMs).coerceIn(0.0, 1.0)
+        val wasQualified = qualified(e)
         e.put("ms", e.optLong("ms") + listenedMs)
+        if (!wasQualified && qualified(e)) applyTaste(c, e, 1.0)
         val artistKey = "a:" + MusicText.artistKey(e.optString("artist"))
         when {
             frac >= 0.8 -> {
@@ -615,7 +668,7 @@ object MusicTaste {
             }
         }
         store.put(c, "t:$url", e)
-        changes.value = changes.value + 1
+        if (qualified(e)) changes.value = changes.value + 1
     }
 
     /** "Not interested": the song is never recommended again and its artist loses weight. */
@@ -650,11 +703,16 @@ object MusicTaste {
         Played(k.removePrefix("t:"), o.optString("title"), o.optString("artist"), o.optString("thumb").ifBlank { null }, o.optLong("dur"), o.optLong("last"), o.optInt("plays"), o.optInt("comp"))
     }
 
-    fun recent(c: Context, n: Int): List<Played> = played(c).sortedByDescending { it.last }.take(n)
+    /** The songs the listener really listened to / picked, newest first (these are the seeds of every recommendation). */
+    fun recent(c: Context, n: Int): List<Played> =
+        store.entries(c).filter { it.first.startsWith("t:") && qualified(it.second) }.map { (k, o) ->
+            Played(k.removePrefix("t:"), o.optString("title"), o.optString("artist"), o.optString("thumb").ifBlank { null }, o.optLong("dur"), o.optLong("last"), o.optInt("plays"), o.optInt("comp"))
+        }.sortedByDescending { it.last }.take(n)
 
     /** Artists with at least [minSongs] DIFFERENT songs played (the "I keep replaying this creator" signal), strongest first. */
     fun repeatedArtists(c: Context, minSongs: Int): List<Pair<String, Int>> =
-        played(c).filter { it.artist.isNotBlank() }.groupBy { it.artist }.map { it.key to it.value.size }
+        store.entries(c).filter { it.first.startsWith("t:") && qualified(it.second) && it.second.optString("artist").isNotBlank() }
+            .groupBy { it.second.optString("artist") }.map { it.key to it.value.size }
             .filter { it.second >= minSongs }.sortedByDescending { it.second }
 }
 
@@ -671,6 +729,7 @@ object MusicListeningTracker {
         if (started) return
         started = true
         val app = context.applicationContext
+        scope.launch { try { MusicTaste.rebuildIfNeeded(app) } catch (_: Throwable) {} }
         scope.launch {
             com.example.player.AudioPlaybackManager.currentTrack.collect { t -> onTrack(app, t) }
         }
@@ -995,15 +1054,20 @@ object MusicRecoEngine {
         val out = ArrayList<MusicCandidate>()
         val artistCount = HashMap<String, Int>()
         val subCount = HashMap<String, Int>()
+        val pickedWords = ArrayList<Set<String>>()
         for ((cand, _) in scored) {
             if (out.size >= limit) break
             val key = MusicText.songKey(cand.artist, cand.title)
             if (key in taken || key in p.rejected) continue
+            // versions of one song with a slightly different title ("Unique Dance", "Unique Dance Deewana") are the same song
+            val words = MusicText.baseTitle(cand.title).split(' ').filter { it.length > 2 }.toSet()
+            if (words.size >= 2 && pickedWords.any { o -> o.size >= 2 && o.intersect(words).size.toDouble() / o.union(words).size >= 0.6 }) continue
             if (!allowHeard && key in p.heardKeys) continue
             val ak = MusicText.artistKey(cand.artist)
             if ((artistCount[ak] ?: 0) >= perArtist) continue
             if (cand.subgenre.isNotBlank() && out.size >= 6 && (subCount[cand.subgenre] ?: 0) >= (limit * 0.7).toInt().coerceAtLeast(4)) continue
             taken.add(key)
+            pickedWords.add(words)
             artistCount[ak] = (artistCount[ak] ?: 0) + 1
             subCount[cand.subgenre] = (subCount[cand.subgenre] ?: 0) + 1
             out.add(cand)
@@ -1112,12 +1176,12 @@ object MusicRecoEngine {
         if (last != null) {
             // exactly what YouTube Music would play after the last song (its radio), in its order
             val basedOn = pool.all.filter { it.source == "radio" && it.relatedTo != null && MusicText.artistKey(it.relatedTo) == lastArtistKey }
-            add("recent", "Based on ${shortTitle(last.title).ifBlank { "your last song" }}", pick(p, basedOn, RankWeights.RADIO, 16, 3, taken, now, allowHeard = true), 12)
+            add("recent", "Based on ${shortTitle(last.title).ifBlank { "your last song" }}", pick(p, basedOn, RankWeights.RADIO, 16, 2, taken, now, allowHeard = true), 12)
             val second = p.recent.firstOrNull { MusicText.artistKey(it.artist) != lastArtistKey }
             if (second != null) {
                 val secKey = MusicText.artistKey(second.artist)
                 val more = pool.all.filter { it.source == "radio" && it.relatedTo != null && MusicText.artistKey(it.relatedTo) == secKey }
-                add("similar", "More like ${shortTitle(second.title).ifBlank { second.artist }}", pick(p, more, RankWeights.RADIO, 16, 3, taken, now, allowHeard = true), 12)
+                add("similar", "More like ${shortTitle(second.title).ifBlank { second.artist }}", pick(p, more, RankWeights.RADIO, 16, 2, taken, now, allowHeard = true), 12)
             }
         }
         add("trending", "Trending music", pick(p, pool.all.filter { it.trend }, RankWeights.TRENDING, 14, 2, taken, now), 12)

@@ -562,8 +562,9 @@ fun OnlineMusicPanel(
         )
 
         scope.launch(Dispatchers.IO) {
-            // repeat count for the speed dial
+            // repeat count for the speed dial + a clear seed for the recommendations (he tapped this song himself)
             OnlineMusicHomeStats.bump(context, result)
+            MusicTaste.onUserPicked(context, result)
             // Lyrics are fetched centrally by AudioPlaybackManager.loadLyricsFor().
             // The next songs: same kind of music as the song that is really playing (genre / sub-genre / era / language), other
             // artists, some fresh - built by MusicRecoEngine. The listening itself is tracked by MusicListeningTracker.
@@ -623,7 +624,10 @@ fun OnlineMusicPanel(
         val items = list.map { it.toAudioTrackItem() }
         AudioPlaybackManager.openFullScreen()
         AudioPlaybackManager.playTrack(context = context, track = items.first(), newQueue = items)
-        scope.launch(Dispatchers.IO) { OnlineMusicHomeStats.bump(context, list.first()) }
+        scope.launch(Dispatchers.IO) {
+            OnlineMusicHomeStats.bump(context, list.first())
+            MusicTaste.onUserPicked(context, list.first())
+        }
     }
     fun openHomePlaylist(url: String) {
         val open = onOpenSharedPlaylist ?: return
@@ -974,7 +978,10 @@ fun OnlineMusicPanel(
                     onNotInterested = {
                         picks.forEach { v ->
                             OnlineMediaLibrary.markNotInterested(context, kind, v.videoUrl)
-                            if (kind == OnlineMediaLibrary.KIND_AUDIO) MusicTaste.markRejected(context, v.videoUrl, v.artist)
+                            if (kind == OnlineMediaLibrary.KIND_AUDIO) {
+                                MusicTaste.markRejected(context, v.videoUrl, v.artist)
+                                OnlineMusicHomeStats.forget(context, v.videoUrl)
+                            }
                         }
                         watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
                         hiddenVersion++
@@ -1134,6 +1141,18 @@ internal object OnlineMusicHomeStats {
         OnlineMusicHomeState.stale = true
     }
 
+    /** "Not interested": the song leaves the repeat counter (and so the speed dial) for good. */
+    @Synchronized
+    fun forget(c: android.content.Context, url: String) {
+        try {
+            val songs = read(c, "songs")
+            if (songs.has(url)) {
+                songs.remove(url)
+                prefs(c).edit().putString("songs", songs.toString()).apply()
+            }
+        } catch (_: Throwable) {}
+    }
+
     fun playlists(c: android.content.Context, limit: Int): List<OmHomeTile> {
         return try {
             val pls = read(c, "playlists")
@@ -1152,6 +1171,10 @@ internal object OnlineMusicHomeStats {
 }
 
 private object OmHomeBuilder {
+    /** "Not interested" songs of the moment the home is built: they are in no row, no speed dial and no mix. */
+    @Volatile private var hiddenNow: Set<String> = emptySet()
+    private fun refreshHidden(c: android.content.Context) { hiddenNow = OnlineMediaLibrary.notInterestedSet(c, OnlineMediaLibrary.KIND_AUDIO) }
+
     private fun baseKey(t: OnlineTrackResult) = "t:" + MusicRecoEngine.songKeyOf(t.artist, t.title)
 
     private fun playlistTile(p: com.example.util.OnlineHomePlaylist, label: String) = OmHomeTile(
@@ -1166,15 +1189,15 @@ private object OmHomeBuilder {
 
     /** One song / playlist is shown once on the whole home: different uploads / versions of the same song count as the same song. */
     private fun uniqueTile(t: OmHomeTile, used: MutableSet<String>): Boolean =
-        if (t.track != null) used.add(baseKey(t.track)) else used.add("i:" + t.id)
+        if (t.track != null) (t.track.videoUrl !in hiddenNow && used.add(baseKey(t.track))) else used.add("i:" + t.id)
 
     private fun dedupe(sections: List<OmHomeSection>, used: MutableSet<String>): List<OmHomeSection> {
         val out = ArrayList<OmHomeSection>()
         for (sec in sections) {
             when (sec) {
-                is OmHomeSection.SpeedDial -> { sec.tiles.forEach { uniqueTile(it, used) }; out.add(sec) }
+                is OmHomeSection.SpeedDial -> { sec.tiles.forEach { uniqueTile(it, used) }; out.add(OmHomeSection.SpeedDial(sec.tiles.filter { it.track == null || it.track.videoUrl !in hiddenNow })) }
                 is OmHomeSection.SongMixes -> {
-                    val l = sec.tracks.filter { used.add(baseKey(it)) }
+                    val l = sec.tracks.filter { it.videoUrl !in hiddenNow && used.add(baseKey(it)) }
                     if (l.size >= 4) out.add(OmHomeSection.SongMixes(l))
                 }
                 is OmHomeSection.Squares -> sec.items.filter { uniqueTile(it, used) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares(sec.key, sec.title, it)) }
@@ -1183,7 +1206,7 @@ private object OmHomeBuilder {
                 is OmHomeSection.Artists -> out.add(sec)
                 is OmHomeSection.SongCards -> {
                     val cards = sec.cards.mapNotNull { c ->
-                        val t = c.tracks.filter { used.add(baseKey(it)) }
+                        val t = c.tracks.filter { it.videoUrl !in hiddenNow && used.add(baseKey(it)) }
                         if (t.isEmpty()) null else c.copy(tracks = t)
                     }
                     if (cards.isNotEmpty()) out.add(OmHomeSection.SongCards(sec.key, sec.title, cards))
@@ -1195,7 +1218,7 @@ private object OmHomeBuilder {
 
     /** 9 per page, at least 4 pages: most repeated / newest played songs, opened playlists, then charts of the listener's taste. */
     private fun speedDial(c: android.content.Context, fill: List<OnlineTrackResult>, extras: List<OnlineTrackResult>): OmHomeSection.SpeedDial {
-        val songs = OnlineMusicHomeStats.topSongs(c, 40).map { trackTile(it) }
+        val songs = OnlineMusicHomeStats.topSongs(c, 60).filter { it.videoUrl !in hiddenNow }.take(40).map { trackTile(it) }
         val playlists = OnlineMusicHomeStats.playlists(c, 12)
         val mixed = ArrayList<OmHomeTile>()
         var si = 0
@@ -1207,11 +1230,11 @@ private object OmHomeBuilder {
         val seen = mixed.mapNotNull { it.track }.map { baseKey(it) }.toMutableSet()
         for (t in fill) {
             if (mixed.size >= 36) break
-            if (seen.add(baseKey(t))) mixed.add(trackTile(t))
+            if (t.videoUrl !in hiddenNow && seen.add(baseKey(t))) mixed.add(trackTile(t))
         }
         val dial = mixed.take(45).toMutableList()
         // exactly two fresh songs (different artists / genres), spread out: never next to each other
-        val fresh = extras.filter { baseKey(it) !in seen }.distinctBy { baseKey(it) }.take(2)
+        val fresh = extras.filter { it.videoUrl !in hiddenNow && baseKey(it) !in seen }.distinctBy { baseKey(it) }.take(2)
         val slots = listOf(4, 16)
         fresh.forEachIndexed { i, t -> dial.add(slots[i].coerceAtMost(dial.size), trackTile(t)) }
         return OmHomeSection.SpeedDial(dial)
@@ -1233,6 +1256,7 @@ private object OmHomeBuilder {
 
     /** Instant home from what is saved on the phone (works offline). */
     fun cachedHome(c: android.content.Context, used: MutableSet<String>): List<OmHomeSection> {
+        refreshHidden(c)
         val feed = MusicRecoEngine.cachedFeed(c)
         if (feed.isEmpty() && OnlineMusicHomeStats.topSongs(c, 1).isEmpty()) return emptyList()
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty()
@@ -1240,6 +1264,7 @@ private object OmHomeBuilder {
     }
 
     suspend fun firstBatch(c: android.content.Context, used: MutableSet<String>): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
+        refreshHidden(c)
         val extrasJob = async { try { MusicRecoEngine.speedDialExtras(c, 2) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
         val feed = MusicRecoEngine.feed(c, mutableSetOf())
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "new" }?.tracks.orEmpty()
@@ -1254,11 +1279,12 @@ private object OmHomeBuilder {
      * moves on to the next category, so the scroll never stops.
      */
     suspend fun moreBatch(c: android.content.Context, batch: Int, used: MutableSet<String>): List<OmHomeSection> {
+        refreshHidden(c)
         val fav = MusicRecoEngine.favoriteCategories(c).ifEmpty { listOf("Phonk", "Hindi", "Pop") }
         val adj = MusicRecoEngine.adjacentCategories(c).ifEmpty { MusicRecoEngine.diverseCategories(c) }
         val div = MusicRecoEngine.diverseCategories(c).ifEmpty { listOf("Indie", "Jazz", "Rock") }
         val variants = listOf("playlist", "mix", "best songs playlist", "hits playlist", "new songs playlist", "top playlist")
-        for (attempt in 0 until 4) {
+        for (attempt in 0 until 8) {
             val n = batch + attempt
             val stage = if (n < 6) 0 else if (n < 12) 1 else 2
             val cats = when (stage) { 0 -> fav; 1 -> adj; else -> div }
@@ -1266,11 +1292,12 @@ private object OmHomeBuilder {
             val cat = cats[idx % cats.size]
             val variant = variants[(idx / cats.size.coerceAtLeast(1) + stage) % variants.size]
             val sections = ArrayList<OmHomeSection>()
-            val pls = OnlineMusicService.searchHomePlaylists("$cat $variant", albums = false, limit = 10)
+            val pls = try { OnlineMusicService.searchHomePlaylists("$cat $variant", albums = false, limit = 10) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
             if (pls.isNotEmpty()) sections.add(OmHomeSection.Squares("om_more_pl_${cat}_$n", if (stage == 0) "$cat playlists" else "$cat for you", pls.map { playlistTile(it, "Playlist") }))
-            if (stage >= 1) {
-                val songs = MusicRecoEngine.categorySongs(c, cat, mutableSetOf(), 12)
-                if (songs.size >= 3) sections.add(OmHomeSection.Squares("om_more_songs_${cat}_$n", "$cat songs", songs.map { trackTile(it) }))
+            // songs of the category: always added after the first stage, and also when no playlist was found, so a page is never empty
+            if (stage >= 1 || sections.isEmpty()) {
+                val songs = try { MusicRecoEngine.categorySongs(c, cat, mutableSetOf(), 12) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+                if (songs.size >= 3) sections.add(OmHomeSection.Squares("om_more_songs_${cat}_$n", if (stage == 0) "$cat mix" else "$cat songs", songs.map { trackTile(it) }))
             }
             val out = dedupe(sections, used)
             if (out.isNotEmpty()) {
@@ -1278,7 +1305,9 @@ private object OmHomeBuilder {
                 return out
             }
         }
-        return emptyList()
+        // last resort: the engine's own genre sections
+        val extra = try { MusicRecoEngine.moreSections(c, batch, mutableSetOf()) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+        return dedupe(convert(extra), used).also { l -> l.forEach { used.add(it.key) } }
     }
 
     // ---- tabs ----
@@ -1509,11 +1538,21 @@ private fun OmHomeFeed(
                             OmSectionTitle(
                                 "Song mixes", primary,
                                 trailing = {
-                                    Text(
-                                        "Play all", color = primary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.clip(RoundedCornerShape(50)).border(1.dp, secondary, RoundedCornerShape(50))
-                                            .clickable { onPlayQueue(section.tracks) }.padding(horizontal = 18.dp, vertical = 9.dp)
-                                    )
+                                    // like the provider's "See all": the text and a thin gradient line under it
+                                    Column(
+                                        modifier = Modifier
+                                            .width(androidx.compose.foundation.layout.IntrinsicSize.Max)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) { onPlayQueue(section.tracks.filter { it.videoUrl !in hidden }) }
+                                            .padding(horizontal = 2.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("Play all", color = primary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                        Spacer(Modifier.height(3.dp))
+                                        Box(
+                                            Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(1.dp))
+                                                .background(com.example.ui.theme.AccentGradient)
+                                        )
+                                    }
                                 }
                             )
                             val colState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -1535,7 +1574,7 @@ private fun OmHomeFeed(
                     is OmHomeSection.Squares -> {
                         Column {
                             OmSectionTitle(section.title, primary)
-                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, ::tileClick)
+                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, { t -> t.track?.let(onActionTarget) }, ::tileClick)
                         }
                     }
                     is OmHomeSection.ArtistRow -> {
@@ -1550,13 +1589,13 @@ private fun OmHomeFeed(
                                 Text(section.channel.name, color = primary, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text("\u203A", color = primary, fontSize = 28.sp)
                             }
-                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, ::tileClick)
+                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, { t -> t.track?.let(onActionTarget) }, ::tileClick)
                         }
                     }
                     is OmHomeSection.Community -> {
                         Column {
                             OmSectionTitle(section.title, primary)
-                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, ::tileClick)
+                            OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, { t -> t.track?.let(onActionTarget) }, ::tileClick)
                         }
                     }
                     is OmHomeSection.Artists -> {
@@ -1637,11 +1676,12 @@ private fun OmHomeFeed(
 
 /** A row of 1:1 tiles (cover, title, subtitle) that slides left / right. */
 @Composable
-private fun OmSquareRow(items: List<OmHomeTile>, isDark: Boolean, primary: Color, secondary: Color, onClick: (OmHomeTile) -> Unit) {
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun OmSquareRow(items: List<OmHomeTile>, isDark: Boolean, primary: Color, secondary: Color, onLongClick: (OmHomeTile) -> Unit, onClick: (OmHomeTile) -> Unit) {
     val w = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp * 0.42f
     androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         items(items, key = { it.id }) { t ->
-            Column(Modifier.width(w).clickable { onClick(t) }) {
+            Column(Modifier.width(w).combinedClickable(onClick = { onClick(t) }, onLongClick = if (t.track != null) ({ onLongClick(t) }) else null)) {
                 OmCover(t.covers, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(10.dp)), isDark)
                 Text(t.title, color = primary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                 if (t.subtitle.isNotBlank()) Text(t.subtitle, color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
