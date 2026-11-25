@@ -578,6 +578,8 @@ fun ChannelDetailScreen(
                                     )
                                 }
                             }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            com.example.ui.components.VoiceSearchButton(onText = { searchQuery = it })
                         }
                     }
                 }

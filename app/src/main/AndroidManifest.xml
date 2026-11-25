@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Cast (DLNA / UPnP): finding TVs on the Wi-Fi network -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Voice search (microphone button of the search bars): asked at the first tap -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
@@ -31,6 +33,9 @@
         </intent>
         <intent>
             <action android:name="android.settings.WIFI_DISPLAY_SETTINGS" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
         <package android:name="com.samsung.android.smartmirroring" />
         <package android:name="com.milink.service" />

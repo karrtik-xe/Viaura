@@ -533,8 +533,15 @@ fun HomeScreen(
         mutableStateOf<AudioFolderItem?>(if (viewModel?.restoreOnlineMusicFolder == true) com.example.ui.screens.ONLINE_FOLDER_ITEM else null)
     }
     // Back from a playlist / channel / player lands in Otube again (not on the audio home with the folders)
+    var previousMusicFolder by remember { mutableStateOf(selectedMusicFolder) }
     LaunchedEffect(selectedMusicFolder) {
         viewModel?.restoreOnlineMusicFolder = selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH
+        // back out of a folder (Otube included, whatever way it was left): its search box does not stay on the folder list
+        if (previousMusicFolder != null && selectedMusicFolder == null) {
+            searchQuery = ""
+            isSearchActive = false
+        }
+        previousMusicFolder = selectedMusicFolder
     }
     var selectedRecentsFolder by remember { mutableStateOf<RecentsFolder?>(null) }
     var selectedPlaylist by remember {
@@ -1999,6 +2006,9 @@ fun HomeScreen(
                                     )
                                 }
                             }
+                            // Voice search: the microphone at the end of every search bar (same blue as the search icon)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            com.example.ui.components.VoiceSearchButton(onText = { searchQuery = it })
                         }
                     }
                 }

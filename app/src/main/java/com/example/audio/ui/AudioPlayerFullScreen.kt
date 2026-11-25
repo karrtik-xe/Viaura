@@ -28,6 +28,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.asPaddingValues
 import com.example.ui.components.extractArtworkColors
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.mutableLongStateOf
@@ -2040,7 +2042,9 @@ fun AudioPlayerScreen(
                 containerColor = floatingSheetBg,
                 scrimColor = Color.Black.copy(alpha = 0.35f),
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                dragHandle = null
+                dragHandle = null,
+                // no system-bar inset: the sheet itself reaches the screen's bottom edge, nothing is cut off there
+                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0)
             ) {
         com.example.ui.components.EdgeToEdgeSheetWindowEffect()
                 // Liquid Glass: blurred app behind the sheet (no-op when the style is OFF)
@@ -2050,7 +2054,7 @@ fun AudioPlayerScreen(
                         .fillMaxWidth()
                         .liquidGlassEdge(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp), isDark)
                         .fillMaxHeight(0.75f)
-                        .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 16.dp)
+                        .padding(start = 20.dp, end = 20.dp, top = 20.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -2177,6 +2181,10 @@ fun AudioPlayerScreen(
                         LazyColumn(
                             state = queueListState,
                             modifier = Modifier.fillMaxSize(),
+                            // the last song ends above the navigation bar, but while scrolling the rows leave through the screen's bottom edge
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                bottom = androidx.compose.foundation.layout.WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp
+                            ),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                         itemsIndexed(queue, key = { _, item -> item.id }) { idx, item ->
@@ -2322,14 +2330,16 @@ fun AudioPlayerScreen(
                                             .padding(3.dp)
                                             .clip(RoundedCornerShape(4.dp))
                                             .background(Color.Black.copy(alpha = 0.75f))
-                                            .padding(horizontal = 2.5.dp, vertical = 0.5.dp),
+                                            .height(11.dp)
+                                            .padding(horizontal = 3.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
                                             text = "${idx + 1}",
                                             color = Color.White,
                                             fontSize = 7.5.sp,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.wrapContentHeight(Alignment.CenterVertically, unbounded = true)
                                         )
                                     }
 
@@ -2340,14 +2350,16 @@ fun AudioPlayerScreen(
                                             .padding(3.dp)
                                             .clip(RoundedCornerShape(4.dp))
                                             .background(Color.Black.copy(alpha = 0.75f))
-                                            .padding(horizontal = 2.5.dp, vertical = 0.5.dp),
+                                            .height(11.dp)
+                                            .padding(horizontal = 3.dp),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
                                             text = formatAudioTime(item.durationMs),
                                             color = Color.White,
                                             fontSize = 7.sp,
-                                            fontWeight = FontWeight.SemiBold
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.wrapContentHeight(Alignment.CenterVertically, unbounded = true)
                                         )
                                     }
                                 }

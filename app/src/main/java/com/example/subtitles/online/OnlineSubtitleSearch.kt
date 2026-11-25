@@ -1157,6 +1157,8 @@ fun SubtitleSearchHeader(
                         )
                     }
                 }
+                Spacer(Modifier.width(4.dp))
+                com.example.ui.components.VoiceSearchButton(onText = { state.query = it }, onFinished = { submit() }, iconSize = 16.dp)
             }
         }
         Spacer(Modifier.width(4.dp))

@@ -336,7 +336,7 @@ object OnlineVideoRecommender {
 
         val focus = OnlineInterestProfile.focus(context, OnlineInterestProfile.KIND_VIDEO, 2)
         if (focus.isNotEmpty()) {
-            return@coroutineScope withTrending(context, fetchInterestBatch(context, focus, excludeUrls, usedQueries, total, shown, opened, onScreenChannels), excludeUrls)
+            return@coroutineScope withTrending(context, withRelated(context, fetchInterestBatch(context, focus, excludeUrls, usedQueries, total, shown, opened, onScreenChannels), excludeUrls), excludeUrls)
         }
 
         val similarQueries = if (favs.isEmpty()) emptyList() else
@@ -381,7 +381,44 @@ object OnlineVideoRecommender {
         val mixed = if (favs.isEmpty()) discovery.take(rest)
         else OnlineRecommendationMixer.mix(similar = similar, discovery = discovery, total = rest)
         // NEW uploads of subscribed channels stay on top, the personalised / discovery mix follows.
-        withTrending(context, subscribed + spreadChannels(mixed), excludeUrls)
+        withTrending(context, withRelated(context, subscribed + spreadChannels(mixed), excludeUrls), excludeUrls)
+    }
+
+    private val relatedCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<OnlineTrackResult>>>()
+
+    private suspend fun relatedOf(url: String): List<OnlineTrackResult> {
+        val hit = relatedCache[url]
+        if (hit != null && System.currentTimeMillis() - hit.first < 30 * 60_000L) return hit.second
+        val list = try { OnlineVideoService.fetchWatchDetails(url)?.related.orEmpty() } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+        if (list.isNotEmpty()) relatedCache[url] = System.currentTimeMillis() to list
+        return list
+    }
+
+    /**
+     * "More like what you watch": YouTube's own related list of the videos he opened last (the same list the Up Next uses), ranked by the
+     * local engine and scattered through the feed (position 2, 5, 8 ...), so the home shows the same kind of videos as the ones he plays.
+     */
+    private suspend fun withRelated(context: Context, batch: List<OnlineTrackResult>, excludeUrls: Set<String>): List<OnlineTrackResult> {
+        return try {
+            val seeds = VideoRecoEngine.recentSeeds(context, 3)
+            if (seeds.isEmpty()) return batch
+            val pool = kotlinx.coroutines.coroutineScope { seeds.map { async { relatedOf(it) } }.awaitAll().flatten() }
+            val have = batch.map { it.videoUrl }.toSet()
+            val fresh = pool.distinctBy { it.videoUrl }.filter {
+                it.videoUrl !in have && it.videoUrl !in excludeUrls && it.durationSec >= 60L && !isCompleted(context, it.videoUrl)
+            }
+            if (fresh.isEmpty()) return batch
+            val opened = readArr(context, KEY_OPENED).let { a -> (0 until a.length()).map { a.optString(it) }.toSet() }
+            val aff = readObj(context, KEY_WATCHED).let { o -> o.keys().asSequence().associate { it.lowercase(Locale.ROOT) to o.optDouble(it, 0.0) } }
+            val picks = spreadChannels(VideoRecoEngine.rank(context, fresh, null, { isCompleted(context, it) }, opened, ignoredChannels(context), aff)).take(6)
+            val out = batch.toMutableList()
+            picks.forEachIndexed { i, t -> out.add((2 + i * 3).coerceAtMost(out.size), t) }
+            out
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (_: Throwable) {
+            batch
+        }
     }
 
     /** 3 trending videos that fit the watch history best are scattered into a batch (never at the very top, never next to each other). */
@@ -709,6 +746,10 @@ internal object VideoRecoEngine {
     } catch (_: Throwable) {
         0.5
     }
+
+    /** The videos he opened most recently (not disliked), newest first: the seeds of the home feed. */
+    fun recentSeeds(c: Context, n: Int): List<String> =
+        docs(c).map { toDoc(it) }.filter { it.w >= 0.6 }.sortedByDescending { it.ts }.take(n).map { it.url }
 
     fun seedSentiment(c: Context, url: String): Double = docs(c).firstOrNull { it.optString("u") == url }?.optDouble("s", 0.5) ?: 0.5
 
