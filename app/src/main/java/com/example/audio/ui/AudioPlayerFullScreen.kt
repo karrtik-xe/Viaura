@@ -82,6 +82,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -2044,7 +2045,7 @@ fun AudioPlayerScreen(
                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
                 dragHandle = null,
                 // no system-bar inset: the sheet itself reaches the screen's bottom edge, nothing is cut off there
-                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0)
+                contentWindowInsets = { androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0) }
             ) {
         com.example.ui.components.EdgeToEdgeSheetWindowEffect()
                 // Liquid Glass: blurred app behind the sheet (no-op when the style is OFF)
