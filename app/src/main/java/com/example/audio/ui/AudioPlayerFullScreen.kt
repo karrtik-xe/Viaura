@@ -28,7 +28,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import com.example.ui.components.PlayerGlassModalSheet
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.asPaddingValues
 import com.example.ui.components.extractArtworkColors
@@ -2036,45 +2035,62 @@ fun AudioPlayerScreen(
 
         // 2. QUEUE LIST SHEET
         if (showQueueSheet) {
-            // The app's own glass sheet (same as the other panels): it reaches the screen edge, no cut-off strip at the bottom
-            PlayerGlassModalSheet(
-                panelKey = "audio_queue",
-                isLandscape = isLandscapeLayout,
-                heightFraction = 0.75f,
-                glassBlurTransparency = glassBlurTransparency,
-                onDismissRequest = { showQueueSheet = false },
-                headerStartContent = {
-                    Text(
-                        text = "Up Next \u2022 ${queue.size} ${if (queue.size == 1) "track" else "tracks"}",
-                        fontSize = 16.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = primaryText
-                    )
+            ModalBottomSheet(
+                onDismissRequest = {
+                    showQueueSheet = false
                 },
-                headerEndContent = {
-                    // Sleep Timer (works for offline + online audio) - sits at the right end of "Up Next"
-                    Box(
-                        modifier = Modifier
-                            .testTag("audio_player_sleep_timer_button")
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                // Close the "Up Next" track list first so only the sleep timer panel is visible
-                                showQueueSheet = false
-                                showSleepTimerSheet = true
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        StyledIcon(
-                            drawableRes = R.drawable.viaura_sleep,
-                            contentDescription = "Sleep timer",
-                            tint = if (sleepTimerActive) AccentSkyBlue else primaryText,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
+                containerColor = floatingSheetBg,
+                scrimColor = Color.Black.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                dragHandle = null,
+                // no system-bar inset: the sheet itself reaches the screen's bottom edge, nothing is cut off there
+                windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0)
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
+        com.example.ui.components.EdgeToEdgeSheetWindowEffect()
+                // Liquid Glass: blurred app behind the sheet (no-op when the style is OFF)
+                LiquidDialogBlur()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .liquidGlassEdge(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp), isDark)
+                        .fillMaxHeight(0.75f)
+                        .padding(start = 20.dp, end = 20.dp, top = 20.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Up Next • ${queue.size} ${if (queue.size == 1) "track" else "tracks"}",
+                            fontSize = 16.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryText,
+                            modifier = Modifier.weight(1f)
+                        )
+                        // Sleep Timer (works for offline + online audio) - sits at the right end of "Up Next"
+                        Box(
+                            modifier = Modifier
+                                .testTag("audio_player_sleep_timer_button")
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    // Close the "Up Next" track list first so only the sleep timer panel is visible
+                                    showQueueSheet = false
+                                    showSleepTimerSheet = true
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            StyledIcon(
+                                drawableRes = R.drawable.viaura_sleep,
+                                contentDescription = "Sleep timer",
+                                tint = if (sleepTimerActive) AccentSkyBlue else primaryText,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
                     val queueListState = rememberLazyListState()
                     var queueListCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
                     var queueListHeightPx by remember { mutableFloatStateOf(0f) }
@@ -2166,7 +2182,9 @@ fun AudioPlayerScreen(
                             state = queueListState,
                             modifier = Modifier.fillMaxSize(),
                             // the last song ends above the navigation bar, but while scrolling the rows leave through the screen's bottom edge
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                bottom = androidx.compose.foundation.layout.WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp
+                            ),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                         itemsIndexed(queue, key = { _, item -> item.id }) { idx, item ->
