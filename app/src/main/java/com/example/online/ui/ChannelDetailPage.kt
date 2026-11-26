@@ -453,8 +453,14 @@ fun ChannelDetailScreen(
                 else filteredTracks.sortedByDescending { it.title.lowercase() }
             }
             SortField.DATE -> {
-                if (sortDirection == SortDirection.ASCENDING) filteredTracks.sortedBy { it.uploadDateEpochMs ?: 0L }
-                else filteredTracks.sortedByDescending { it.uploadDateEpochMs ?: 0L }
+                // A video whose date the website did not give (live, premiere, "Streamed ...") keeps its place in the
+                // channel's own newest-first order instead of sinking to the bottom as "date 0".
+                val eff = effectiveUploadTimes(filteredTracks)
+                val idx = filteredTracks.indices
+                val order =
+                    if (sortDirection == SortDirection.ASCENDING) idx.sortedWith(compareBy<Int> { eff[it] }.thenByDescending { it })
+                    else idx.sortedWith(compareByDescending<Int> { eff[it] }.thenBy { it })
+                order.map { filteredTracks[it] }
             }
             SortField.DURATION -> {
                 if (sortDirection == SortDirection.ASCENDING) filteredTracks.sortedBy { it.durationSec }
@@ -1532,4 +1538,15 @@ private fun PlaylistExpandedList(
             }
         }
     }
+}
+
+
+/** Upload time of every item; a missing one takes the time of the item before it (or after it, at the very start). */
+private fun effectiveUploadTimes(list: List<OnlineTrackResult>): LongArray {
+    val out = LongArray(list.size) { list[it].uploadDateEpochMs ?: 0L }
+    var carry = 0L
+    for (i in out.indices) { if (out[i] > 0L) carry = out[i] else if (carry > 0L) out[i] = carry }
+    var next = 0L
+    for (i in out.indices.reversed()) { if (out[i] > 0L) next = out[i] else if (next > 0L) out[i] = next }
+    return out
 }

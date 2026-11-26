@@ -174,6 +174,8 @@ fun OnlineMusicPanel(
     // the toolbar's Download then downloads all of them in one go with one quality.
     val actionState = com.example.ui.components.rememberSwipeActionState<OnlineTrackResult> { it.videoUrl }
     var actionTarget by actionState
+    // the feed's songs open this sheet from the bottom (search results keep the swipe bar)
+    var sheetTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var batchRequests by remember { mutableStateOf<List<com.example.ui.components.DownloadRequest>?>(null) }
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var downloadRequest by remember { mutableStateOf<com.example.ui.components.DownloadRequest?>(null) }
@@ -288,7 +290,8 @@ fun OnlineMusicPanel(
         }
     }
     fun loadMoreHome() {
-        if (home.tab != "home" || home.loading || home.sections.isEmpty()) return
+        // a chip feed has no endless scroll; a connected account's home is the account's own shelves only
+        if (home.tab != "home" || home.selectedChip != null || com.example.util.YtmSession.isConnected() || home.loading || home.sections.isEmpty()) return
         home.loading = true
         home.loadingMore = true
         scope.launch {
@@ -338,6 +341,7 @@ fun OnlineMusicPanel(
         if (ytmVersion != lastYtmVersion) {
             lastYtmVersion = ytmVersion
             home.albums.clear(); home.artists.clear(); home.playlists.clear(); home.tabLoaded.clear()
+            home.selectedChip = null; home.chipSections.clear()
             if (home.tab != "more") home.tab = "home"
             if (isFeedMode) loadHome(true)
         }
@@ -800,19 +804,40 @@ fun OnlineMusicPanel(
                             onDisconnect = { com.example.util.YtmSession.disconnect() }
                         )
                     } else OmHomeFeed(
-                        sections = tabSections,
-                        loadingMore = if (home.tab == "home") home.loadingMore else home.tabLoading,
+                        sections = if (home.tab == "home" && home.selectedChip != null) home.chipSections else tabSections,
+                        loadingMore = if (home.tab == "home") (home.loadingMore && home.selectedChip == null) else home.tabLoading,
+                        chips = if (home.tab == "home") home.chips else emptyList(),
+                        selectedChip = home.selectedChip,
+                        chipLoading = home.chipLoading,
+                        onChip = { chip ->
+                            if (chip == null) {
+                                home.selectedChip = null
+                                home.chipSections.clear()
+                                home.chipLoading = false
+                            } else {
+                                home.selectedChip = chip.label
+                                home.chipSections.clear()
+                                home.chipLoading = true
+                                scope.launch {
+                                    val list = try { OmHomeBuilder.chipFeed(context, chip) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Throwable) { emptyList() }
+                                    if (home.selectedChip == chip.label) home.chipSections.addAll(list)
+                                    home.chipLoading = false
+                                }
+                            }
+                        },
                         listState = if (home.tab == "home") listState else otherListState,
                         isDark = isDark,
                         actionState = actionState,
-                        onActionTarget = { actionTarget = it },
+                        onActionTarget = { sheetTarget = it },
                         onPlayTrack = { actionTarget = null; playOnlineTrack(it) },
                         onPlayQueue = { actionTarget = null; playQueueFrom(it) },
                         onOpenPlaylist = { openHomePlaylist(it) },
                         onOpenChannel = { onOpenChannel?.invoke(it) },
                         onOpenArtist = { name -> openArtistByName(name) },
                         hidden = hiddenUrls,
-                        emptyText = if (!(if (home.tab == "home") home.loading else home.tabLoading)) "Nothing here yet - connect to the internet or play some songs" else null
+                        emptyText = if (home.tab == "home" && home.selectedChip != null) {
+                            if (home.chipLoading) null else "Nothing found for this one - try another"
+                        } else if (!(if (home.tab == "home") home.loading else home.tabLoading)) "Nothing here yet - connect to the internet or play some songs" else null
                     )
                 }
             }
@@ -1025,6 +1050,48 @@ fun OnlineMusicPanel(
             }
         }
 
+        sheetTarget?.let { t ->
+            val kind = OnlineMediaLibrary.KIND_AUDIO
+            OmTrackActionSheet(
+                track = t,
+                isDark = isDark,
+                glassBlurTransparency = glassBlurTransparency,
+                isSavedForLater = watchLaterTracks.any { it.videoUrl == t.videoUrl },
+                onDismiss = { sheetTarget = null },
+                actions = OmSheetActions(
+                    onPlay = { playOnlineTrack(t) },
+                    onPlayNext = {
+                        AudioPlaybackManager.playNext(t.toAudioTrackItem())
+                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
+                    },
+                    onPlayLast = {
+                        AudioPlaybackManager.playLast(t.toAudioTrackItem())
+                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
+                    },
+                    onDownload = { downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, true) },
+                    onSaveToPlaylist = {
+                        OnlineMediaLibrary.rememberMeta(context, kind, t)
+                        playlistTargets = listOf(t)
+                    },
+                    onWatchLater = {
+                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
+                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
+                        Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                    },
+                    onShare = { shareOnlineLinks(context, listOf(t.title to t.videoUrl)) },
+                    onOpenArtist = t.artist.takeIf { it.isNotBlank() }?.let { name -> { openArtistByName(name) } },
+                    onNotInterested = {
+                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
+                        MusicTaste.markRejected(context, t.videoUrl, t.artist)
+                        OnlineMusicHomeStats.forget(context, t.videoUrl)
+                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
+                        hiddenVersion++
+                        Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            )
+        }
+
         if (playlistTargets.isNotEmpty()) {
             AddToPlaylistDialog(
                 selectedAudioTracks = playlistTargets.map { it.toAudioTrackItem() },
@@ -1052,7 +1119,11 @@ internal data class OmHomeTile(
     val track: OnlineTrackResult? = null,
     val tracks: List<OnlineTrackResult> = emptyList(),
     val playlistUrl: String? = null,
-    val channel: OnlineChannelResult? = null
+    val channel: OnlineChannelResult? = null,
+    /** Music video: 16:9 cover. */
+    val wide: Boolean = false,
+    /** Artist: round cover. */
+    val circular: Boolean = false
 )
 
 /** A card with a cover, a play button and the first songs (the "Energise" / artist card). */
@@ -1069,7 +1140,15 @@ internal data class OmHomeSongCard(
 internal sealed class OmHomeSection(val key: String) {
     class SpeedDial(val tiles: List<OmHomeTile>) : OmHomeSection("om_speed_dial")
     class SongMixes(val tracks: List<OnlineTrackResult>) : OmHomeSection("om_song_mixes")
-    class Squares(key: String, val title: String, val items: List<OmHomeTile>) : OmHomeSection(key)
+    class Squares(
+        key: String, val title: String, val items: List<OmHomeTile>,
+        val strapline: String = "", val thumb: String? = null, val playAll: List<OnlineTrackResult> = emptyList()
+    ) : OmHomeSection(key)
+    /** YouTube Music "Quick picks" / "Listen again": song rows in pages of four, slide sideways. */
+    class SongColumns(
+        key: String, val title: String, val tracks: List<OnlineTrackResult>,
+        val strapline: String = "", val thumb: String? = null
+    ) : OmHomeSection(key)
     class ArtistRow(key: String, val channel: OnlineChannelResult, val items: List<OmHomeTile>) : OmHomeSection(key)
     class Community(key: String, val title: String, val items: List<OmHomeTile>) : OmHomeSection(key)
     class SongCards(key: String, val title: String, val cards: List<OmHomeSongCard>) : OmHomeSection(key)
@@ -1094,7 +1173,14 @@ internal object OnlineMusicHomeState {
     val playlists = androidx.compose.runtime.mutableStateListOf<OmHomeSection>()
     var tabLoading by mutableStateOf(false)
     val tabLoaded = mutableSetOf<String>()
+    /** Mood / genre chips above the feed (the account's own chips when YouTube Music is connected). */
+    val chips = androidx.compose.runtime.mutableStateListOf<OmChip>()
+    var selectedChip by mutableStateOf<String?>(null)
+    val chipSections = androidx.compose.runtime.mutableStateListOf<OmHomeSection>()
+    var chipLoading by mutableStateOf(false)
 }
+
+internal data class OmChip(val label: String, val ytmParams: String? = null)
 
 /** Repeat counts of played online songs and the playlists the listener opened (feeds the speed dial). */
 internal object OnlineMusicHomeStats {
@@ -1218,11 +1304,12 @@ private object OmHomeBuilder {
 
     /** A card of the connected YouTube Music account as a tile of the same look as every other row. */
     private fun ytmTile(i: com.example.util.YtmItem): OmHomeTile? = when (i.kind) {
-        "song" -> i.track?.let { trackTile(it) }
+        "song" -> i.track?.let { trackTile(it).copy(wide = i.wide, covers = listOfNotNull(i.thumbnailUrl ?: it.thumbnailUrl), subtitle = i.subtitle.ifBlank { it.artist }) }
         "artist" -> i.channelId?.let { id ->
             OmHomeTile(
                 id = "ytm_ar_$id", title = i.title, subtitle = i.subtitle.ifBlank { "Artist" }, covers = listOfNotNull(i.thumbnailUrl),
-                channel = OnlineChannelResult("https://www.youtube.com/channel/$id", i.title, i.thumbnailUrl, null, null)
+                channel = OnlineChannelResult("https://www.youtube.com/channel/$id", i.title, i.thumbnailUrl, null, null),
+                circular = true
             )
         }
         else -> i.playlistId?.let { id ->
@@ -1235,9 +1322,62 @@ private object OmHomeBuilder {
 
     private fun ytmSections(prefix: String, shelves: List<com.example.util.YtmShelf>): List<OmHomeSection> =
         shelves.mapIndexedNotNull { n, s ->
-            val tiles = s.items.mapNotNull { ytmTile(it) }
-            if (tiles.isEmpty()) null else OmHomeSection.Squares("${prefix}_${n}_${s.title}", s.title, tiles)
+            val key = "${prefix}_${n}_${s.title}"
+            val songs = s.items.mapNotNull { it.track }
+            when {
+                // song rows in pages of four: "Quick picks", "Listen again" ...
+                s.style == "columns" && songs.size >= 4 ->
+                    OmHomeSection.SongColumns(key, s.title, songs, s.strapline, s.thumbnailUrl)
+                else -> {
+                    val tiles = s.items.mapNotNull { ytmTile(it) }
+                    if (tiles.isEmpty()) null
+                    else OmHomeSection.Squares(key, s.title, tiles, s.strapline, s.thumbnailUrl, if (songs.size >= 3 && songs.size == s.items.size) songs else emptyList())
+                }
+            }
         }
+
+    // ---- "Listen again" / "Forgotten favorites": straight from what was played in the audio player ----
+
+    private fun playedToTrack(p: MusicTaste.Played) = OnlineTrackResult(
+        videoUrl = p.url, title = p.title, artist = p.artist, durationSec = p.durSec, thumbnailUrl = p.thumb
+    )
+
+    private fun listenAgain(c: android.content.Context): OmHomeSection? {
+        val recent = MusicTaste.recent(c, 24).filter { it.url !in hiddenNow && it.title.isNotBlank() }.map(::playedToTrack)
+        return if (recent.size >= 4) OmHomeSection.SongColumns("om_listen_again", "Listen again", recent, "Your recent plays") else null
+    }
+
+    private fun forgottenFavorites(c: android.content.Context): OmHomeSection? {
+        val limit = System.currentTimeMillis() - 14L * 86_400_000L
+        val songs = MusicTaste.played(c)
+            .filter { it.url !in hiddenNow && it.title.isNotBlank() && (it.plays >= 2 || it.completes >= 1) && it.last < limit }
+            .sortedWith(compareByDescending<MusicTaste.Played> { it.plays + it.completes * 2 }.thenByDescending { it.last })
+            .take(16).map(::playedToTrack)
+        return if (songs.size >= 4) OmHomeSection.SongColumns("om_forgotten", "Forgotten favorites", songs, "You used to play these") else null
+    }
+
+    /** Chips above the feed when no account is connected: the listener's own categories first, then common moods. */
+    fun chipsFor(c: android.content.Context): List<OmChip> {
+        val mine = try { MusicRecoEngine.favoriteCategories(c) + MusicRecoEngine.adjacentCategories(c) } catch (_: Throwable) { emptyList() }
+        val defaults = listOf("Relax", "Energize", "Workout", "Romance", "Party", "Sad", "Focus", "Commute", "Devotional", "Retro")
+        return (mine + defaults).map { it.trim() }.filter { it.isNotBlank() }.distinctBy { it.lowercase() }.take(14).map { OmChip(it) }
+    }
+
+    /** The feed of one chip: the account's own mood feed (connected) or songs and playlists of that category. */
+    suspend fun chipFeed(c: android.content.Context, chip: OmChip): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
+        refreshHidden(c)
+        if (chip.ytmParams != null) {
+            val shelves = try { com.example.util.YtmAccountClient.homeForChip(chip.ytmParams) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+            return@coroutineScope ytmSections("om_chip_${chip.label}", shelves)
+        }
+        val songsJob = async { try { MusicRecoEngine.categorySongs(c, chip.label, mutableSetOf(), 24) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
+        val plJob = async { try { OnlineMusicService.searchHomePlaylists("${chip.label} playlist", albums = false, limit = 10) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
+        val out = ArrayList<OmHomeSection>()
+        val songs = songsJob.await().filter { it.videoUrl !in hiddenNow }
+        if (songs.size >= 4) out.add(OmHomeSection.SongColumns("om_chip_songs_${chip.label}", "${chip.label} songs", songs, "Picked for you"))
+        plJob.await().takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares("om_chip_pl_${chip.label}", "${chip.label} playlists", it.map { p -> playlistTile(p, "Playlist") })) }
+        out
+    }
 
     /** One song / playlist is shown once on the whole home: different uploads / versions of the same song count as the same song. */
     private fun uniqueTile(t: OmHomeTile, used: MutableSet<String>): Boolean =
@@ -1252,7 +1392,12 @@ private object OmHomeBuilder {
                     val l = sec.tracks.filter { it.videoUrl !in hiddenNow && used.add(baseKey(it)) }
                     if (l.size >= 4) out.add(OmHomeSection.SongMixes(l))
                 }
-                is OmHomeSection.Squares -> sec.items.filter { uniqueTile(it, used) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares(sec.key, sec.title, it)) }
+                is OmHomeSection.Squares -> sec.items.filter { uniqueTile(it, used) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares(sec.key, sec.title, it, sec.strapline, sec.thumb, sec.playAll)) }
+                is OmHomeSection.SongColumns -> {
+                    // the same song is shown once on the whole home (a Listen again row repeats the speed dial on purpose: it is skipped here)
+                    val l = sec.tracks.filter { it.videoUrl !in hiddenNow && used.add(baseKey(it)) }
+                    if (l.size >= 4) out.add(OmHomeSection.SongColumns(sec.key, sec.title, l, sec.strapline, sec.thumb))
+                }
                 is OmHomeSection.ArtistRow -> sec.items.filter { uniqueTile(it, used) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.ArtistRow(sec.key, sec.channel, it)) }
                 is OmHomeSection.Community -> sec.items.filter { uniqueTile(it, used) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Community(sec.key, sec.title, it)) }
                 is OmHomeSection.Artists -> out.add(sec)
@@ -1294,7 +1439,11 @@ private object OmHomeBuilder {
 
     private fun convert(feed: List<MusicFeedSection>): List<OmHomeSection> = feed.mapNotNull { s ->
         when {
-            s.id == "recommended" -> if (s.tracks.size >= 4) OmHomeSection.SongMixes(s.tracks) else null
+            s.id == "recommended" -> if (s.tracks.size >= 4) OmHomeSection.SongColumns("om_quick_picks", "Quick picks", s.tracks, "Start radio from a song") else null
+            s.id == "recent" && s.tracks.size >= 4 ->
+                OmHomeSection.SongColumns("om_${s.id}", s.title.removePrefix("Based on "), s.tracks, "Because you played")
+            s.id == "similar" && s.tracks.size >= 4 ->
+                OmHomeSection.SongColumns("om_${s.id}", s.title.removePrefix("More like "), s.tracks, "More like")
             s.id == "artists" -> if (s.artists.isEmpty()) null else OmHomeSection.Artists("om_${s.id}", s.title, s.artists)
             s.id.startsWith("genre_") || s.id.startsWith("more_rel_") -> {
                 val cards = s.tracks.chunked(3).filter { it.size == 3 }.take(4).map { ch ->
@@ -1312,7 +1461,9 @@ private object OmHomeBuilder {
         val feed = MusicRecoEngine.cachedFeed(c)
         if (feed.isEmpty() && OnlineMusicHomeStats.topSongs(c, 1).isEmpty()) return emptyList()
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty()
-        return dedupe(listOf(speedDial(c, fill, emptyList())) + convert(feed), used)
+        if (com.example.util.YtmSession.isConnected()) return emptyList()
+        if (OnlineMusicHomeState.chips.isEmpty()) OnlineMusicHomeState.chips.addAll(chipsFor(c))
+        return dedupe(listOfNotNull(speedDial(c, fill, emptyList()), forgottenFavorites(c)) + convert(feed), used)
     }
 
     suspend fun firstBatch(c: android.content.Context, used: MutableSet<String>): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
@@ -1320,20 +1471,40 @@ private object OmHomeBuilder {
         val extrasJob = async { try { MusicRecoEngine.speedDialExtras(c, 2) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
         // Connected YouTube Music account: its own home (listen again, quick picks, mixes, recommendations) is the home
         val ytm = if (com.example.util.YtmSession.isConnected()) {
-            try { com.example.util.YtmAccountClient.home() } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
-        } else emptyList()
-        if (ytm.size >= 2) {
+            try { com.example.util.YtmAccountClient.home() } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { com.example.util.YtmHome(emptyList(), emptyList()) }
+        } else com.example.util.YtmHome(emptyList(), emptyList())
+        if (ytm.shelves.size >= 2) {
             extrasJob.cancel()
-            val ytmFill = ytm.flatMap { s -> s.items.mapNotNull { it.track } }.distinctBy { it.videoUrl }.take(30)
-            val sections = dedupe(listOf(speedDial(c, ytmFill, emptyList())) + ytmSections("om_ytm", ytm), used)
+            // exactly the account's home, in its order, with its chips: no local speed dial, no local rows
+            OnlineMusicHomeState.chips.clear()
+            OnlineMusicHomeState.chips.addAll(ytm.chips.map { OmChip(it.label, it.params) })
+            val sections = dedupeKeepingOrder(ytmSections("om_ytm", ytm.shelves))
             sections.forEach { used.add(it.key) }
             return@coroutineScope sections
         }
+        OnlineMusicHomeState.chips.clear()
+        OnlineMusicHomeState.chips.addAll(chipsFor(c))
         val feed = MusicRecoEngine.feed(c, mutableSetOf())
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "new" }?.tracks.orEmpty()
-        val out = dedupe(listOf(speedDial(c, fill, extrasJob.await())) + convert(feed), used)
+        // Levyra-style order: speed dial, listen again (from the audio player), quick picks + "because you played" rows,
+        // forgotten favourites, then the rest of the feed (trending, genres, new releases, similar artists ...)
+        val converted = convert(feed)
+        val lead = converted.filter { it.key == "om_quick_picks" || it.key == "om_recent" || it.key == "om_similar" }
+        val rest = converted.filterNot { it in lead }
+        val out = dedupe(listOfNotNull(speedDial(c, fill, extrasJob.await()), listenAgain(c)) + lead + listOfNotNull(forgottenFavorites(c)) + rest, used)
         out.forEach { used.add(it.key) }
         out
+    }
+
+    /** A connected home keeps the order and the repeats of the account; only hidden songs go. */
+    private fun dedupeKeepingOrder(sections: List<OmHomeSection>): List<OmHomeSection> = sections.mapNotNull { sec ->
+        when (sec) {
+            is OmHomeSection.SongColumns -> sec.tracks.filter { it.videoUrl !in hiddenNow }.takeIf { it.size >= 4 }
+                ?.let { OmHomeSection.SongColumns(sec.key, sec.title, it, sec.strapline, sec.thumb) }
+            is OmHomeSection.Squares -> sec.items.filter { it.track == null || it.track.videoUrl !in hiddenNow }.takeIf { it.isNotEmpty() }
+                ?.let { OmHomeSection.Squares(sec.key, sec.title, it, sec.strapline, sec.thumb, sec.playAll) }
+            else -> sec
+        }
     }
 
     /**
@@ -1468,15 +1639,73 @@ private fun OmCover(covers: List<String>, modifier: Modifier, isDark: Boolean) {
 }
 
 @Composable
-private fun OmSectionTitle(title: String, primary: Color, trailing: (@Composable () -> Unit)? = null, onClick: (() -> Unit)? = null) {
+private fun OmSectionTitle(
+    title: String, primary: Color, trailing: (@Composable () -> Unit)? = null, onClick: (() -> Unit)? = null,
+    strapline: String = "", thumb: String? = null, isDark: Boolean = true
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 10.dp)
             .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = title, color = primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        if (!thumb.isNullOrBlank()) {
+            OmThumb(thumb, Modifier.size(44.dp).clip(androidx.compose.foundation.shape.CircleShape), isDark)
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            if (strapline.isNotBlank()) {
+                Text(
+                    text = strapline.uppercase(), color = primary.copy(alpha = 0.6f), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            Text(text = title, color = primary, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
         if (trailing != null) trailing()
+    }
+}
+
+/** The thin "Play all" with a gradient line under it (same as Song mixes). */
+@Composable
+private fun OmPlayAll(primary: Color, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .width(androidx.compose.foundation.layout.IntrinsicSize.Max)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }, indication = null) { onClick() }
+            .padding(horizontal = 2.dp, vertical = 4.dp)
+    ) {
+        Text("Play all", color = primary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        Box(Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(1.dp)).background(com.example.ui.theme.AccentGradient))
+    }
+}
+
+/** Mood / genre chips (YouTube Music style): one can be selected, tapping it again goes back to the feed. */
+@Composable
+private fun OmChipRow(chips: List<OmChip>, selected: String?, isDark: Boolean, onSelect: (OmChip?) -> Unit) {
+    androidx.compose.foundation.lazy.LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(vertical = 6.dp)
+    ) {
+        items(chips, key = { "om_chip_${it.label}" }) { chip ->
+            val on = chip.label == selected
+            Box(
+                modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (on) (if (isDark) Color.White else Color(0xFF0F172A))
+                        else (if (isDark) Color(0x26FFFFFF) else Color(0x14000000))
+                    )
+                    .clickable { onSelect(if (on) null else chip) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    chip.label, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (on) (if (isDark) Color.Black else Color.White) else (if (isDark) Color.White else Color(0xFF0F172A))
+                )
+            }
+        }
     }
 }
 
@@ -1517,25 +1746,19 @@ private fun OmDots(count: Int, selected: Int, isDark: Boolean) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun OmSongRow(
     track: OnlineTrackResult, isDark: Boolean, primary: Color, secondary: Color,
     selected: Boolean, onSwipe: () -> Unit, onClick: () -> Unit
 ) {
     val views = formatViews(track.viewCount)
-    // A plain slide moves the row of songs sideways; touch and HOLD, then slide left = the actions bar (download, playlist ...)
-    val dragged = remember { floatArrayOf(0f) }
+    // Tap = play. Hold the row, or touch the three dots = the actions sheet from the bottom (download, playlist ...)
     Row(
         modifier = Modifier.fillMaxWidth()
-            .pointerInput(Unit) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { dragged[0] = 0f },
-                    onDrag = { change, amount -> change.consume(); dragged[0] += amount.x },
-                    onDragEnd = { if (dragged[0] < -60f) onSwipe() },
-                    onDragCancel = { dragged[0] = 0f }
-                )
-            }
-            .clickable { onClick() }.padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .combinedClickable(onClick = onClick, onLongClick = onSwipe)
+            .padding(vertical = 6.dp)
             .then(if (selected) Modifier.background(Color(0x1A60A5FA), RoundedCornerShape(10.dp)) else Modifier),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1548,6 +1771,10 @@ private fun OmSongRow(
                 color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
+        Box(
+            Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape).clickable { onSwipe() },
+            contentAlignment = Alignment.Center
+        ) { Text("\u22EE", color = secondary, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -1565,7 +1792,11 @@ private fun OmHomeFeed(
     onOpenChannel: (OnlineChannelResult) -> Unit,
     onOpenArtist: (String) -> Unit,
     hidden: Set<String> = emptySet(),
-    emptyText: String? = null
+    emptyText: String? = null,
+    chips: List<OmChip> = emptyList(),
+    selectedChip: String? = null,
+    chipLoading: Boolean = false,
+    onChip: (OmChip?) -> Unit = {}
 ) {
     val primary = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -1587,9 +1818,35 @@ private fun OmHomeFeed(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 4.dp, bottom = 130.dp)
     ) {
+        if (chips.isNotEmpty()) {
+            item(key = "om_chips") { OmChipRow(chips, selectedChip, isDark, onChip) }
+        }
         sections.forEach { section ->
             item(key = section.key) {
                 when (section) {
+                    is OmHomeSection.SongColumns -> {
+                        val shown = section.tracks.filter { it.videoUrl !in hidden }
+                        if (shown.isNotEmpty()) Column {
+                            OmSectionTitle(
+                                section.title, primary, strapline = section.strapline, thumb = section.thumb, isDark = isDark,
+                                trailing = { OmPlayAll(primary) { onPlayQueue(shown) } }
+                            )
+                            val colState = androidx.compose.foundation.lazy.rememberLazyListState()
+                            androidx.compose.foundation.lazy.LazyRow(
+                                state = colState,
+                                flingBehavior = androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior(colState),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                items(shown.chunked(4), key = { "om_col_${section.key}_${it.first().videoUrl}" }) { col ->
+                                    Column(Modifier.width(screenW - 56.dp)) {
+                                        col.forEach { t ->
+                                            OmSongRow(t, isDark, primary, secondary, actionState.contains(t), onSwipe = { onActionTarget(t) }, onClick = { onPlayTrack(t) })
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     is OmHomeSection.SpeedDial -> {
                         val pages = section.tiles.filter { it.visible() }.chunked(9)
                         val pager = androidx.compose.foundation.pager.rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
@@ -1645,7 +1902,14 @@ private fun OmHomeFeed(
                     }
                     is OmHomeSection.Squares -> {
                         Column {
-                            OmSectionTitle(section.title, primary)
+                            val playAllTrailing: (@Composable () -> Unit)? =
+                                if (section.playAll.isNotEmpty()) {
+                                    @Composable { OmPlayAll(primary) { onPlayQueue(section.playAll.filter { it.videoUrl !in hidden }) } }
+                                } else null
+                            OmSectionTitle(
+                                section.title, primary, strapline = section.strapline, thumb = section.thumb, isDark = isDark,
+                                trailing = playAllTrailing
+                            )
                             OmSquareRow(section.items.filter { it.visible() }, isDark, primary, secondary, { t -> t.track?.let(onActionTarget) }, ::tileClick)
                         }
                     }
@@ -1750,11 +2014,17 @@ private fun OmHomeFeed(
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun OmSquareRow(items: List<OmHomeTile>, isDark: Boolean, primary: Color, secondary: Color, onLongClick: (OmHomeTile) -> Unit, onClick: (OmHomeTile) -> Unit) {
-    val w = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp * 0.42f
+    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
     androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         items(items, key = { it.id }) { t ->
+            val w = if (t.wide) screenW * 0.72f else if (t.circular) screenW * 0.36f else screenW * 0.42f
+            val coverShape = if (t.circular) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(10.dp)
             Column(Modifier.width(w).combinedClickable(onClick = { onClick(t) }, onLongClick = if (t.track != null) ({ onLongClick(t) }) else null)) {
-                OmCover(t.covers, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(10.dp)), isDark)
+                OmCover(
+                    t.covers,
+                    Modifier.fillMaxWidth().aspectRatio(if (t.wide) 16f / 9f else 1f).clip(coverShape),
+                    isDark
+                )
                 Text(t.title, color = primary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                 if (t.subtitle.isNotBlank()) Text(t.subtitle, color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }

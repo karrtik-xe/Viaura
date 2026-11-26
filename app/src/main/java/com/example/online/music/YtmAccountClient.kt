@@ -20,10 +20,24 @@ data class YtmItem(
     val thumbnailUrl: String?,
     val track: OnlineTrackResult? = null,
     val playlistId: String? = null,
-    val channelId: String? = null
+    val channelId: String? = null,
+    /** A music video: its cover is 16:9 (shown wide). */
+    val wide: Boolean = false
 )
 
-data class YtmShelf(val title: String, val items: List<YtmItem>)
+/** [style] is "columns" for a shelf of song rows ("Quick picks", "Listen again") and "cards" for covers. */
+data class YtmShelf(
+    val title: String,
+    val items: List<YtmItem>,
+    val strapline: String = "",
+    val thumbnailUrl: String? = null,
+    val style: String = "cards",
+    val headerBrowseId: String? = null
+)
+
+data class YtmChip(val label: String, val params: String)
+
+data class YtmHome(val chips: List<YtmChip>, val shelves: List<YtmShelf>)
 
 /**
  * Signed-in YouTube Music (InnerTube "WEB_REMIX") requests: the personal home, the library (playlists, albums,
@@ -76,11 +90,11 @@ object YtmAccountClient {
         }
     }
 
-    private suspend fun browse(browseId: String, continuation: String? = null): JSONObject? = withContext(Dispatchers.IO) {
+    private suspend fun browse(browseId: String, continuation: String? = null, params: String? = null): JSONObject? = withContext(Dispatchers.IO) {
         try {
             if (continuation != null) {
                 post(JSONObject(), "$ENDPOINT&ctoken=$continuation&continuation=$continuation&type=next")
-            } else post(JSONObject().put("browseId", browseId))
+            } else post(JSONObject().put("browseId", browseId).also { if (params != null) it.put("params", params) })
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -91,14 +105,26 @@ object YtmAccountClient {
 
     // ------------------------------------------------------------------------------------------------ public API
 
-    /** The personal YouTube Music home: every shelf the account gets ("Listen again", "Quick picks", mixes ...). */
-    suspend fun home(): List<YtmShelf> {
-        val root = browse("FEmusic_home") ?: return emptyList()
+    /** The personal YouTube Music home: its mood chips and every shelf the account gets ("Quick picks", "Listen again", mixes ...). */
+    suspend fun home(): YtmHome {
+        val root = browse("FEmusic_home") ?: return YtmHome(emptyList(), emptyList())
+        return YtmHome(chipsOf(root), shelvesOf(root, 14))
+    }
+
+    /** The home of one mood chip (Relax, Workout, Energize ...). */
+    suspend fun homeForChip(params: String): List<YtmShelf> {
+        val root = browse("FEmusic_home", params = params) ?: return emptyList()
+        return shelvesOf(root, 14)
+    }
+
+    private suspend fun shelvesOf(root: JSONObject, max: Int): List<YtmShelf> {
         val out = ArrayList<YtmShelf>()
         collectShelves(sectionContents(root), out)
-        var token = continuationOf(root)
+        val list0 = root.optJSONObject("contents")?.optJSONObject("singleColumnBrowseResultsRenderer")?.optJSONArray("tabs")
+            ?.optJSONObject(0)?.optJSONObject("tabRenderer")?.optJSONObject("content")?.optJSONObject("sectionListRenderer")
+        var token = list0?.let { continuationOf(it) }
         var guard = 0
-        while (token != null && guard < 3 && out.size < 14) {
+        while (token != null && guard < 3 && out.size < max) {
             val more = browse("", token) ?: break
             val list = more.optJSONObject("continuationContents")?.optJSONObject("sectionListContinuation")
             collectShelves(list?.optJSONArray("contents"), out)
@@ -106,6 +132,18 @@ object YtmAccountClient {
             guard++
         }
         return out.filter { it.items.isNotEmpty() }
+    }
+
+    private fun chipsOf(root: JSONObject): List<YtmChip> {
+        val chips = root.optJSONObject("contents")?.optJSONObject("singleColumnBrowseResultsRenderer")?.optJSONArray("tabs")
+            ?.optJSONObject(0)?.optJSONObject("tabRenderer")?.optJSONObject("content")?.optJSONObject("sectionListRenderer")
+            ?.optJSONObject("header")?.optJSONObject("chipCloudRenderer")?.optJSONArray("chips") ?: return emptyList()
+        return (0 until chips.length()).mapNotNull { i ->
+            val c = chips.optJSONObject(i)?.optJSONObject("chipCloudChipRenderer") ?: return@mapNotNull null
+            val label = c.optJSONObject("text")?.let { runsText(it) }.orEmpty().trim()
+            val params = c.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("params").orEmpty()
+            if (label.isBlank() || params.isBlank()) null else YtmChip(label, params)
+        }
     }
 
     suspend fun libraryPlaylists(): List<YtmItem> = library("FEmusic_liked_playlists", "playlist")
@@ -186,11 +224,21 @@ object YtmAccountClient {
                     ?: carousel.optJSONObject("header")?.optJSONObject("musicImmersiveCarouselShelfBasicHeaderRenderer")
                 val title = header?.optJSONObject("title")?.let { runsText(it) }.orEmpty()
                 val strapline = header?.optJSONObject("strapline")?.let { runsText(it) }.orEmpty()
+                val headerThumb = bestThumb(header?.optJSONObject("thumbnail"), square = true)
+                val headerBrowse = header?.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)
+                    ?.optJSONObject("navigationEndpoint")?.optJSONObject("browseEndpoint")?.optString("browseId")
+                    ?.takeIf { it.startsWith("UC") || it.startsWith("MPLA") }
                 val arr = carousel.optJSONArray("contents") ?: continue
                 val items = ArrayList<YtmItem>()
-                for (j in 0 until arr.length()) parseItem(arr.optJSONObject(j))?.let { items.add(it) }
+                var rows = 0
+                for (j in 0 until arr.length()) {
+                    val w = arr.optJSONObject(j)
+                    if (w?.has("musicResponsiveListItemRenderer") == true) rows++
+                    parseItem(w)?.let { items.add(it) }
+                }
                 if (title.isNotBlank() && items.isNotEmpty()) {
-                    out.add(YtmShelf(if (strapline.isNotBlank()) "$strapline \u2022 $title" else title, items))
+                    val columns = rows > 0 && rows >= arr.length() - 1 && items.all { it.kind == "song" }
+                    out.add(YtmShelf(title, items, strapline, headerThumb, if (columns) "columns" else "cards", headerBrowse))
                 }
                 continue
             }
@@ -200,7 +248,7 @@ object YtmAccountClient {
                 val arr = shelf.optJSONArray("contents") ?: continue
                 val items = ArrayList<YtmItem>()
                 for (j in 0 until arr.length()) parseItem(arr.optJSONObject(j))?.let { items.add(it) }
-                if (title.isNotBlank() && items.isNotEmpty()) out.add(YtmShelf(title, items))
+                if (title.isNotBlank() && items.isNotEmpty()) out.add(YtmShelf(title, items, style = if (items.all { it.kind == "song" }) "columns" else "cards"))
             }
         }
     }
@@ -212,11 +260,12 @@ object YtmAccountClient {
         return sb.toString()
     }
 
-    private fun bestThumb(node: JSONObject?): String? {
+    private fun bestThumb(node: JSONObject?, square: Boolean = true): String? {
         val arr = node?.optJSONObject("musicThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             ?: node?.optJSONObject("croppedSquareThumbnailRenderer")?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
             ?: return null
         val url = arr.optJSONObject(arr.length() - 1)?.optString("url")?.takeIf { it.isNotBlank() } ?: return null
+        if (!square) return url
         // higher resolution square
         return url.replace(Regex("=w\\d+-h\\d+.*$"), "=w544-h544-l90-rj").replace(Regex("=s\\d+.*$"), "=s544")
     }
@@ -253,9 +302,12 @@ object YtmAccountClient {
     private fun parseTwoRow(r: JSONObject): YtmItem? {
         val title = r.optJSONObject("title")?.let { runsText(it) }.orEmpty()
         val sub = r.optJSONObject("subtitle")?.let { runsText(it) }.orEmpty()
-        val thumb = bestThumb(r.optJSONObject("thumbnailRenderer"))
         val nav = r.optJSONObject("navigationEndpoint")
         val watch = nav?.optJSONObject("watchEndpoint")
+        val videoType = watch?.optJSONObject("watchEndpointMusicSupportedConfigs")?.optJSONObject("watchEndpointMusicConfig")
+            ?.optString("musicVideoType").orEmpty()
+        val isVideo = videoType == "MUSIC_VIDEO_TYPE_OMV" || videoType == "MUSIC_VIDEO_TYPE_UGC"
+        val thumb = bestThumb(r.optJSONObject("thumbnailRenderer"), square = !isVideo)
         val overlayPlay = r.optJSONObject("thumbnailOverlay")?.optJSONObject("musicItemThumbnailOverlayRenderer")
             ?.optJSONObject("content")?.optJSONObject("musicPlayButtonRenderer")?.optJSONObject("playNavigationEndpoint")
         val playlistFromOverlay = overlayPlay?.optJSONObject("watchPlaylistEndpoint")?.optString("playlistId")?.takeIf { it.isNotBlank() }
@@ -268,7 +320,7 @@ object YtmAccountClient {
                 videoUrl = "https://www.youtube.com/watch?v=$videoId", title = title, artist = artist,
                 durationSec = 0L, thumbnailUrl = thumb
             )
-            return YtmItem("song", title, artist, thumb, track = t)
+            return YtmItem("song", title, artist, thumb, track = t, wide = isVideo)
         }
         val browseId = nav?.optJSONObject("browseEndpoint")?.optString("browseId").orEmpty()
         val watchList = nav?.optJSONObject("watchPlaylistEndpoint")?.optString("playlistId")?.takeIf { it.isNotBlank() }

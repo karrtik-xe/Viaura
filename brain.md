@@ -2021,3 +2021,9 @@ Format: `Symbol` → file path under `app/src/main/java/com/example/`. Lower-cas
 - **Video buffering:** `MpvEngineController` online (YouTube) `cache-pause-wait` = 15 s.
 - **Lyrics:** `LyricsLookupRepository.raceProviders` takes answers as they arrive and picks by timing kind, then length fit (`fitScore`); new providers NetEase and JioSaavn (in `lyrics-providers-src.zip`).
 - **Online videos:** resume cards show channel, subscribers and watched position (`ChannelInfoCache`), upload age is computed from the upload time, Subs tab has a channel strip + every channel's block, new Playlists tab (`OnlineVideoPlaylistsTab.kt`).
+
+## Update 2 — Levyra-style music feed, YouTube Music home, song sheet, channel date sort
+- `OnlineMusicHomePanel.kt`: new `OmHomeSection.SongColumns` (Quick picks / Listen again / Because you played rows), `Squares` with strapline, avatar and Play all, mood chips (`OnlineMusicHomeState.chips`, `OmChipRow`, `OmHomeBuilder.chipFeed`), wide (video) and round (artist) tiles. Not connected: speed dial, Listen again (audio-player history), Quick picks, Because you played, Forgotten favorites, then the rest. Connected: the account's own chips and shelves in its own order (no local speed dial, no local rows, no endless local scroll).
+- `YtmAccountClient.home()` now returns `YtmHome` (chips + shelves with style / strapline / header avatar); `homeForChip(params)` loads a mood chip.
+- Songs of the feed: tap = play; hold the row or touch the three dots = `OmTrackActionSheet` (`OnlineMusicActionSheet.kt`, same glass sheet as `PlaylistBottomSheet`). Search results keep the swipe bar.
+- `ChannelDetailPage.kt`: date sort keeps videos without a date at their own place (`effectiveUploadTimes`) instead of sinking to the bottom.
