@@ -37,6 +37,7 @@ object OnlineMediaLibrary {
     private fun OnlineTrackResult.toJson(): JSONObject = JSONObject().apply {
         put("u", videoUrl); put("t", title); put("a", artist); put("d", durationSec)
         put("th", thumbnailUrl ?: ""); put("ud", uploadDateEpochMs ?: 0L); put("v", viewCount)
+        put("cu", channelUrl ?: ""); put("ca", channelAvatarUrl ?: "")
     }
 
     private fun JSONObject.toResult(): OnlineTrackResult = OnlineTrackResult(
@@ -46,7 +47,9 @@ object OnlineMediaLibrary {
         durationSec = optLong("d"),
         thumbnailUrl = optString("th").ifBlank { null },
         uploadDateEpochMs = optLong("ud").takeIf { it > 0L },
-        viewCount = optLong("v")
+        viewCount = optLong("v"),
+        channelUrl = optString("cu").ifBlank { null },
+        channelAvatarUrl = optString("ca").ifBlank { null }
     )
 
     // ---------------- metadata ----------------

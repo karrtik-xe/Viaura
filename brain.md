@@ -2015,3 +2015,9 @@ Format: `Symbol` → file path under `app/src/main/java/com/example/`. Lower-cas
 | `YtdlpUrlRules` | `ytdlp/YtdlpLinkRouting.kt` |
 | `YtdlpWorker` | `ytdlp/YtdlpPersistentWorker.kt` |
 | `YtdlpWorkerUnavailable` | `ytdlp/YtdlpPersistentWorker.kt` |
+## Update — YouTube Music account, rolling audio cache, lyrics race, Online video tabs
+- **YouTube Music connect:** `online/music/YtmSession.kt` (cookie store, ignore flag), `YtmAccountClient.kt` (signed-in InnerTube: home, library playlists/albums/artists, private playlist tracks), `online/ui/YtmConnectUi.kt` (`YtmLogin` opens the in-app browser, `YtmConnectCard` = Ignore/Connect card above the Online music tabs, `YtmMoreTab`). `OnlineMusicHomePanel.kt`: "More" tab, `OmHomeBuilder.firstBatch/albumsTab/artistsTab/playlistsTab` use the account when connected; `fetchPlaylistDetails` opens private playlists through the account. Icon `viaura_ytmusic.xml` is in `viaura-icons.zip`.
+- **Audio look-ahead cache:** `audio/DisabledOnlineAudioCacheStub.kt` (file name kept, now the real cache; replaces the old stub) downloads the next 3 online tracks with `HttpFetch`; `AudioQueuePlaybackCore.preloadUpcomingOnlineStreams` keeps the playing track + next 3 and drops the rest; lyrics of the next 3 are prefetched.
+- **Video buffering:** `MpvEngineController` online (YouTube) `cache-pause-wait` = 15 s.
+- **Lyrics:** `LyricsLookupRepository.raceProviders` takes answers as they arrive and picks by timing kind, then length fit (`fitScore`); new providers NetEase and JioSaavn (in `lyrics-providers-src.zip`).
+- **Online videos:** resume cards show channel, subscribers and watched position (`ChannelInfoCache`), upload age is computed from the upload time, Subs tab has a channel strip + every channel's block, new Playlists tab (`OnlineVideoPlaylistsTab.kt`).

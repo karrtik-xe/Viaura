@@ -248,6 +248,11 @@ fun OnlineMusicPanel(
 
     // ---- Online music home (blank search box): built by MusicRecoEngine, endless ----
     val home = OnlineMusicHomeState
+    // YouTube Music account: the connect card, the "More" tab and the signed-in home
+    remember { com.example.util.YtmSession.attach(context) }
+    val ytmVersion = com.example.util.YtmSession.version
+    val ytmConnected = remember(ytmVersion) { com.example.util.YtmSession.isConnected() }
+    val ytmIgnored = remember(ytmVersion) { com.example.util.YtmSession.isIgnored() }
     // The home on screen is NEVER cleared: the new one is built in the background and swapped in when it is ready
     // (no full-screen loading animation, no jump to the top). The pull-to-refresh animation ends when the swap is done.
     fun loadHome(reset: Boolean) {
@@ -301,7 +306,7 @@ fun OnlineMusicPanel(
         }
     }
     fun loadTab(tab: String) {
-        if (tab == "home" || tab in home.tabLoaded) return
+        if (tab == "home" || tab == "more" || tab in home.tabLoaded) return
         home.tabLoaded.add(tab)
         home.tabLoading = true
         scope.launch {
@@ -326,6 +331,16 @@ fun OnlineMusicPanel(
     }
     LaunchedEffect(isFeedMode) {
         if (isFeedMode && home.sections.isEmpty()) loadHome(false)
+    }
+    // connected / disconnected: the home is rebuilt from the account (or from the listener's own taste again)
+    var lastYtmVersion by remember { mutableStateOf(ytmVersion) }
+    LaunchedEffect(ytmVersion) {
+        if (ytmVersion != lastYtmVersion) {
+            lastYtmVersion = ytmVersion
+            home.albums.clear(); home.artists.clear(); home.playlists.clear(); home.tabLoaded.clear()
+            if (home.tab != "more") home.tab = "home"
+            if (isFeedMode) loadHome(true)
+        }
     }
     LaunchedEffect(home.tab, isFeedMode) { if (isFeedMode) loadTab(home.tab) }
     // listening is tracked from the real playback (search never counts); a changed taste rebuilds the home quietly, at most every 90 s
@@ -761,16 +776,30 @@ fun OnlineMusicPanel(
         when {
             isFeedMode -> {
                 Column(Modifier.fillMaxSize()) {
+                    if (!ytmConnected && !ytmIgnored) {
+                        YtmConnectCard(
+                            isDark = isDark,
+                            onIgnore = { com.example.util.YtmSession.ignoreForever() },
+                            onConnect = { YtmLogin.start(context) {} }
+                        )
+                    }
                     // thin sliding tab row, like the categories of Online videos
                     ChannelTabsRow(
-                        tabs = listOf("home" to "Home", "albums" to "Albums", "artists" to "Artists", "playlists" to "Playlists"),
+                        tabs = listOf("home" to "Home", "albums" to "Albums", "artists" to "Artists", "playlists" to "Playlists", "more" to "More"),
                         selectedId = home.tab,
                         onSelect = { home.tab = it },
                         isDark = isDark
                     )
                     val otherListState = androidx.compose.foundation.lazy.rememberLazyListState()
                     val tabSections = when (home.tab) { "albums" -> home.albums; "artists" -> home.artists; "playlists" -> home.playlists; else -> home.sections }
-                    OmHomeFeed(
+                    if (home.tab == "more") {
+                        YtmMoreTab(
+                            isDark = isDark,
+                            connected = ytmConnected,
+                            onConnect = { YtmLogin.start(context) {} },
+                            onDisconnect = { com.example.util.YtmSession.disconnect() }
+                        )
+                    } else OmHomeFeed(
                         sections = tabSections,
                         loadingMore = if (home.tab == "home") home.loadingMore else home.tabLoading,
                         listState = if (home.tab == "home") listState else otherListState,
@@ -1187,6 +1216,29 @@ private object OmHomeBuilder {
         id = "tr_${t.videoUrl}", title = t.title, subtitle = t.artist, covers = listOfNotNull(t.thumbnailUrl), track = t
     )
 
+    /** A card of the connected YouTube Music account as a tile of the same look as every other row. */
+    private fun ytmTile(i: com.example.util.YtmItem): OmHomeTile? = when (i.kind) {
+        "song" -> i.track?.let { trackTile(it) }
+        "artist" -> i.channelId?.let { id ->
+            OmHomeTile(
+                id = "ytm_ar_$id", title = i.title, subtitle = i.subtitle.ifBlank { "Artist" }, covers = listOfNotNull(i.thumbnailUrl),
+                channel = OnlineChannelResult("https://www.youtube.com/channel/$id", i.title, i.thumbnailUrl, null, null)
+            )
+        }
+        else -> i.playlistId?.let { id ->
+            OmHomeTile(
+                id = "ytm_pl_$id", title = i.title, subtitle = i.subtitle.ifBlank { if (i.kind == "album") "Album" else "Playlist" },
+                covers = listOfNotNull(i.thumbnailUrl), playlistUrl = "https://music.youtube.com/playlist?list=$id"
+            )
+        }
+    }
+
+    private fun ytmSections(prefix: String, shelves: List<com.example.util.YtmShelf>): List<OmHomeSection> =
+        shelves.mapIndexedNotNull { n, s ->
+            val tiles = s.items.mapNotNull { ytmTile(it) }
+            if (tiles.isEmpty()) null else OmHomeSection.Squares("${prefix}_${n}_${s.title}", s.title, tiles)
+        }
+
     /** One song / playlist is shown once on the whole home: different uploads / versions of the same song count as the same song. */
     private fun uniqueTile(t: OmHomeTile, used: MutableSet<String>): Boolean =
         if (t.track != null) (t.track.videoUrl !in hiddenNow && used.add(baseKey(t.track))) else used.add("i:" + t.id)
@@ -1266,6 +1318,17 @@ private object OmHomeBuilder {
     suspend fun firstBatch(c: android.content.Context, used: MutableSet<String>): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
         refreshHidden(c)
         val extrasJob = async { try { MusicRecoEngine.speedDialExtras(c, 2) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
+        // Connected YouTube Music account: its own home (listen again, quick picks, mixes, recommendations) is the home
+        val ytm = if (com.example.util.YtmSession.isConnected()) {
+            try { com.example.util.YtmAccountClient.home() } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+        } else emptyList()
+        if (ytm.size >= 2) {
+            extrasJob.cancel()
+            val ytmFill = ytm.flatMap { s -> s.items.mapNotNull { it.track } }.distinctBy { it.videoUrl }.take(30)
+            val sections = dedupe(listOf(speedDial(c, ytmFill, emptyList())) + ytmSections("om_ytm", ytm), used)
+            sections.forEach { used.add(it.key) }
+            return@coroutineScope sections
+        }
         val feed = MusicRecoEngine.feed(c, mutableSetOf())
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "new" }?.tracks.orEmpty()
         val out = dedupe(listOf(speedDial(c, fill, extrasJob.await())) + convert(feed), used)
@@ -1312,10 +1375,18 @@ private object OmHomeBuilder {
 
     // ---- tabs ----
 
+    private suspend fun ytmLibrarySection(key: String, title: String, load: suspend () -> List<com.example.util.YtmItem>): List<OmHomeSection> {
+        if (!com.example.util.YtmSession.isConnected()) return emptyList()
+        val tiles = try { load().mapNotNull { ytmTile(it) } } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() }
+        return if (tiles.isEmpty()) emptyList() else listOf(OmHomeSection.Squares(key, title, tiles))
+    }
+
     suspend fun artistsTab(c: android.content.Context): List<OmHomeSection> =
+        ytmLibrarySection("om_ytm_lib_artists", "Your YouTube Music artists") { com.example.util.YtmAccountClient.libraryArtists() } +
         MusicRecoEngine.artistSections(c).mapIndexed { i, (title, list) -> OmHomeSection.Artists("om_artists_${i}_$title", title, list) }
 
     suspend fun albumsTab(c: android.content.Context): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
+        val mineJob = async { ytmLibrarySection("om_ytm_lib_albums", "Your YouTube Music albums") { com.example.util.YtmAccountClient.libraryAlbums() } }
         val (repeated, genres) = MusicRecoEngine.albumSeeds(c)
         val used = mutableSetOf<String>()
         val artistJobs = repeated.map { a -> async { a to OnlineMusicService.searchHomePlaylists(a, albums = true, limit = 8) } }
@@ -1329,7 +1400,7 @@ private object OmHomeBuilder {
             l.filter { used.add(it.url) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares("om_alb_g_$g", "$g albums", it.map { p -> playlistTile(p, if (p.songCount in 1..7) "EP" else "Album") })) }
         }
         popular.await().filter { used.add(it.url) }.takeIf { it.isNotEmpty() }?.let { out.add(OmHomeSection.Squares("om_alb_pop", "Popular albums", it.map { p -> playlistTile(p, "Album") })) }
-        out
+        mineJob.await() + out
     }
 
     suspend fun playlistsTab(c: android.content.Context): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
@@ -1337,6 +1408,7 @@ private object OmHomeBuilder {
         val mine = OnlineMusicHomeStats.playlists(c, 12)
         val jobs = genres.map { g -> async { g to OnlineMusicService.searchHomePlaylists("$g playlist best songs", albums = false, limit = 8) } }
         val out = ArrayList<OmHomeSection>()
+        out.addAll(ytmLibrarySection("om_ytm_lib_playlists", "Your YouTube Music playlists") { com.example.util.YtmAccountClient.libraryPlaylists() })
         if (mine.isNotEmpty()) out.add(OmHomeSection.Squares("om_pl_mine", "Your playlists", mine))
         val used = mutableSetOf<String>()
         jobs.awaitAll().forEach { (g, l) ->

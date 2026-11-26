@@ -1288,7 +1288,7 @@ object AudioPlaybackManager {
     private val lyricsPrefetchTried = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var lyricsPrefetchJob: Job? = null
 
-    private fun prefetchUpcomingLyrics(count: Int = 2) {
+    private fun prefetchUpcomingLyrics(count: Int = 3) {
         val ctx = applicationContext ?: return
         val q = _queue.value
         if (q.size < 2 || _repeatMode.value == AudioRepeatMode.ONE) return
@@ -1418,12 +1418,22 @@ object AudioPlaybackManager {
 
         if (upcoming.isEmpty()) return
 
+        val appCtx = applicationContext
+        // the rolling window: the playing track + the next three stay in the cache, everything older is dropped
+        if (appCtx != null) {
+            val keep = upcoming.map { it.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX) } +
+                listOfNotNull(_currentTrack.value?.path?.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX))
+            OnlineAudioCache.retainOnly(appCtx, keep)
+        }
+
         streamPreloadJob = scope.launch(Dispatchers.IO) {
+            // 1) thumbnails and stream links of all three first (cheap), 2) then the audio data one after the other
             for (track in upcoming) {
                 // Prefetch high-resolution thumbnail so Next button shows image instantly
                 if (!track.thumbnailUrl.isNullOrBlank()) {
                     try {
                         com.example.ui.components.loadRemoteAudioThumbnail(track.thumbnailUrl, 384)
+                        com.example.ui.components.loadRemoteAudioThumbnail(track.thumbnailUrl, 800)
                     } catch (_: Throwable) {}
                 }
                 val videoUrl = track.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
@@ -1441,6 +1451,20 @@ object AudioPlaybackManager {
                             }
                         }
                     }
+                }
+            }
+            if (appCtx == null) return@launch
+            for (track in upcoming) {
+                val videoUrl = track.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
+                val link = preloadedOnlineStreams[videoUrl] ?: continue
+                val ok = try {
+                    OnlineAudioCache.prefetch(appCtx, videoUrl, link, track.durationMs)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) { false }
+                if (ok) {
+                    // the next track now has its data: its standby player can be prepared (switch without buffering)
+                    withContext(Dispatchers.Main) { runCatching { prepareStandbyForUpcoming(appCtx) } }
                 }
             }
         }

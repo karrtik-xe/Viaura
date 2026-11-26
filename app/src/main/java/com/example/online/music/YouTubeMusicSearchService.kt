@@ -150,7 +150,7 @@ object OnlineMusicService {
             val now = System.currentTimeMillis()
             val num = Regex("\\d+").find(text)?.value?.toLongOrNull() ?: 1L
             return when {
-                text.contains("second") -> now - num * 1000L
+                text.contains("second") || text.contains("just now") -> now - num * 1000L
                 text.contains("minute") -> now - num * 60 * 1000L
                 text.contains("hour") -> now - num * 3600 * 1000L
                 text.contains("day") -> now - num * 86400 * 1000L
@@ -540,14 +540,15 @@ object OnlineMusicService {
             } else 0L
         } catch (_: Throwable) { 0L }
 
+        val textual = try { this.textualUploadDate } catch (_: Throwable) { null }
         return OnlineTrackResult(
             videoUrl = this.url,
             title = this.name?.takeIf { it.isNotBlank() } ?: "Audio Track",
             artist = (this.uploaderName ?: "").cleanUploaderName(),
             durationSec = this.duration.coerceAtLeast(0L),
             thumbnailUrl = extractBestThumbnailUrl(this.thumbnails, this.url),
-            uploadDateText = this.textualUploadDate,
-            uploadDateEpochMs = uploadEpoch,
+            uploadDateText = textual,
+            uploadDateEpochMs = if (uploadEpoch > 0L) uploadEpoch else parseUploadDate(null, textual).takeIf { it > 0L },
             viewCount = this.viewCount.coerceAtLeast(0L),
             channelUrl = this.channelUrlOrNull(),
             channelAvatarUrl = this.channelAvatarOrNull(),
@@ -1172,6 +1173,19 @@ object OnlineMusicService {
             val listId = if (url.contains("list=")) {
                 url.substringAfter("list=").substringBefore("&").substringBefore("#")
             } else null
+
+            // Connected account: its own (also private) playlists / liked songs / albums come with the account session
+            if (listId != null && YtmSession.isConnected()) {
+                val mine = try { YtmAccountClient.playlistTracks(listId) } catch (e: CancellationException) { throw e } catch (_: Throwable) { null }
+                if (mine != null && mine.second.isNotEmpty()) {
+                    return@withContext OnlinePlaylistDetail(
+                        playlistUrl = url, title = mine.first, author = "YouTube Music",
+                        trackCountText = "${mine.second.size} songs",
+                        coverUrl = mine.second.firstOrNull()?.thumbnailUrl, tracks = mine.second,
+                        previewThumbnails = mine.second.mapNotNull { it.thumbnailUrl }.distinct().take(4)
+                    )
+                }
+            }
 
             val targetUrl = if (listId != null) {
                 "https://www.youtube.com/playlist?list=$listId"

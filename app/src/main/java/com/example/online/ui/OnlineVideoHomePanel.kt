@@ -24,6 +24,7 @@ import com.example.ui.theme.AccentGradient
 import com.example.ui.theme.AccentPink
 import com.example.ui.theme.AccentSkyBlue
 import com.example.util.OnlineMediaLibrary
+import com.example.util.ChannelInfoCache
 import com.example.util.OnlineVideoQueue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -83,6 +84,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -432,6 +434,9 @@ fun OnlineVideoPanel(
     // finished: a finished video is saved with position 0 and therefore drops out of this list by itself.
     val historyVersion by com.example.util.PlaybackHistoryManager.version.collectAsState()
     var resumeItems by remember { mutableStateOf<List<OnlineTrackResult>>(emptyList()) }
+    // watched position of each unfinished video (url -> position ms)
+    var resumePositions by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var channelSubs by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     LaunchedEffect(historyVersion, st.results.size, st.refreshRequest) {
         resumeItems = withContext(Dispatchers.IO) {
             try {
@@ -440,9 +445,11 @@ fun OnlineVideoPanel(
                     .filter { it.path.startsWith(prefix) && it.positionMs > 3_000L &&
                         !(it.durationMs > 0L && it.positionMs >= it.durationMs - it.durationMs / 25) }
                     .take(5)
+                    .also { recs -> resumePositions = recs.associate { OnlineVideoService.toWatchUrl(it.path) to it.positionMs } }
                     .map { rec ->
                         val url = OnlineVideoService.toWatchUrl(rec.path)
-                        OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url, context)
+                        OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url, context)?.takeIf { it.artist.isNotBlank() }
+                            ?: OnlineMediaLibrary.getMeta(OnlineMediaLibrary.KIND_VIDEO, url, context)
                             ?: st.results.firstOrNull { it.videoUrl == url }
                             ?: OnlineTrackResult(
                                 videoUrl = url,
@@ -455,6 +462,29 @@ fun OnlineVideoPanel(
                     }
             } catch (_: Throwable) { emptyList() }
         }
+    }
+    // An unfinished video whose channel is not known yet (old history record): channel name, logo and subscribers are
+    // read from the watch page once, remembered, and the card updates by itself.
+    LaunchedEffect(resumeItems.map { it.videoUrl }) {
+        val missing = resumeItems.filter { it.artist.isBlank() || it.channelUrl.isNullOrBlank() }
+        if (missing.isNotEmpty()) {
+            val filled = missing.mapNotNull { r ->
+                val d = try { OnlineVideoService.fetchWatchDetails(r.videoUrl) } catch (_: Throwable) { null } ?: return@mapNotNull null
+                r.copy(
+                    artist = d.uploader.ifBlank { r.artist },
+                    channelUrl = r.channelUrl ?: d.uploaderUrl,
+                    channelAvatarUrl = r.channelAvatarUrl ?: d.avatarUrl,
+                    uploadDateEpochMs = r.uploadDateEpochMs
+                ).also { OnlineMediaLibrary.rememberMeta(context, OnlineMediaLibrary.KIND_VIDEO, it) }
+            }.associateBy { it.videoUrl }
+            if (filled.isNotEmpty()) resumeItems = resumeItems.map { filled[it.videoUrl] ?: it }
+        }
+        val subs = resumeItems.mapNotNull { r ->
+            val cu = r.channelUrl?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val s = try { ChannelInfoCache.subscribers(context, cu) } catch (_: Throwable) { null } ?: return@mapNotNull null
+            r.videoUrl to s
+        }.toMap()
+        if (subs.isNotEmpty()) channelSubs = channelSubs + subs
     }
     // Order: unfinished video(s) first, then Watch-later, then the recommendations; hidden ones never show.
     val shown = remember(sorted, isFeedMode, st.watchLater, hidden, resumeItems) {
@@ -559,7 +589,7 @@ fun OnlineVideoPanel(
         )
         if (isFeedMode) {
             ChannelTabsRow(
-                tabs = listOf("home" to "Home", "subs" to "Subs", "live" to "Live"),
+                tabs = listOf("home" to "Home", "subs" to "Subs", "live" to "Live", "playlists" to "Playlists"),
                 selectedId = st.tab,
                 onSelect = { st.tab = it },
                 isDark = isDark
@@ -570,10 +600,19 @@ fun OnlineVideoPanel(
             activeTab == "subs" -> {
                 // reading watchedTick makes a watched video leave the list as soon as the user comes back
                 val watchedVersion = st.watchedTick
+                // every subscribed channel keeps its own block (watched videos stay visible, only "not interested" ones go)
                 val visibleGroups = remember(st.subsGroups, watchedVersion, st.hiddenVersion) {
-                    st.subsGroups.mapNotNull { g ->
-                        val left = g.videos.filter { !OnlineVideoRecommender.isWatched(context, it.videoUrl) && it.videoUrl !in hidden }
-                        if (left.isEmpty()) null else g.copy(videos = left)
+                    st.subsGroups.map { g -> g.copy(videos = g.videos.filter { it.videoUrl !in hidden }) }
+                }
+                var subsCounts by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+                LaunchedEffect(st.subsGroups) {
+                    st.subsGroups.forEach { g ->
+                        val cached = ChannelInfoCache.cached(context, g.channel.channelUrl)
+                        if (cached != null) subsCounts = subsCounts + (g.channel.channelUrl to cached)
+                    }
+                    st.subsGroups.forEach { g ->
+                        val s = try { ChannelInfoCache.subscribers(context, g.channel.channelUrl) } catch (_: Throwable) { null }
+                        if (s != null && subsCounts[g.channel.channelUrl] != s) subsCounts = subsCounts + (g.channel.channelUrl to s)
                     }
                 }
                 when {
@@ -583,7 +622,7 @@ fun OnlineVideoPanel(
                     visibleGroups.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
                             if (SubscribedChannelsManager.getAll(context).isEmpty()) "You have not subscribed to any channel yet. Subscribe to a channel and its newest videos show up here."
-                            else "No new videos from your subscriptions. Pull down to refresh.",
+                            else "Could not load your subscriptions. Pull down to refresh.",
                             color = secondaryText, modifier = Modifier.padding(32.dp), textAlign = TextAlign.Center
                         )
                     }
@@ -592,17 +631,38 @@ fun OnlineVideoPanel(
                         contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        item(key = "subs_strip") {
+                            androidx.compose.foundation.lazy.LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp)
+                            ) {
+                                items(visibleGroups, key = { "subs_s_${it.channel.channelUrl}" }) { g ->
+                                    Column(
+                                        modifier = Modifier.width(68.dp).clip(RoundedCornerShape(10.dp))
+                                            .clickable { onOpenChannel(OnlineChannelResult(g.channel.channelUrl, g.channel.name, g.channel.avatarUrl, null, null)) },
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        YouTubeChannelLogo(name = g.channel.name.ifBlank { "?" }, avatarUrl = g.channel.avatarUrl, size = 52.dp)
+                                        Text(
+                                            g.channel.name, color = secondaryText, fontSize = 11.sp, maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         visibleGroups.forEach { g ->
                             item(key = "subs_h_${g.channel.channelUrl}") {
                                 SubsChannelHeader(
                                     name = g.channel.name, avatarUrl = g.channel.avatarUrl, isDark = isDark,
+                                    subscribersText = subsCounts[g.channel.channelUrl],
                                     onClick = { onOpenChannel(OnlineChannelResult(g.channel.channelUrl, g.channel.name, g.channel.avatarUrl, null, null)) }
                                 )
                             }
                             items(g.videos, key = { "subs_v_${it.videoUrl}" }) { r ->
                                 Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
                                     if (layoutMode == LayoutMode.YOUTUBE) {
-                                        OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                                        OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) }, watchedMs = resumePositions[r.videoUrl] ?: 0L, subscribersText = channelSubs[r.videoUrl])
                                     } else {
                                         val v = remember(r) { r.toOnlineVideoItem() }
                                         VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
@@ -612,6 +672,15 @@ fun OnlineVideoPanel(
                         }
                     }
                 }
+            }
+            activeTab == "playlists" -> {
+                OnlineVideoPlaylistsTab(
+                    isDark = isDark,
+                    onPlay = { first, queue ->
+                        OnlineVideoRecommender.recordOpened(context, first.videoUrl, first.artist, first.title)
+                        onPlayVideo(first.toOnlineVideoItem(), queue.map { it.toOnlineVideoItem() })
+                    }
+                )
             }
             activeTab == "live" -> {
                 when {
@@ -629,7 +698,7 @@ fun OnlineVideoPanel(
                         items(st.liveResults.filter { it.videoUrl !in hidden }, key = { "live_${it.videoUrl}" }) { r ->
                             Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
                                 if (layoutMode == LayoutMode.YOUTUBE) {
-                                    OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                                    OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) }, watchedMs = resumePositions[r.videoUrl] ?: 0L, subscribersText = channelSubs[r.videoUrl])
                                 } else {
                                     val v = remember(r) { r.toOnlineVideoItem() }
                                     VideoItemCard(video = v, isDark = isDark, visibleFields = cardFields, onClick = { actionTarget = null; play(r) })
@@ -669,7 +738,7 @@ fun OnlineVideoPanel(
                     }
                     items(shown, key = { "ov_y_${st.generation}_${it.videoUrl}" }) { r ->
                         Box(Modifier.swipeLeftForActions(selected = actionState.contains(r)) { actionTarget = r }) {
-                            OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) })
+                            OnlineYouTubeVideoCard(video = r, isDark = isDark, onClick = { actionTarget = null; play(r) }, onChannelClick = { openChannelOf(r) }, watchedMs = resumePositions[r.videoUrl] ?: 0L, subscribersText = channelSubs[r.videoUrl])
                         }
                     }
                     if (st.isLoadingMore) {
@@ -858,12 +927,12 @@ fun OnlineVideoPanel(
 /** Subs tab data: every subscribed channel with its newest uploads (max 3), the channel that uploaded last first. */
 private suspend fun loadSubsGroups(context: android.content.Context): List<SubsChannelGroup> = kotlinx.coroutines.coroutineScope {
     val gate = kotlinx.coroutines.sync.Semaphore(6)
-    SubscribedChannelsManager.getAll(context).take(40).map { ch ->
+    SubscribedChannelsManager.getAll(context).take(60).map { ch ->
         async(Dispatchers.IO) {
             gate.acquire()
             try {
                 val videos = try {
-                    OnlineMusicService.fetchChannelLatestVideos(ch.channelUrl, 3)
+                    OnlineMusicService.fetchChannelLatestVideos(ch.channelUrl, 4)
                 } catch (t: kotlinx.coroutines.CancellationException) {
                     throw t
                 } catch (_: Throwable) {
@@ -884,15 +953,14 @@ private suspend fun loadSubsGroups(context: android.content.Context): List<SubsC
             }
         }
     }.awaitAll()
-        .filter { it.videos.isNotEmpty() }
-        .sortedByDescending { g -> g.videos.maxOf { it.uploadDateEpochMs ?: 0L } }
+        .sortedByDescending { g -> g.videos.maxOfOrNull { it.uploadDateEpochMs ?: 0L } ?: 0L }
 }
 
 /** "3 days ago": the website's own text when there is one, otherwise worked out from the upload time. */
 private fun youtubeAgeText(r: OnlineTrackResult): String {
-    r.uploadDateText?.takeIf { it.isNotBlank() }?.let { return it }
-    val at = r.uploadDateEpochMs ?: return ""
-    if (at <= 0L) return ""
+    // Worked out from the upload time first: the website's relative text ("3 days ago") goes stale once a result is cached.
+    val at = r.uploadDateEpochMs ?: 0L
+    if (at <= 0L) return r.uploadDateText?.takeIf { it.isNotBlank() }.orEmpty()
     val mins = ((System.currentTimeMillis() - at) / 60_000L).coerceAtLeast(0L)
     return when {
         mins < 1L -> "just now"
@@ -941,7 +1009,10 @@ internal fun OnlineYouTubeVideoCard(
     video: OnlineTrackResult,
     isDark: Boolean,
     onClick: () -> Unit,
-    onChannelClick: () -> Unit
+    onChannelClick: () -> Unit,
+    /** Position already watched (unfinished video): a red progress line and "Watched m:ss / m:ss" appear. */
+    watchedMs: Long = 0L,
+    subscribersText: String? = null
 ) {
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
@@ -1002,6 +1073,12 @@ internal fun OnlineYouTubeVideoCard(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.75f)).padding(horizontal = 6.dp, vertical = 2.dp)
                 )
             }
+            if (watchedMs > 0L && video.durationSec > 0L) {
+                val frac = (watchedMs / 1000f / video.durationSec).coerceIn(0.02f, 1f)
+                Box(modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.35f))) {
+                    Box(modifier = Modifier.fillMaxWidth(frac).fillMaxHeight().background(Color(0xFFE02424)))
+                }
+            }
         }
 
         Row(
@@ -1021,6 +1098,16 @@ internal fun OnlineYouTubeVideoCard(
                 if (meta.isNotBlank()) {
                     Text(meta, color = secondaryText, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
                 }
+                if (!subscribersText.isNullOrBlank()) {
+                    Text(subscribersText, color = secondaryText, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 1, modifier = Modifier.padding(top = 1.dp))
+                }
+                if (watchedMs > 0L) {
+                    val total = if (video.durationSec > 0L) " / ${youtubeDurationText(video.durationSec)}" else ""
+                    Text(
+                        "Watched ${youtubeDurationText(watchedMs / 1000L)}$total", color = Color(0xFFE02424), fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
             }
         }
     }
@@ -1028,7 +1115,7 @@ internal fun OnlineYouTubeVideoCard(
 
 /** Channel line of the Subs tab (logo + name); the newest videos of that channel follow below it. Tap = open the channel. */
 @Composable
-private fun SubsChannelHeader(name: String, avatarUrl: String?, isDark: Boolean, onClick: () -> Unit) {
+private fun SubsChannelHeader(name: String, avatarUrl: String?, isDark: Boolean, subscribersText: String? = null, onClick: () -> Unit) {
     val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
     val primaryText = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondaryText = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -1051,7 +1138,10 @@ private fun SubsChannelHeader(name: String, avatarUrl: String?, isDark: Boolean,
         YouTubeChannelLogo(name = name.ifBlank { "?" }, avatarUrl = avatarUrl, size = 48.dp)
         Column(modifier = Modifier.weight(1f)) {
             Text(name, color = primaryText, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("Subscribed \u2022 latest videos", color = secondaryText, fontSize = 12.sp, maxLines = 1)
+            Text(
+                listOfNotNull(subscribersText?.takeIf { it.isNotBlank() }, "latest videos").joinToString(" \u2022 "),
+                color = secondaryText, fontSize = 12.sp, maxLines = 1
+            )
         }
     }
 }

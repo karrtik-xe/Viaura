@@ -1086,7 +1086,9 @@ class MpvPlayerController {
                         } catch (_: Throwable) {}
                     }
                 } else {
-                    view.mpv.setPropertyString("cache-pause-wait", "0.5")
+                    // Online video (YouTube): after the data ran dry, playback continues only when 15 s are loaded at once;
+                    // the 60 s read-ahead then keeps topping the window up in the background.
+                    view.mpv.setPropertyString("cache-pause-wait", "15")
                     view.mpv.setPropertyString("stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_delay_max=5,reconnect_on_network_error=1,reconnect_on_http_error=4xx,5xx,reconnect_at_eof=1,multiple_requests=1")
                     try { view.mpv.setPropertyString("demuxer-lavf-o", "") } catch (_: Throwable) {}
                     try { view.mpv.setPropertyString("demuxer-lavf-analyzeduration", "0") } catch (_: Throwable) {}

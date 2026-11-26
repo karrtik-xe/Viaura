@@ -97,6 +97,8 @@ class LyricsRepository(
 
     /** How far past the end of the file a timed line may sit before the lyrics are another edit. */
     private const val LENGTH_OVERRUN_MS = 12_000
+    private const val SYNCED_GRACE_MS = 2_500L
+    private const val PLAIN_GRACE_MS = 6_000L
 
     /** Last sung line this far past the end of the file = lyrics of a longer edit (they are scaled down). */
     private const val RETIME_TOLERANCE_MS = 6_000
@@ -651,68 +653,117 @@ class LyricsRepository(
     return last <= durationMs + LENGTH_OVERRUN_MS
   }
 
-  /** Every provider is asked together; actual timing quality wins, then provider priority. */
+  /**
+   * How well timed lyrics fit the playing file: the last sung line of a real recording ends a little before the file does
+   * (outro), so lyrics that end far earlier are a shorter cut / truncated, and lyrics that end after the file are another edit.
+   */
+  private fun Lyrics.fitScore(durationMs: Int): Int {
+    val timed = this.synced.orEmpty()
+    val tier = when {
+      timed.any { !it.words.isNullOrEmpty() } -> 300
+      timed.isNotEmpty() -> 200
+      else -> 100
+    }
+    if (timed.isEmpty() || durationMs <= 0) return tier + 30
+    val last = timed.lastOrNull { it.line.isNotBlank() }?.time ?: return tier
+    val gap = durationMs - last
+    val fit = when {
+      gap in -3_000..60_000 -> 60 - (kotlin.math.abs(gap - 8_000) / 1_500).coerceAtMost(55)
+      gap > 60_000 -> 5
+      else -> 0
+    }
+    return tier + fit
+  }
+
+  /**
+   * Every provider is asked together and answers are taken as they arrive (not in a fixed order, so one slow host never holds
+   * the lyrics back). Word timing beats line timing beats plain text; between answers of the same kind the one that fits the
+   * length of the file best wins, then provider priority. Once a synced answer is in, a short grace window is left for a
+   * better one; a plain answer waits a little longer for a synced one.
+   */
   private suspend fun raceProviders(
     query: LyricsFetchQuery,
     mediaPath: String?,
     cached: Map<LyricsProvider, Lyrics>,
   ): OnlineLyricsResult =
     coroutineScope {
+      val providers = LyricsProvider.available
+      val inbox = kotlinx.coroutines.channels.Channel<Pair<LyricsProvider, ProviderOutcome>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
       val jobs =
-        LyricsProvider.available.map { provider ->
-          val start = if (provider in LyricsProvider.LAZY_PROVIDERS) CoroutineStart.LAZY else CoroutineStart.DEFAULT
+        providers.map { provider ->
+          val lazy = provider in LyricsProvider.LAZY_PROVIDERS
+          val start = if (lazy) CoroutineStart.LAZY else CoroutineStart.DEFAULT
           provider to async(Dispatchers.IO, start = start) {
-            cached[provider]?.let(ProviderOutcome::Found) ?: fetchProvider(provider, query, mediaPath)
+            val outcome = cached[provider]?.let(ProviderOutcome::Found) ?: fetchProvider(provider, query, mediaPath)
+            inbox.trySend(provider to outcome)
+            outcome
           }
         }
+      val eager = providers.count { it !in LyricsProvider.LAZY_PROVIDERS }
 
       try {
-        var wordTimed: Pair<LyricsProvider, Lyrics>? = null
-        var lineTimed: Pair<LyricsProvider, Lyrics>? = null
-        var plainFallback: Pair<LyricsProvider, Lyrics>? = null
-        // Timed answers that run well past the end of the playing file: very
-        // likely another edit of the song. Used only when nothing else exists.
-        var misfit: Pair<LyricsProvider, Lyrics>? = null
         val seen = mutableMapOf<LyricsProvider, Lyrics>()
         val missing = mutableSetOf<LyricsProvider>()
         val failed = mutableSetOf<LyricsProvider>()
+        val fitting = mutableListOf<Pair<LyricsProvider, Lyrics>>()
+        var misfit: Pair<LyricsProvider, Lyrics>? = null
+        var deadline = Long.MAX_VALUE
 
-        for ((provider, job) in jobs) {
-          if ((wordTimed != null || lineTimed != null) && provider in LyricsProvider.LAZY_PROVIDERS) continue
-          val outcome =
-            runCatching { job.await() }
-              .getOrElse { error -> if (error is CancellationException) throw error else ProviderOutcome.Failed }
+        fun take(provider: LyricsProvider, outcome: ProviderOutcome) {
           val found =
             when (outcome) {
               is ProviderOutcome.Found -> outcome.lyrics
-              ProviderOutcome.Missing -> {
-                missing += provider
-                continue
-              }
-              ProviderOutcome.Failed -> {
-                failed += provider
-                continue
-              }
+              ProviderOutcome.Missing -> { missing += provider; return }
+              ProviderOutcome.Failed -> { failed += provider; return }
             }
-          if (!found.isValid()) {
-            missing += provider
-            continue
-          }
+          if (!found.isValid()) { missing += provider; return }
           seen[provider] = found
-
           if (!found.fitsLength(query.durationMs)) {
             if (misfit == null) misfit = provider to found
-            continue
+            return
           }
-          if (found.synced.orEmpty().any { !it.words.isNullOrEmpty() }) {
-            wordTimed = provider to found
-            break
-          }
-          if (lineTimed == null && !found.synced.isNullOrEmpty()) lineTimed = provider to found
-          if (plainFallback == null) plainFallback = provider to found
+          fitting += provider to found
+          val tier = found.fitScore(0)
+          val now = System.currentTimeMillis()
+          deadline = minOf(
+            deadline,
+            now + when {
+              tier >= 300 -> 0L
+              tier >= 200 -> SYNCED_GRACE_MS
+              else -> PLAIN_GRACE_MS
+            },
+          )
         }
 
-        val winner = wordTimed ?: lineTimed ?: plainFallback ?: misfit
+        var received = 0
+        while (received < eager) {
+          val wait = deadline - System.currentTimeMillis()
+          val item =
+            if (deadline == Long.MAX_VALUE) inbox.receive()
+            else if (wait <= 0L) inbox.tryReceive().getOrNull()
+            else withTimeoutOrNull(wait) { inbox.receive() }
+          if (item == null) break
+          received++
+          take(item.first, item.second)
+        }
+
+        // Nothing usable from the polite sources: the lazy ones (web scrape) are asked now.
+        if (fitting.isEmpty() && misfit == null) {
+          for ((provider, job) in jobs) {
+            if (provider !in LyricsProvider.LAZY_PROVIDERS) continue
+            job.start()
+            val outcome = runCatching { job.await() }
+              .getOrElse { error -> if (error is CancellationException) throw error else ProviderOutcome.Failed }
+            take(provider, outcome)
+          }
+        }
+
+        val order = providers.withIndex().associate { it.value to it.index }
+        val winner =
+          fitting.maxWithOrNull(
+            compareBy<Pair<LyricsProvider, Lyrics>> { it.second.fitScore(query.durationMs) }
+              .thenBy { -(order[it.first] ?: Int.MAX_VALUE) },
+          ) ?: misfit
         if (winner != null) {
           seen[winner.first] = winner.second
           OnlineLyricsResult(
@@ -727,6 +778,7 @@ class LyricsRepository(
           OnlineLyricsResult(byProvider = seen.toMap(), missing = missing.toSet(), failed = failed.toSet())
         }
       } finally {
+        inbox.close()
         jobs.forEach { it.second.cancel() }
       }
     }

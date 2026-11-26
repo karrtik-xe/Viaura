@@ -91,6 +91,11 @@ enum class LyricsProvider(
     detail = "Whole lines, strong outside the English catalogue",
     wordSynced = false,
   ),
+  NETEASE(
+    label = "NetEase",
+    detail = "Whole lines with accurate timing, big Hindi and English catalogue",
+    wordSynced = false,
+  ),
   LRCLIB(
     label = "LRCLIB",
     detail = "Whole lines only, and usually up",
@@ -99,6 +104,11 @@ enum class LyricsProvider(
   MUSIXMATCH(
     label = "Musixmatch",
     detail = "Word timing from the largest catalogue there is",
+    wordSynced = false,
+  ),
+  JIOSAAVN(
+    label = "JioSaavn",
+    detail = "Plain lyrics of Hindi, Punjabi and regional songs",
     wordSynced = false,
   ),
   GENIUS(
