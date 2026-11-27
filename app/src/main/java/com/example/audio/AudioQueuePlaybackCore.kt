@@ -259,7 +259,19 @@ object AudioPlaybackManager {
         _isFullScreenOpen.value = true
     }
 
-    fun playRecentTrack(context: Context, resume: com.example.util.AudioPlaybackResume, startFromBeginning: Boolean = false): Boolean {
+    /** The queue of the last session (saved by [saveQueueSnapshotSoon]) that belongs to the recent song [resume], else just that song. */
+    fun queueOfLastSession(context: Context, resume: com.example.util.AudioPlaybackResume): List<AudioTrackItem> {
+        val saved = com.example.util.AudioQueueSnapshotStore.load(context)
+        return if (saved.any { it.path == resume.path }) saved else emptyList()
+    }
+
+    fun playRecentTrack(
+        context: Context,
+        resume: com.example.util.AudioPlaybackResume,
+        startFromBeginning: Boolean = false,
+        /** The tracks that were behind it (restored after an app restart); empty = only the song itself. */
+        sessionQueue: List<AudioTrackItem> = emptyList()
+    ): Boolean {
         val uri = try { if (resume.uriString.isNotBlank()) Uri.parse(resume.uriString) else Uri.EMPTY } catch (_: Throwable) { Uri.EMPTY }
         val track = AudioTrackItem(
             id = resume.id,
@@ -277,6 +289,8 @@ object AudioPlaybackManager {
         if (track.path.isBlank() && track.uri == Uri.EMPTY) return false
 
         val targetPosition = if (startFromBeginning) 0L else resume.positionMs
+        fun queueFor(active: AudioTrackItem): List<AudioTrackItem> =
+            if (sessionQueue.isEmpty()) listOf(active) else sessionQueue.map { if (it.path == active.path) active else it }
 
         // The same track is already loaded (mini / full audio player): keep it playing from where it is. Reloading it from
         // the saved resume point (which lags behind) is what made the sound cut and jump back a little.
@@ -300,7 +314,7 @@ object AudioPlaybackManager {
                     track.path.removePrefix(com.example.ui.components.ONLINE_TRACK_PATH_PREFIX)
                 ) != null
             ) {
-                playTrack(context, track, listOf(track), targetPosition, continueIfCurrent = false)
+                playTrack(context, track, queueFor(track), targetPosition, continueIfCurrent = false)
                 openFullScreen()
                 return true
             }
@@ -312,14 +326,14 @@ object AudioPlaybackManager {
                     track
                 }
                 withContext(Dispatchers.Main) {
-                    playTrack(context, activeTrack, listOf(activeTrack), targetPosition, continueIfCurrent = false)
+                    playTrack(context, activeTrack, queueFor(activeTrack), targetPosition, continueIfCurrent = false)
                     openFullScreen()
                 }
             }
             return true
         }
 
-        playTrack(context, track, listOf(track), targetPosition, continueIfCurrent = false)
+        playTrack(context, track, queueFor(track), targetPosition, continueIfCurrent = false)
         openFullScreen()
         return true
     }
@@ -689,6 +703,34 @@ object AudioPlaybackManager {
         onQueueOrderChanged()
     }
 
+    /**
+     * "Play next" for several songs at once: they play right after the current track in exactly the order given (the song
+     * that was selected first plays first), as one block, so no later change can put one of them behind the others.
+     */
+    fun playNextAll(tracks: List<AudioTrackItem>) {
+        val cur = _currentTrack.value
+        val list = tracks.filter { cur == null || it.path != cur.path }.distinctBy { it.path }
+        if (list.isEmpty()) return
+        val paths = list.map { it.path }.toSet()
+        val ids = list.map { it.id }.toSet()
+        val q = _queue.value.filterNot { it.path in paths }.toMutableList()
+        val curIdx = q.indexOfFirst { it.id == cur?.id }
+        q.addAll(if (curIdx >= 0) curIdx + 1 else 0, list)
+        if (_isShuffle.value && originalQueue.isNotEmpty()) {
+            val o = originalQueue.filterNot { it.path in paths }.toMutableList()
+            val oi = o.indexOfFirst { it.id == cur?.id }
+            o.addAll(if (oi >= 0) oi + 1 else 0, list)
+            originalQueue = o
+        } else {
+            originalQueue = q
+        }
+        pendingNextIds.removeAll(ids)
+        pendingNextIds.addAll(0, list.map { it.id })
+        _queue.value = q
+        _currentIndex.value = if (curIdx >= 0) curIdx else _currentIndex.value.coerceIn(0, q.lastIndex)
+        onQueueOrderChanged()
+    }
+
     /** "Add to queue": [track] goes to the end of the queue. */
     fun playLast(track: AudioTrackItem) {
         val cur = _currentTrack.value
@@ -799,6 +841,7 @@ object AudioPlaybackManager {
         _currentTrack.value = track
         _durationMs.value = track.durationMs
         _isMiniPlayerVisible.value = true
+        saveQueueSnapshotSoon()
         com.example.util.MediaSeenManager.markSeen(appContext, track.path, track.id)
         clearABLoop()
         com.example.util.AudioPlaybackHistoryManager.savePosition(appContext, track, startPositionMs, track.durationMs, force = true)
@@ -1272,8 +1315,23 @@ object AudioPlaybackManager {
         }
     }
 
+    private var queueSnapshotJob: Job? = null
+
+    /** Saves the queue a moment after it last changed (so the Recent button can restore it after a restart). */
+    private fun saveQueueSnapshotSoon() {
+        val ctx = applicationContext ?: return
+        queueSnapshotJob?.cancel()
+        queueSnapshotJob = scope.launch {
+            delay(1200L)
+            val q = _queue.value
+            val curId = _currentTrack.value?.id
+            withContext(Dispatchers.IO) { com.example.util.AudioQueueSnapshotStore.save(ctx, q, curId) }
+        }
+    }
+
     /** Queue order / repeat mode changed: the pre-buffered "next" track may no longer be right. */
     private fun onQueueOrderChanged() {
+        saveQueueSnapshotSoon()
         val ctx = applicationContext ?: return
         if (_currentTrack.value == null) return
         prepareStandbyForUpcoming(ctx)
@@ -1656,11 +1714,16 @@ object AudioPlaybackManager {
         _isBuffering.value = true
         _currentPositionMs.value = 0L
 
-        val nextIndex = (_currentIndex.value + 1) % q.size
+        // a song the listener set with "Play next" always comes first, wherever the queue was changed in between
+        val pendingIdx = pendingNextIds.asSequence()
+            .map { pid -> q.indexOfFirst { it.id == pid } }
+            .firstOrNull { it >= 0 && it != _currentIndex.value }
+        val nextIndex = pendingIdx ?: ((_currentIndex.value + 1) % q.size)
         val nextTrack = q.getOrNull(nextIndex) ?: return
         _currentIndex.value = nextIndex
         _currentTrack.value = nextTrack
         consumePending(nextTrack.id)
+        saveQueueSnapshotSoon()
         _durationMs.value = nextTrack.durationMs
         trackRetryCount = 0
         lastRetriedTrackId = nextTrack.id
@@ -1708,6 +1771,7 @@ object AudioPlaybackManager {
         _currentIndex.value = prevIndex
         _currentTrack.value = prevTrack
         consumePending(prevTrack.id)
+        saveQueueSnapshotSoon()
         _durationMs.value = prevTrack.durationMs
         trackRetryCount = 0
         lastRetriedTrackId = prevTrack.id

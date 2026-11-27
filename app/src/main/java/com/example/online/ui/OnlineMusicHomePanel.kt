@@ -174,8 +174,6 @@ fun OnlineMusicPanel(
     // the toolbar's Download then downloads all of them in one go with one quality.
     val actionState = com.example.ui.components.rememberSwipeActionState<OnlineTrackResult> { it.videoUrl }
     var actionTarget by actionState
-    // the feed's songs open this sheet from the bottom (search results keep the swipe bar)
-    var sheetTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var batchRequests by remember { mutableStateOf<List<com.example.ui.components.DownloadRequest>?>(null) }
     var lastActionTarget by remember { mutableStateOf<OnlineTrackResult?>(null) }
     var downloadRequest by remember { mutableStateOf<com.example.ui.components.DownloadRequest?>(null) }
@@ -352,6 +350,14 @@ fun OnlineMusicPanel(
         MusicListeningTracker.start(context)
         val initial = MusicTaste.changes.value
         MusicTaste.changes.collect { if (it != initial) home.stale = true }
+    }
+    // Coming back into the music home (leaving and entering again): it is rebuilt from the listening at once and quietly
+    // (no pull-to-refresh animation), so the orbit and the rows already match the songs just heard.
+    LaunchedEffect(Unit) {
+        if (isFeedMode && home.sections.isNotEmpty() && !home.loading && (home.stale || System.currentTimeMillis() - home.lastBuild > 15_000L)) {
+            home.stale = false
+            loadHome(true)
+        }
     }
     LaunchedEffect(isFeedMode, home.stale) {
         if (isFeedMode && home.stale && home.sections.isNotEmpty()) {
@@ -828,7 +834,7 @@ fun OnlineMusicPanel(
                         listState = if (home.tab == "home") listState else otherListState,
                         isDark = isDark,
                         actionState = actionState,
-                        onActionTarget = { sheetTarget = it },
+                        onActionTarget = { actionTarget = it },
                         onPlayTrack = { actionTarget = null; playOnlineTrack(it) },
                         onPlayQueue = { actionTarget = null; playQueueFrom(it) },
                         onOpenPlaylist = { openHomePlaylist(it) },
@@ -1002,8 +1008,8 @@ fun OnlineMusicPanel(
                         actionTarget = null
                     },
                     onPlayNext = {
-                        // reversed: the selected songs keep their order right after the current one
-                        picks.asReversed().forEach { v -> AudioPlaybackManager.playNext(v.toAudioTrackItem()) }
+                        // the selected songs play next in the order they were selected (first selected = first)
+                        AudioPlaybackManager.playNextAll(picks.map { v -> v.toAudioTrackItem() })
                         Toast.makeText(context, if (picks.size > 1) "${picks.size} songs will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
                         actionTarget = null
                     },
@@ -1048,48 +1054,6 @@ fun OnlineMusicPanel(
                     },
                 )
             }
-        }
-
-        sheetTarget?.let { t ->
-            val kind = OnlineMediaLibrary.KIND_AUDIO
-            OmTrackActionSheet(
-                track = t,
-                isDark = isDark,
-                glassBlurTransparency = glassBlurTransparency,
-                isSavedForLater = watchLaterTracks.any { it.videoUrl == t.videoUrl },
-                onDismiss = { sheetTarget = null },
-                actions = OmSheetActions(
-                    onPlay = { playOnlineTrack(t) },
-                    onPlayNext = {
-                        AudioPlaybackManager.playNext(t.toAudioTrackItem())
-                        Toast.makeText(context, "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
-                    },
-                    onPlayLast = {
-                        AudioPlaybackManager.playLast(t.toAudioTrackItem())
-                        Toast.makeText(context, "Added to queue: ${t.title}", Toast.LENGTH_SHORT).show()
-                    },
-                    onDownload = { downloadRequest = com.example.ui.components.DownloadRequest(t.videoUrl, t.title, t.artist, t.thumbnailUrl, true) },
-                    onSaveToPlaylist = {
-                        OnlineMediaLibrary.rememberMeta(context, kind, t)
-                        playlistTargets = listOf(t)
-                    },
-                    onWatchLater = {
-                        val saved = OnlineMediaLibrary.toggleWatchLater(context, kind, t)
-                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
-                        Toast.makeText(context, if (saved) "Added to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
-                    },
-                    onShare = { shareOnlineLinks(context, listOf(t.title to t.videoUrl)) },
-                    onOpenArtist = t.artist.takeIf { it.isNotBlank() }?.let { name -> { openArtistByName(name) } },
-                    onNotInterested = {
-                        OnlineMediaLibrary.markNotInterested(context, kind, t.videoUrl)
-                        MusicTaste.markRejected(context, t.videoUrl, t.artist)
-                        OnlineMusicHomeStats.forget(context, t.videoUrl)
-                        watchLaterTracks = OnlineMediaLibrary.watchLater(context, kind)
-                        hiddenVersion++
-                        Toast.makeText(context, "Okay, you will see fewer songs like this", Toast.LENGTH_SHORT).show()
-                    }
-                )
-            )
         }
 
         if (playlistTargets.isNotEmpty()) {
@@ -1413,28 +1377,15 @@ private object OmHomeBuilder {
         return out
     }
 
-    /** 9 per page, at least 4 pages: most repeated / newest played songs, opened playlists, then charts of the listener's taste. */
-    private fun speedDial(c: android.content.Context, fill: List<OnlineTrackResult>, extras: List<OnlineTrackResult>): OmHomeSection.SpeedDial {
-        val songs = OnlineMusicHomeStats.topSongs(c, 60).filter { it.videoUrl !in hiddenNow }.take(40).map { trackTile(it) }
-        val playlists = OnlineMusicHomeStats.playlists(c, 12)
-        val mixed = ArrayList<OmHomeTile>()
-        var si = 0
-        var pi = 0
-        while (si < songs.size || pi < playlists.size) {
-            repeat(3) { if (si < songs.size) mixed.add(songs[si++]) }
-            if (pi < playlists.size) mixed.add(playlists[pi++])
-        }
-        val seen = mixed.mapNotNull { it.track }.map { baseKey(it) }.toMutableSet()
-        for (t in fill) {
-            if (mixed.size >= 36) break
-            if (t.videoUrl !in hiddenNow && seen.add(baseKey(t))) mixed.add(trackTile(t))
-        }
-        val dial = mixed.take(45).toMutableList()
-        // exactly two fresh songs (different artists / genres), spread out: never next to each other
-        val fresh = extras.filter { it.videoUrl !in hiddenNow && baseKey(it) !in seen }.distinctBy { baseKey(it) }.take(2)
-        val slots = listOf(4, 16)
-        fresh.forEachIndexed { i, t -> dial.add(slots[i].coerceAtMost(dial.size), trackTile(t)) }
-        return OmHomeSection.SpeedDial(dial)
+    /** The speed dial ("Your orbit"): only songs the listener keeps replaying, at most 3 pages of 9. Nothing to show = no section. */
+    private fun speedDial(c: android.content.Context): OmHomeSection.SpeedDial? {
+        val songs = MusicTaste.speedDialSongs(c, 40)
+            .map(::playedToTrack)
+            .filter { it.videoUrl !in hiddenNow }
+            .distinctBy { baseKey(it) }
+            .take(27)
+            .map { trackTile(it) }
+        return if (songs.isEmpty()) null else OmHomeSection.SpeedDial(songs)
     }
 
     private fun convert(feed: List<MusicFeedSection>): List<OmHomeSection> = feed.mapNotNull { s ->
@@ -1463,22 +1414,21 @@ private object OmHomeBuilder {
         val fill = feed.firstOrNull { it.id == "trending" }?.tracks.orEmpty() + feed.firstOrNull { it.id == "popular" }?.tracks.orEmpty()
         if (com.example.util.YtmSession.isConnected()) return emptyList()
         if (OnlineMusicHomeState.chips.isEmpty()) OnlineMusicHomeState.chips.addAll(chipsFor(c))
-        return dedupe(listOfNotNull(speedDial(c, fill, emptyList()), forgottenFavorites(c)) + convert(feed), used)
+        return dedupe(listOfNotNull(speedDial(c), forgottenFavorites(c)) + convert(feed), used)
     }
 
     suspend fun firstBatch(c: android.content.Context, used: MutableSet<String>): List<OmHomeSection> = kotlinx.coroutines.coroutineScope {
         refreshHidden(c)
-        val extrasJob = async { try { MusicRecoEngine.speedDialExtras(c, 2) } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { emptyList() } }
         // Connected YouTube Music account: its own home (listen again, quick picks, mixes, recommendations) is the home
         val ytm = if (com.example.util.YtmSession.isConnected()) {
             try { com.example.util.YtmAccountClient.home() } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { com.example.util.YtmHome(emptyList(), emptyList()) }
         } else com.example.util.YtmHome(emptyList(), emptyList())
         if (ytm.shelves.size >= 2) {
-            extrasJob.cancel()
             // exactly the account's home, in its order, with its chips: no local speed dial, no local rows
             OnlineMusicHomeState.chips.clear()
             OnlineMusicHomeState.chips.addAll(ytm.chips.map { OmChip(it.label, it.params) })
-            val sections = dedupeKeepingOrder(ytmSections("om_ytm", ytm.shelves))
+            // the speed dial (songs he keeps replaying) stays on top of the account's own home too
+            val sections = listOfNotNull(speedDial(c)) + dedupeKeepingOrder(ytmSections("om_ytm", ytm.shelves))
             sections.forEach { used.add(it.key) }
             return@coroutineScope sections
         }
@@ -1491,7 +1441,7 @@ private object OmHomeBuilder {
         val converted = convert(feed)
         val lead = converted.filter { it.key == "om_quick_picks" || it.key == "om_recent" || it.key == "om_similar" }
         val rest = converted.filterNot { it in lead }
-        val out = dedupe(listOfNotNull(speedDial(c, fill, extrasJob.await()), listenAgain(c)) + lead + listOfNotNull(forgottenFavorites(c)) + rest, used)
+        val out = dedupe(listOfNotNull(speedDial(c), listenAgain(c)) + lead + listOfNotNull(forgottenFavorites(c)) + rest, used)
         out.forEach { used.add(it.key) }
         out
     }
@@ -1711,9 +1661,13 @@ private fun OmChipRow(chips: List<OmChip>, selected: String?, isDark: Boolean, o
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun OmSpeedDialTile(tile: OmHomeTile, isDark: Boolean, modifier: Modifier, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
+private fun OmSpeedDialTile(tile: OmHomeTile, isDark: Boolean, modifier: Modifier, selected: Boolean = false, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     val isPlaylist = tile.playlistUrl != null
-    Box(modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(14.dp)).combinedClickable(onClick = onClick, onLongClick = onLongClick)) {
+    Box(
+        modifier = modifier.aspectRatio(1f).clip(RoundedCornerShape(14.dp))
+            .then(if (selected) Modifier.border(3.dp, com.example.ui.theme.AccentGradient, RoundedCornerShape(14.dp)) else Modifier)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    ) {
         OmCover(tile.covers, Modifier.fillMaxSize(), isDark)
         Box(
             Modifier.fillMaxSize().background(
@@ -1730,6 +1684,26 @@ private fun OmSpeedDialTile(tile: OmHomeTile, isDark: Boolean, modifier: Modifie
             )
             if (isPlaylist) Text(text = "\u203A", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         }
+    }
+}
+
+/** "Your orbit": a round badge, the title with "From your listening" under it and "Play all" (gradient line) at the far end. */
+@Composable
+private fun OmSpeedDialHeader(primary: Color, secondary: Color, isDark: Boolean, onPlayAll: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(androidx.compose.foundation.shape.CircleShape).background(com.example.ui.theme.AccentGradient),
+            contentAlignment = Alignment.Center
+        ) { Text("\u266B", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Your orbit", color = primary, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("From your listening", color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        OmPlayAll(primary, onPlayAll)
     }
 }
 
@@ -1753,7 +1727,7 @@ private fun OmSongRow(
     selected: Boolean, onSwipe: () -> Unit, onClick: () -> Unit
 ) {
     val views = formatViews(track.viewCount)
-    // Tap = play. Hold the row, or touch the three dots = the actions sheet from the bottom (download, playlist ...)
+    // Tap = play. Hold the row = the quick action bar at the bottom (play next, download, playlist ...); hold more rows to select several
     Row(
         modifier = Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
@@ -1771,10 +1745,6 @@ private fun OmSongRow(
                 color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
         }
-        Box(
-            Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape).clickable { onSwipe() },
-            contentAlignment = Alignment.Center
-        ) { Text("\u22EE", color = secondary, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
     }
 }
 
@@ -1848,19 +1818,29 @@ private fun OmHomeFeed(
                         }
                     }
                     is OmHomeSection.SpeedDial -> {
-                        val pages = section.tiles.filter { it.visible() }.chunked(9)
+                        val dialTiles = section.tiles.filter { it.visible() }.take(27)
+                        val pages = dialTiles.chunked(9)
                         val pager = androidx.compose.foundation.pager.rememberPagerState(pageCount = { pages.size.coerceAtLeast(1) })
-                        if (pages.isNotEmpty()) androidx.compose.foundation.pager.HorizontalPager(state = pager, pageSpacing = 10.dp, modifier = Modifier.fillMaxWidth()) { page ->
-                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                pages[page].chunked(3).forEach { row ->
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        row.forEach { t -> OmSpeedDialTile(t, isDark, Modifier.weight(1f), onLongClick = t.track?.let { tr -> { onActionTarget(tr) } }) { tileClick(t) } }
-                                        repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                        if (pages.isNotEmpty()) {
+                            OmSpeedDialHeader(primary, secondary, isDark) { onPlayQueue(dialTiles.mapNotNull { it.track }) }
+                            androidx.compose.foundation.pager.HorizontalPager(state = pager, pageSpacing = 10.dp, modifier = Modifier.fillMaxWidth()) { page ->
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    pages[page].chunked(3).forEach { row ->
+                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                            row.forEach { t ->
+                                                OmSpeedDialTile(
+                                                    t, isDark, Modifier.weight(1f),
+                                                    selected = t.track != null && actionState.contains(t.track),
+                                                    onLongClick = t.track?.let { tr -> { onActionTarget(tr) } }
+                                                ) { tileClick(t) }
+                                            }
+                                            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                                        }
                                     }
                                 }
                             }
+                            if (pages.size > 1) OmDots(pages.size, pager.currentPage, isDark)
                         }
-                        if (pages.size > 1) OmDots(pages.size, pager.currentPage, isDark)
                     }
                     is OmHomeSection.SongMixes -> {
                         Column {

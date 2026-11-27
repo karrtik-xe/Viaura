@@ -26,6 +26,13 @@ object OnlineSearchRanker {
         "fanmade", "jukebox", "nonstop", "non stop", "mix", "megamix", "compilation", "edit", "shorts", "dj", "trending reels"
     )
 
+    /** Words that mean the video is not a song (films, vlogs, talks, games ...). */
+    private val NOT_A_SONG = listOf(
+        "vlog", "vlogs", "podcast", "interview", "full movie", "episode", "trailer", "teaser", "scene", "comedy", "news",
+        "review", "gameplay", "live stream", "livestream", "making of", "behind the scenes", "explained", "documentary",
+        "full show", "webisode", "audio launch", "press conference", "motivational", "speech"
+    )
+
     private val OFFICIAL_CHANNEL_HINTS = listOf(
         "vevo", "- topic", "official", "t-series", "tseries", "sony music", "zee music", "tips", "saregama", "speed records",
         "universal music", "warner", "atlantic records", "def jam", "columbia", "t series", "yrf", "eros now", "times music",
@@ -76,7 +83,11 @@ object OnlineSearchRanker {
         // official / label / "- Topic" channel, or the channel is the very artist named in the query
         val channelRaw = item.artist.lowercase(Locale.ROOT)
         if (OFFICIAL_CHANNEL_HINTS.any { channelRaw.contains(it) }) s += 12.0
+        // read from the raw uploader (the shown name has " - Topic" / "VEVO" / "Official" removed): the original upload wins
+        if (item.isOfficialSource) s += 24.0
         if (artistTokens.isNotEmpty() && artistTokens.any { it in qTokens }) s += 8.0
+        // the very artist named in the query, uploading it officially: the original artist comes first
+        if (item.isOfficialSource && artistTokens.isNotEmpty() && artistTokens.all { it in qTokens || it in title.split(' ') }) s += 10.0
 
         // the original is the most played one
         if (item.viewCount > 0L) s += min(45.0, ln(item.viewCount.toDouble() + 1.0) / ln(10.0) * 5.0)
@@ -90,6 +101,16 @@ object OnlineSearchRanker {
 
         // clips / shorts
         if (item.durationSec in 1L..44L) s -= 30.0
+
+        // not a song at all: vlogs, interviews, films, long videos, live streams (unless the user typed that word himself)
+        var notSong = 0
+        for (word in NOT_A_SONG) {
+            if (phraseRegex(word).containsMatchIn(title) && !phraseRegex(word).containsMatchIn(q)) notSong++
+        }
+        if (notSong > 0) s -= 45.0
+        if (item.durationSec > 12 * 60L && !item.isOfficialSource) s -= 30.0
+        if (item.durationSec > 25 * 60L) s -= 40.0
+        if (item.isLive || item.durationSec == 0L) s -= 40.0
 
         // YouTube's own order only breaks ties
         s += 6.0 / (1.0 + position)

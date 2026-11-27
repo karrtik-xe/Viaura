@@ -1972,7 +1972,7 @@ fun HomeScreen(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                BasicTextField(
+                                com.example.ui.components.CaretEndTextField(
                                     value = searchQuery,
                                     onValueChange = { searchQuery = it },
                                     singleLine = true,
@@ -3206,17 +3206,21 @@ fun HomeScreen(
                         .bounceClick(scaleDown = 0.88f) {
                             coroutineScope.launch(Dispatchers.IO) {
                                 val folderPath = selectedMusicFolder?.path
-                                val resume = AudioPlaybackHistoryManager.getLastTrack(context, folderPath)
+                                // the Online music folder has no real path: its Recent button resumes the last ONLINE song
+                                val inOnlineFolder = folderPath == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH
+                                val resume = if (inOnlineFolder) AudioPlaybackHistoryManager.getLastOnlineTrack(context)
+                                    else AudioPlaybackHistoryManager.getLastTrack(context, folderPath)
+                                val sessionQueue = if (resume != null) AudioPlaybackManager.queueOfLastSession(context, resume) else emptyList()
                                 // Nothing played here yet: start from the FIRST track of this folder (natural
                                 // name order) and queue the rest in that order.
-                                val firstRun: List<AudioTrackItem> = if (resume == null) {
+                                val firstRun: List<AudioTrackItem> = if (resume == null && !inOnlineFolder) {
                                     val all = AudioLibraryCache.getCachedTracks().orEmpty()
                                     val inFolder = if (folderPath.isNullOrBlank()) all else all.filter { it.path.startsWith(folderPath) }
                                     inFolder.sortedWith { a, b -> NaturalOrderComparator.compare(a.title, b.title) }
                                 } else emptyList()
                                 withContext(Dispatchers.Main) {
                                     if (resume != null) {
-                                        AudioPlaybackManager.playRecentTrack(context, resume)
+                                        AudioPlaybackManager.playRecentTrack(context, resume, sessionQueue = sessionQueue)
                                     } else if (firstRun.isNotEmpty()) {
                                         AudioPlaybackManager.playTrack(context, firstRun.first(), firstRun)
                                         AudioPlaybackManager.openFullScreen()

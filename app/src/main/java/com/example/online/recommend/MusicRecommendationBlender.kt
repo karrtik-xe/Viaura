@@ -709,6 +709,28 @@ object MusicTaste {
             Played(k.removePrefix("t:"), o.optString("title"), o.optString("artist"), o.optString("thumb").ifBlank { null }, o.optLong("dur"), o.optLong("last"), o.optInt("plays"), o.optInt("comp"))
         }.sortedByDescending { it.last }.take(n)
 
+    /** A song must be listened to this many times (really listened, not skipped) to enter the speed dial. */
+    const val SPEED_DIAL_MIN_PLAYS = 3
+    /** A song not heard for this many days leaves the speed dial (it fades to the back before that). */
+    const val SPEED_DIAL_MAX_IDLE_DAYS = 4
+
+    /**
+     * The speed dial songs: only songs the listener keeps replaying (at least [SPEED_DIAL_MIN_PLAYS] real listens), best first.
+     * The score falls with every day a song is not played again, so songs he lost interest in slide to the back and are gone
+     * after [SPEED_DIAL_MAX_IDLE_DAYS] days without a replay.
+     */
+    fun speedDialSongs(c: Context, limit: Int): List<Played> {
+        val now = System.currentTimeMillis()
+        val dayMs = 86_400_000.0
+        return store.entries(c).filter { it.first.startsWith("t:") && qualified(it.second) }
+            .map { (k, o) ->
+                Played(k.removePrefix("t:"), o.optString("title"), o.optString("artist"), o.optString("thumb").ifBlank { null }, o.optLong("dur"), o.optLong("last"), o.optInt("plays"), o.optInt("comp"))
+            }
+            .filter { it.title.isNotBlank() && it.plays >= SPEED_DIAL_MIN_PLAYS && (now - it.last) < SPEED_DIAL_MAX_IDLE_DAYS * dayMs }
+            .sortedByDescending { it.plays * Math.pow(0.5, (now - it.last) / dayMs / 1.5) }
+            .take(limit)
+    }
+
     /** Artists with at least [minSongs] DIFFERENT songs played (the "I keep replaying this creator" signal), strongest first. */
     fun repeatedArtists(c: Context, minSongs: Int): List<Pair<String, Int>> =
         store.entries(c).filter { it.first.startsWith("t:") && qualified(it.second) && it.second.optString("artist").isNotBlank() }

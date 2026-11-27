@@ -576,7 +576,7 @@ fun SharedPlaylistScreen(
                     },
                     onPlayNext = {
                         // reversed: the selected songs keep their order right after the current one
-                        picks.asReversed().forEach { AudioPlaybackManager.playNext(it) }
+                        AudioPlaybackManager.playNextAll(picks)
                         Toast.makeText(context, if (picks.size > 1) "${picks.size} songs will play next" else "Will play next: ${t.title}", Toast.LENGTH_SHORT).show()
                         swipeActionTrack = null
                     },

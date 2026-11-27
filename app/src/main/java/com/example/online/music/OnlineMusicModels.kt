@@ -51,7 +51,9 @@ data class OnlineTrackResult(
     val channelUrl: String? = null,
     val channelAvatarUrl: String? = null,
     /** A live stream (no duration): shown with a LIVE tag. */
-    val isLive: Boolean = false
+    val isLive: Boolean = false,
+    /** Uploaded by the artist / label / a "- Topic" art-track channel / a verified channel (the original song, not a re-upload). */
+    val isOfficialSource: Boolean = false
 )
 
 /**

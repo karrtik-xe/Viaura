@@ -1133,7 +1133,7 @@ fun SubtitleSearchHeader(
             contentAlignment = Alignment.CenterStart
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                BasicTextField(
+                com.example.ui.components.CaretEndTextField(
                     value = state.query,
                     onValueChange = { state.query = it },
                     modifier = Modifier.weight(1f),

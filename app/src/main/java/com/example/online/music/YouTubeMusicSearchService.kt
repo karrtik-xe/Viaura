@@ -189,7 +189,8 @@ object OnlineMusicService {
                     uploadDateEpochMs = uploadEpoch,
                     viewCount = item.viewCount.coerceAtLeast(0L),
                     channelUrl = item.channelUrlOrNull(),
-                    channelAvatarUrl = item.channelAvatarOrNull()
+                    channelAvatarUrl = item.channelAvatarOrNull(),
+                    isOfficialSource = item.isOfficialSourceOrFalse()
                 )
             }
         val channelResults = OnlineSearchRanker.relevantChannels(
@@ -198,9 +199,38 @@ object OnlineMusicService {
         )
         val searchSuggestion = try { extractor.searchSuggestion } catch (_: Throwable) { null }
         val isCorrected = try { extractor.isCorrectedSearch } catch (_: Throwable) { false }
+        var ranked = OnlineSearchRanker.rank(query, results)
+        // No official upload (artist / label / "- Topic" art track) among the first results: search the original once more and merge it
+        if (ranked.take(6).none { it.isOfficialSource } && query.trim().length >= 3) {
+            val extra = try {
+                kotlinx.coroutines.withTimeoutOrNull(4500L) {
+                    val ex = service.getSearchExtractor(service.searchQHFactory.fromQuery(query.trim() + " official audio"))
+                    ex.fetchPage()
+                    ex.initialPage.items.filterIsInstance<StreamInfoItem>().map { item ->
+                        OnlineTrackResult(
+                            videoUrl = item.url,
+                            title = item.name?.takeIf { it.isNotBlank() } ?: query,
+                            artist = (item.uploaderName ?: "").cleanUploaderName(),
+                            durationSec = item.duration.coerceAtLeast(0L),
+                            thumbnailUrl = extractBestThumbnailUrl(item.thumbnails, item.url),
+                            uploadDateText = item.textualUploadDate,
+                            uploadDateEpochMs = parseUploadDate(item.uploadDate, item.textualUploadDate),
+                            viewCount = item.viewCount.coerceAtLeast(0L),
+                            channelUrl = item.channelUrlOrNull(),
+                            channelAvatarUrl = item.channelAvatarOrNull(),
+                            isOfficialSource = item.isOfficialSourceOrFalse()
+                        )
+                    }.filter { it.isOfficialSource }
+                }
+            } catch (t: kotlinx.coroutines.CancellationException) { throw t } catch (_: Throwable) { null }
+            if (!extra.isNullOrEmpty()) {
+                val have = ranked.map { it.videoUrl }.toSet()
+                ranked = OnlineSearchRanker.rank(query, ranked + extra.filter { it.videoUrl !in have })
+            }
+        }
         val page = OnlineMusicPage(
             // the original / most played upload of what was typed goes first (covers, remixes, clips go below it)
-            items = OnlineSearchRanker.rank(query, results),
+            items = ranked,
             nextPage = if (initialPage.hasNextPage()) initialPage.nextPage else null,
             hasNextPage = initialPage.hasNextPage(),
             searchSuggestion = searchSuggestion,
@@ -250,7 +280,8 @@ object OnlineMusicService {
                         uploadDateEpochMs = uploadEpoch,
                         viewCount = item.viewCount.coerceAtLeast(0L),
                         channelUrl = item.channelUrlOrNull(),
-                        channelAvatarUrl = item.channelAvatarOrNull()
+                        channelAvatarUrl = item.channelAvatarOrNull(),
+                    isOfficialSource = item.isOfficialSourceOrFalse()
                     )
                 }
             OnlineMusicPage(
@@ -291,7 +322,8 @@ object OnlineMusicService {
                         uploadDateEpochMs = uploadEpoch,
                         viewCount = item.viewCount.coerceAtLeast(0L),
                         channelUrl = item.channelUrlOrNull(),
-                        channelAvatarUrl = item.channelAvatarOrNull()
+                        channelAvatarUrl = item.channelAvatarOrNull(),
+                    isOfficialSource = item.isOfficialSourceOrFalse()
                     )
                 }
         } catch (e: Exception) {
@@ -558,6 +590,15 @@ object OnlineMusicService {
 
     private fun StreamInfoItem.channelUrlOrNull(): String? =
         try { this.uploaderUrl?.takeIf { it.isNotBlank() } } catch (_: Throwable) { null }
+
+    /**
+     * The upload of the song itself: a "- Topic" art track, a VEVO / "Official" channel or a verified channel. This has to be read
+     * from the RAW uploader name (cleanUploaderName() removes " - Topic" / "VEVO" / "Official" from the name that is shown).
+     */
+    private fun StreamInfoItem.isOfficialSourceOrFalse(): Boolean = try {
+        val raw = (this.uploaderName ?: "").lowercase(Locale.ROOT)
+        raw.endsWith("- topic") || raw.endsWith("vevo") || raw.contains("official") || this.isUploaderVerified
+    } catch (_: Throwable) { false }
 
     private fun StreamInfoItem.channelAvatarOrNull(): String? =
         try { extractBestThumbnailUrl(this.uploaderAvatars, null) } catch (_: Throwable) { null }

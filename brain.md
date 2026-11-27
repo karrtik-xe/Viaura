@@ -2027,3 +2027,11 @@ Format: `Symbol` → file path under `app/src/main/java/com/example/`. Lower-cas
 - `YtmAccountClient.home()` now returns `YtmHome` (chips + shelves with style / strapline / header avatar); `homeForChip(params)` loads a mood chip.
 - Songs of the feed: tap = play; hold the row or touch the three dots = `OmTrackActionSheet` (`OnlineMusicActionSheet.kt`, same glass sheet as `PlaylistBottomSheet`). Search results keep the swipe bar.
 - `ChannelDetailPage.kt`: date sort keeps videos without a date at their own place (`effectiveUploadTimes`) instead of sinking to the bottom.
+
+## Update 3 — Your orbit (speed dial), quick action bar in the music feed, Recent button queue, search caret
+- Speed dial = "Your orbit" (`online/ui/OnlineMusicHomePanel.kt`): only songs with >= `MusicTaste.SPEED_DIAL_MIN_PLAYS` real listens (`MusicTaste.speedDialSongs`, `online/recommend/MusicRecommendationBlender.kt`), gone after `SPEED_DIAL_MAX_IDLE_DAYS` days without a replay, max 3 pages of 9. Also shown on top of the connected YouTube Music home. The music home is rebuilt quietly when the screen is entered again.
+- Music feed songs use `OnlineQuickActionBar` (hold a song / tile, hold more to multi-select); the three-dot button of the song rows is gone (`OnlineMusicActionSheet.kt` is no longer used by the feed).
+- `AudioPlaybackManager.playNextAll(list)` (`audio/AudioQueuePlaybackCore.kt`): several songs "Play next" in selection order; `skipNext` prefers songs set with "Play next".
+- Recent (floating) button of Music: `AudioPlaybackHistoryManager.getLastOnlineTrack` for the Online folder + `AudioQueueSnapshotStore` (`audio/AudioResumeHistoryStore.kt`) restores the queue behind the last song after a restart (`AudioPlaybackManager.queueOfLastSession`, `playRecentTrack(sessionQueue=)`).
+- Search: `OnlineTrackResult.isOfficialSource` (read from the raw uploader name before " - Topic"/VEVO is stripped) feeds `OnlineSearchRanker`; non-song videos are pushed down; one backup search "<query> official audio" when no official upload is in the first 6.
+- `CaretEndTextField` (`util/VoiceSearchButton.kt`): search boxes keep the cursor at the END after voice input.

@@ -184,3 +184,37 @@ fun VoiceSearchButton(
         )
     }
 }
+
+/**
+ * Search text field whose cursor always sits at the END of the text. A text that is changed from outside (the microphone
+ * writing what was said, a tapped suggestion) moves the cursor after the last letter instead of leaving it at the start.
+ * Typing keeps the normal cursor handling.
+ */
+@Composable
+fun CaretEndTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    singleLine: Boolean = true,
+    textStyle: androidx.compose.ui.text.TextStyle = androidx.compose.ui.text.TextStyle.Default,
+    cursorBrush: androidx.compose.ui.graphics.Brush = androidx.compose.ui.graphics.SolidColor(Color.Black),
+    keyboardOptions: androidx.compose.foundation.text.KeyboardOptions = androidx.compose.foundation.text.KeyboardOptions.Default,
+    keyboardActions: androidx.compose.foundation.text.KeyboardActions = androidx.compose.foundation.text.KeyboardActions.Default,
+    decorationBox: @Composable (innerTextField: @Composable () -> Unit) -> Unit = { it() }
+) {
+    var field by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(value, androidx.compose.ui.text.TextRange(value.length))) }
+    if (field.text != value) {
+        field = androidx.compose.ui.text.input.TextFieldValue(value, androidx.compose.ui.text.TextRange(value.length))
+    }
+    androidx.compose.foundation.text.BasicTextField(
+        value = field,
+        onValueChange = { field = it; if (it.text != value) onValueChange(it.text) },
+        modifier = modifier,
+        singleLine = singleLine,
+        textStyle = textStyle,
+        cursorBrush = cursorBrush,
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        decorationBox = decorationBox
+    )
+}

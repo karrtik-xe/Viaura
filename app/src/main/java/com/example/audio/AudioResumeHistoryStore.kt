@@ -105,6 +105,10 @@ object AudioPlaybackHistoryManager {
         return candidates.maxByOrNull { it.lastWatchedTimestamp }
     }
 
+    /** The online song played last (the Online music folder has no real folder path, so it cannot be matched by folder). */
+    fun getLastOnlineTrack(context: Context): AudioPlaybackResume? =
+        getAllHistory(context).filter { it.isOnline }.maxByOrNull { it.lastWatchedTimestamp }
+
     fun getAllHistory(context: Context): List<AudioPlaybackResume> {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val all = prefs.all
@@ -242,4 +246,59 @@ data class AudioPlaybackResume(
 
     val formattedDuration: String
         get() = VideoPlaybackRecord.formatTimestamp(durationMs)
+}
+
+/**
+ * The play queue of the last session (the playing song and the songs around it), saved quietly while music plays, so the
+ * floating Recent button can bring back the last song AND the tracks behind it after the app was restarted.
+ */
+object AudioQueueSnapshotStore {
+    private const val PREFS = "audio_queue_snapshot_v1"
+    private const val KEY = "queue"
+    private const val MAX_TRACKS = 80
+
+    fun save(context: Context, queue: List<AudioTrackItem>, currentId: Long?) {
+        if (queue.isEmpty()) return
+        try {
+            val curIdx = queue.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+            val from = (curIdx - 10).coerceAtLeast(0)
+            val window = queue.drop(from).take(MAX_TRACKS)
+            val arr = org.json.JSONArray()
+            window.forEach { t ->
+                val online = t.path.startsWith("online://")
+                arr.put(
+                    org.json.JSONObject()
+                        .put("id", t.id)
+                        // a stream link of an online song expires: only the song itself is kept, the link is resolved again
+                        .put("uri", if (online) "" else t.uri.toString())
+                        .put("title", t.title).put("artist", t.artist).put("album", t.album)
+                        .put("dur", t.durationMs).put("path", t.path).put("format", t.format)
+                        .put("thumb", t.thumbnailUrl ?: "")
+                )
+            }
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY, org.json.JSONObject().put("current", currentId ?: 0L).put("tracks", arr).toString()).apply()
+        } catch (_: Throwable) {}
+    }
+
+    fun load(context: Context): List<AudioTrackItem> {
+        return try {
+            val raw = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null) ?: return emptyList()
+            val arr = org.json.JSONObject(raw).getJSONArray("tracks")
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                val uri = o.optString("uri")
+                AudioTrackItem(
+                    id = o.optLong("id"),
+                    uri = if (uri.isBlank()) android.net.Uri.EMPTY else android.net.Uri.parse(uri),
+                    title = o.optString("title"), artist = o.optString("artist"), album = o.optString("album"),
+                    durationMs = o.optLong("dur"), path = o.optString("path"), sizeBytes = 0L,
+                    format = o.optString("format").ifBlank { "STREAM" },
+                    thumbnailUrl = o.optString("thumb").ifBlank { null }
+                )
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
 }

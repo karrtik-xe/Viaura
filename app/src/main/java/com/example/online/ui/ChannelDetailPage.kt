@@ -550,7 +550,7 @@ fun ChannelDetailScreen(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                BasicTextField(
+                                com.example.ui.components.CaretEndTextField(
                                     value = searchQuery,
                                     onValueChange = { searchQuery = it },
                                     singleLine = true,
