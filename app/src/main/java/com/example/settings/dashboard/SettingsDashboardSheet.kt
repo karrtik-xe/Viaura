@@ -527,6 +527,24 @@ fun SettingsSheet(
 
     // Subtitle font directory picker & individual font files picker.
     var fontListVersion by remember { mutableIntStateOf(0) }
+    val savedFontDirUri = uiState.playerSettings.subtitleFontDirectoryUri
+    var fontAutoReimportDone by remember { mutableStateOf(false) }
+    LaunchedEffect(savedFontDirUri) {
+        if (savedFontDirUri.isNotBlank() && !fontAutoReimportDone) {
+            fontAutoReimportDone = true
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val count = SubtitleFontManager.importFontsFromTree(context, Uri.parse(savedFontDirUri))
+                    if (count > 0) {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            fontListVersion++
+                            onPlayerSettingsChange(uiState.playerSettings.copy(subtitleFontsReloadNonce = System.currentTimeMillis()))
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+    }
     val fontDirectoryPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->

@@ -706,8 +706,8 @@ fun DownloadsTabContent(
     if (showDeleteConfirm) {
         val namesToDelete = sortedItems.filter { it.id in selectedIds }.map { it.title }
         DeleteConfirmSheet(
-            title = "Delete ${selectedIds.size} ${if (selectedIds.size == 1) "download" else "downloads"}?",
-            message = "This action cannot be undone. Finished files and any downloading pieces will be permanently deleted.",
+            title = "Remove ${selectedIds.size} ${if (selectedIds.size == 1) "download" else "downloads"}?",
+            message = "Finished files will stay in your folder — only the download list entry will be removed. Unfinished downloads will be cancelled.",
             itemNames = namesToDelete,
             isDark = isDark,
             onDismiss = { showDeleteConfirm = false },
@@ -720,7 +720,7 @@ fun DownloadsTabContent(
                         DownloadManager.remove(context, id)
                     }
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "${idsToRemove.size} downloads deleted", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "${idsToRemove.size} ${if (idsToRemove.size == 1) "download" else "downloads"} removed", Toast.LENGTH_SHORT).show()
                     }
                 }
             }

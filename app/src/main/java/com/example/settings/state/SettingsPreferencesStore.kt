@@ -644,7 +644,7 @@ object SettingsPreferencesManager {
     }
 
     fun loadLayoutMode(context: Context, tabId: String = "home"): LayoutMode {
-        val defaultLayout = LayoutMode.LIST.name
+        val defaultLayout = if (tabId == "online_video" || tabId == "online_playlist_video") LayoutMode.YOUTUBE.name else LayoutMode.LIST.name
         val key = if (tabId == "home") KEY_LAYOUT_MODE else "${KEY_LAYOUT_MODE}_$tabId"
         val prefs = getPrefs(context)
         var str = prefs.getString(key, null)

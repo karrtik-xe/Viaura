@@ -4,6 +4,12 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -16,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
@@ -616,9 +624,7 @@ fun OnlineVideoPanel(
                     }
                 }
                 when {
-                    st.subsLoading && st.subsGroups.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
-                    }
+                    (st.subsLoading && st.subsGroups.isEmpty()) || st.isRefreshing -> VitubeFeedSkeleton(isDark = isDark)
                     visibleGroups.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
                             if (SubscribedChannelsManager.getAll(context).isEmpty()) "You have not subscribed to any channel yet. Subscribe to a channel and its newest videos show up here."
@@ -684,9 +690,7 @@ fun OnlineVideoPanel(
             }
             activeTab == "live" -> {
                 when {
-                    st.liveLoading && st.liveResults.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
-                    }
+                    (st.liveLoading && st.liveResults.isEmpty()) || st.isRefreshing -> VitubeFeedSkeleton(isDark = isDark)
                     st.liveResults.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("No live streams found right now. Pull down to refresh.", color = secondaryText, modifier = Modifier.padding(32.dp), textAlign = TextAlign.Center)
                     }
@@ -708,10 +712,8 @@ fun OnlineVideoPanel(
                     }
                 }
             }
-            st.isSearching && st.results.isEmpty() -> {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
-                }
+            (st.isSearching && st.results.isEmpty()) || st.isRefreshing -> {
+                VitubeFeedSkeleton(isDark = isDark)
             }
             shown.isEmpty() && st.channelResults.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1142,6 +1144,107 @@ private fun SubsChannelHeader(name: String, avatarUrl: String?, isDark: Boolean,
                 listOfNotNull(subscribersText?.takeIf { it.isNotBlank() }, "latest videos").joinToString(" \u2022 "),
                 color = secondaryText, fontSize = 12.sp, maxLines = 1
             )
+        }
+    }
+}
+
+/** Shared sweeping shine/shimmer brush for Vitube and Otube feed loading skeletons. */
+@Composable
+internal fun rememberSkeletonShimmerBrush(isDark: Boolean): Brush {
+    val transition = rememberInfiniteTransition(label = "feed-skeleton-shimmer")
+    val shift by transition.animateFloat(
+        initialValue = -600f,
+        targetValue = 1600f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1250, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "feed-skeleton-shift"
+    )
+    val base = if (isDark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.07f)
+    val highlight = if (isDark) Color.White.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.16f)
+    return Brush.linearGradient(
+        colors = listOf(base, highlight, base),
+        start = Offset(shift, shift * 0.35f),
+        end = Offset(shift + 520f, shift * 0.35f + 260f)
+    )
+}
+
+/** Shining Feed-style skeleton placeholders for Vitube (matches [OnlineYouTubeVideoCard] layout). */
+@Composable
+private fun VitubeFeedSkeleton(isDark: Boolean) {
+    val surfaceColor = if (isDark) DarkGlassSurface else LightGlassSurface
+    val borderColor = if (isDark) com.example.ui.theme.DarkGlassBorder else com.example.ui.theme.LightGlassBorder
+    val shape = RoundedCornerShape(16.dp)
+    val shimmer = rememberSkeletonShimmerBrush(isDark)
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        userScrollEnabled = false
+    ) {
+        items(4) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .cardSurface {
+                        this.liquidGlassOr(shape, isDark, LocalPanelTransparency.current, elevation = 4.dp, backdropBlur = false) {
+                            this
+                                .clip(shape)
+                                .background(cardTone(surfaceColor))
+                                .border(1.dp, borderColor, shape)
+                        }
+                    }
+                    .padding(1.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(topStart = 15.dp, topEnd = 15.dp))
+                        .background(shimmer)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(10.dp),
+                    verticalAlignment = Alignment.Top,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(shimmer)
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.92f)
+                                .height(14.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(shimmer)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.68f)
+                                .height(14.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(shimmer)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.52f)
+                                .height(11.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(shimmer)
+                        )
+                    }
+                }
+            }
         }
     }
 }

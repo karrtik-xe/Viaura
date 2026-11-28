@@ -126,12 +126,49 @@ object SubtitleFontManager {
         return name.lowercase(java.util.Locale.ROOT).replace(Regex("[\\s_\\-]+"), "")
     }
 
+    @Volatile private var legacyCacheMigrated = false
+    @Volatile private var customTreeSynced = false
+
     fun getSubFontsDir(context: Context): File {
-        val dir = File(context.cacheDir, FONTS_DIR_NAME)
+        // Store subtitle fonts in persistent filesDir instead of cacheDir so app updates or
+        // Android cache cleanups never wipe user-imported fonts.
+        val dir = File(context.filesDir, FONTS_DIR_NAME)
         if (!dir.exists()) {
             dir.mkdirs()
         }
+        if (!legacyCacheMigrated) {
+            legacyCacheMigrated = true
+            try {
+                val legacyDir = File(context.cacheDir, FONTS_DIR_NAME)
+                if (legacyDir.exists() && legacyDir.isDirectory) {
+                    legacyDir.listFiles()?.forEach { file ->
+                        if (file.isFile && file.length() > 0L) {
+                            val target = File(dir, file.name)
+                            if (!target.exists() || target.length() == 0L) {
+                                file.copyTo(target, overwrite = true)
+                            }
+                        }
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to migrate legacy cache fonts", t)
+            }
+        }
         return dir
+    }
+
+    /** Re-imports fonts from the user's saved SAF font folder once per session if configured. */
+    fun syncCustomFontTreeIfNeeded(context: Context) {
+        if (customTreeSynced) return
+        customTreeSynced = true
+        try {
+            val uriStr = com.example.ui.state.PlayerSettings.load(context).subtitleFontDirectoryUri
+            if (uriStr.isNotBlank()) {
+                importFontsFromTree(context, android.net.Uri.parse(uriStr))
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to auto-sync custom font directory", t)
+        }
     }
 
     private fun fontRegistryPrefs(context: Context): android.content.SharedPreferences =
@@ -195,6 +232,7 @@ object SubtitleFontManager {
                 removeStaleBundledFont(context, fontsDir)
                 assetsFontsSynced = true
             }
+            syncCustomFontTreeIfNeeded(context)
             prepareSystemFallbackFonts(context, fontsDir)
             ensureDefaultFontAliases(fontsDir)
         } catch (t: Throwable) {
@@ -227,6 +265,7 @@ object SubtitleFontManager {
                 removeStaleBundledFont(context, fontsDir)
                 assetsFontsSynced = true
             }
+            syncCustomFontTreeIfNeeded(context)
             prepareSystemFallbackFonts(context, fontsDir)
             ensureDefaultFontAliases(fontsDir)
         } catch (t: Throwable) {

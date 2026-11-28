@@ -812,6 +812,7 @@ fun OnlineMusicPanel(
                     } else OmHomeFeed(
                         sections = if (home.tab == "home" && home.selectedChip != null) home.chipSections else tabSections,
                         loadingMore = if (home.tab == "home") (home.loadingMore && home.selectedChip == null) else home.tabLoading,
+                        refreshing = st.isRefreshing,
                         chips = if (home.tab == "home") home.chips else emptyList(),
                         selectedChip = home.selectedChip,
                         chipLoading = home.chipLoading,
@@ -847,10 +848,8 @@ fun OnlineMusicPanel(
                     )
                 }
             }
-            isSearching && results.isEmpty() -> {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    ViauraExpressiveLoadingIndicator(size = 54.dp, isDark = isDark)
-                }
+            (isSearching && results.isEmpty()) || (st.isRefreshing && !isFeedMode) -> {
+                OtubeSearchSkeleton(isDark = isDark)
             }
             hasSearchedOnce && results.isEmpty() -> {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1766,7 +1765,8 @@ private fun OmHomeFeed(
     chips: List<OmChip> = emptyList(),
     selectedChip: String? = null,
     chipLoading: Boolean = false,
-    onChip: (OmChip?) -> Unit = {}
+    onChip: (OmChip?) -> Unit = {},
+    refreshing: Boolean = false
 ) {
     val primary = if (isDark) DarkTextPrimary else LightTextPrimary
     val secondary = if (isDark) DarkTextSecondary else LightTextSecondary
@@ -1791,7 +1791,12 @@ private fun OmHomeFeed(
         if (chips.isNotEmpty()) {
             item(key = "om_chips") { OmChipRow(chips, selectedChip, isDark, onChip) }
         }
-        sections.forEach { section ->
+        if (refreshing) {
+            item(key = "om_refresh_skeleton") {
+                OtubeFeedSkeletonContent(isDark = isDark)
+            }
+        } else {
+            sections.forEach { section ->
             item(key = section.key) {
                 when (section) {
                     is OmHomeSection.SongColumns -> {
@@ -1974,16 +1979,23 @@ private fun OmHomeFeed(
                 }
             }
         }
-        if (emptyText != null && sections.isEmpty() && !loadingMore) {
-            item(key = "om_empty") {
-                Box(Modifier.fillMaxWidth().padding(vertical = 80.dp), contentAlignment = Alignment.Center) {
-                    Text(emptyText, color = secondary, fontSize = 14.sp)
+        }
+        if (!refreshing) {
+            if (emptyText != null && sections.isEmpty() && !loadingMore && !chipLoading) {
+                item(key = "om_empty") {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 80.dp), contentAlignment = Alignment.Center) {
+                        Text(emptyText, color = secondary, fontSize = 14.sp)
+                    }
                 }
-            }
-        } else if (loadingMore || sections.isEmpty()) {
-            item(key = "om_loading") {
-                Box(Modifier.fillMaxWidth().padding(vertical = if (sections.isEmpty()) 120.dp else 24.dp), contentAlignment = Alignment.Center) {
-                    ViauraExpressiveLoadingIndicator(size = if (sections.isEmpty()) 54.dp else 36.dp, isDark = isDark)
+            } else if (sections.isEmpty() || chipLoading) {
+                item(key = "om_skeleton_loading") {
+                    OtubeFeedSkeletonContent(isDark = isDark)
+                }
+            } else if (loadingMore) {
+                item(key = "om_loading") {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                        ViauraExpressiveLoadingIndicator(size = 36.dp, isDark = isDark)
+                    }
                 }
             }
         }
@@ -2007,6 +2019,92 @@ private fun OmSquareRow(items: List<OmHomeTile>, isDark: Boolean, primary: Color
                 )
                 Text(t.title, color = primary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
                 if (t.subtitle.isNotBlank()) Text(t.subtitle, color = secondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+/** Shining Otube audio-feed skeleton (chips, speed dial grid, song rows, and square album row). */
+@Composable
+private fun OtubeFeedSkeletonContent(isDark: Boolean) {
+    val shimmer = rememberSkeletonShimmerBrush(isDark)
+    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        // Chip row placeholder
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(64.dp, 82.dp, 70.dp, 90.dp).forEach { w ->
+                Box(Modifier.width(w).height(32.dp).clip(RoundedCornerShape(10.dp)).background(shimmer))
+            }
+        }
+        // Speed Dial header + 3x3 square tiles
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.width(130.dp).height(20.dp).clip(RoundedCornerShape(6.dp)).background(shimmer))
+            repeat(2) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    repeat(3) {
+                        Box(Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(shimmer))
+                    }
+                }
+            }
+        }
+        // Song rows section ("Quick picks" / SongColumns style)
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.width(150.dp).height(20.dp).clip(RoundedCornerShape(6.dp)).background(shimmer))
+            repeat(4) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Box(Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)).background(shimmer))
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(Modifier.fillMaxWidth(0.75f).height(13.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                        Box(Modifier.fillMaxWidth(0.45f).height(11.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                    }
+                }
+            }
+        }
+        // Square album/playlist row
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.width(140.dp).height(20.dp).clip(RoundedCornerShape(6.dp)).background(shimmer))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val tileW = screenW * 0.42f
+                repeat(3) {
+                    Column(Modifier.width(tileW), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(10.dp)).background(shimmer))
+                        Box(Modifier.fillMaxWidth(0.8f).height(13.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                        Box(Modifier.fillMaxWidth(0.5f).height(11.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Shining search-results skeleton for Otube audio search. */
+@Composable
+private fun OtubeSearchSkeleton(isDark: Boolean) {
+    val shimmer = rememberSkeletonShimmerBrush(isDark)
+    androidx.compose.foundation.lazy.LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 120.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        userScrollEnabled = false
+    ) {
+        items(8) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(Modifier.size(54.dp).clip(RoundedCornerShape(10.dp)).background(shimmer))
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Box(Modifier.fillMaxWidth(0.78f).height(14.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                    Box(Modifier.fillMaxWidth(0.48f).height(11.dp).clip(RoundedCornerShape(5.dp)).background(shimmer))
+                }
             }
         }
     }

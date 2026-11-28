@@ -212,12 +212,12 @@ object DownloadManager {
         }
     }
 
-    /** Delete: a finished download loses its file, an unfinished one its pieces. */
+    /** Remove a download entry from the list. Finished files on disk are kept; unfinished downloads are cancelled. */
     fun remove(context: Context, id: String) {
         val app = context.applicationContext
         val item = DownloadStore.get(id) ?: return
         if (item.status == DownloadStatus.COMPLETED) {
-            DownloadFileSaver.delete(app, item)
+            // Only remove the record from the Downloads UI — keep the saved video/audio file in its folder.
             DownloadStore.remove(app, id)
         } else {
             cancel(app, id)

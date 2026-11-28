@@ -1891,9 +1891,10 @@ fun HomeScreen(
                             isSearchActive = !isSearchActive
                             if (!isSearchActive) searchQuery = ""
                         },
-                        // no Sort & View in Otube (online music has its own home); search and settings stay
+                        // no Sort & View in Otube (online music has its own home) or Vitube (locked to Feed); search and settings stay
                         onSortClick = if ((effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) ||
-                            (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH)
+                            (effectiveSelectedTab == NavigationTab.MUSIC && selectedMusicFolder?.path == com.example.ui.screens.ONLINE_FOLDER_SENTINEL_PATH) ||
+                            (effectiveSelectedTab == NavigationTab.HOME && isOnlineVideoOpen)
                         ) null else { { showSortAndViewDialog = true } },
                         onDownloadClick = if (effectiveSelectedTab == NavigationTab.NETWORK && !showDownloads) {
                             {
@@ -2332,7 +2333,7 @@ fun HomeScreen(
                         com.example.ui.components.OnlineVideoPanel(
                             isDark = isDark,
                             searchQuery = searchQuery,
-                            layoutMode = onlineVideoLayoutMode,
+                            layoutMode = LayoutMode.YOUTUBE,
                             visibleFields = onlineVideoVisibleFields,
                             sortField = onlineVideoSortField,
                             sortDirection = onlineVideoSortDirection,
